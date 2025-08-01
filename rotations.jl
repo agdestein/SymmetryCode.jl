@@ -46,6 +46,17 @@ mats
 mats[8]
 mats[7]
 
+t = @SMatrix [
+    11 12 13
+    21 22 23
+    31 32 33
+]
+
+m = mats[4, 2]
+det(m)
+
+map(m -> m * t * m', mats)
+map(m -> m * t * m', mats) .|> display;
 
 m = mats[3] * mats[7]
 findfirst(==(m), mats |> vec)
@@ -62,9 +73,29 @@ map(m -> findfirst(==(m), mats), products)
 
 mats
 
+"""
+Represent all the tensor components within a control volume.
+"""
 struct CenterTensor{T}
-    diag::NTuple{3, T}
-    plus::NTuple{3, SMatrix{2,2,T,4}}
-    minus::NTuple{3, SMatrix{2,2,T,4}}
+    """
+    The quantity `diag[k]` is equal to ``σ_{k, k}(x)`` where ``x`` is the volume center.
+    """
+    diag::NTuple{3,T}
+
+    """
+    The quantity
+    `edge[k,a,pi,pj]` is equal to
+    ``σ_{i,j}(x \\pm h/2 e_i \\pm h/2 e_j)`` if `a == 1`,
+    ``σ_{j,i}(x \\pm h/2 e_i \\pm h/2 e_j)`` if `a == 2`,
+    where
+    ``x`` is the volume center,
+    ``i \\prec j \\prec k`` are oriented positively,
+    ``\\pm h/2 e_i`` uses ``+`` if `pi == 1` and ``-`` if `pi == 2`,
+    and similarly for `pj`.
+    """
+    edge::SArray{Tuple{3,2,2,2},T,4,24}
 end
 
+diag = (1.0, 2.0, 3.0)
+edge = @SArray randn(3, 2, 2, 2)
+t = CenterTensor(diag, edge)
