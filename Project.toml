@@ -1,7 +1,7 @@
 name = "SymmetryCode"
 uuid = "2d6de738-f7fd-4f9b-92b2-fcb71f56fcc5"
-version = "0.1.0"
 authors = ["Syver Døving Agdestein <syverda@gmail.com>"]
+version = "1.0.0"
 
 [deps]
 CUDA = "052768ef-5323-5732-b1bb-66c8b64840ba"
@@ -9,18 +9,20 @@ KernelAbstractions = "63c18a36-062a-441e-b654-da1e3ab1ce7c"
 LinearAlgebra = "37e2e46d-f89d-539d-b4ee-838fcccc9c8e"
 Lux = "b2108857-7c20-44ae-9111-449ecde12c47"
 Random = "9a3f8284-a2c9-5f02-9a11-845980a1fd5c"
+Seneca = "efa56dca-8940-42fc-9bb6-a411bb84c5bd"
 StaticArrays = "90137ffa-7385-5640-81b9-e52037218182"
 Turbulox = "25c03aae-1219-43c4-862d-5fc87f57ed09"
 WGLMakie = "276b4fcb-3e11-5398-bf8b-a0c2d153d008"
 
 [sources]
 Turbulox = {path = "../Turbulox"}
+Seneca = {path = "../Seneca"}
 
 [compat]
 CUDA = "5"
 KernelAbstractions = "0.9"
 LinearAlgebra = "1"
-Lux = "1.20.2"
-Random = "1.11.0"
+Lux = "1"
+Random = "1"
 StaticArrays = "1"
-WGLMakie = "0.13.6"
+WGLMakie = "0.13"

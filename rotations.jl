@@ -17,58 +17,6 @@ using SymmetryCode
 using StaticArrays
 using WGLMakie
 
-struct Grid{T}
-    l::T
-    n::Int
-end
-
-@inline (g::Grid)(i) = mod1(i, g.n)
-@inline (g::Grid)(I::CartesianIndex) = CartesianIndex(map(g, I.I))
-@inline dx(g::Grid) = g.l / g.n
-@inline shift(I::CartesianIndex{N}, i, n) where {N} =
-    CartesianIndex(ntuple(j -> ifelse(j == i, I[j] + n, I[j]), N))
-@inline fd(g, f, I, i) = (f[shift(I, i, +1)|>g] - f[shift(I, i, -1)|>g]) / 2 / dx(g)
-@inline fd(g, u, I, i, j) =
-    (u[shift(I, j, +1)|>g][i] - u[shift(I, j, -1)|>g][i]) / 2 / dx(g)
-@kernel function grad!(g::Grid, ∇u, u)
-    I = @index(Global, Cartesian)
-    ∇u[I] = @SMatrix [fd(g, u, I, i, j) for i = 1:3, j = 1:3]
-end
-@kernel function grad_scalar!(g::Grid, ∇f, f)
-    I = @index(Global, Cartesian)
-    ∇f[I] = @SVector [fd(g, f, I, i) for i = 1:3]
-end
-function apply!(
-    kernel,
-    g::Grid,
-    args;
-    backend = CPU(),
-    workgroupsize = 64,
-    ndrange = (g.n, g.n, g.n),
-)
-    kernel(backend, workgroupsize)(args...; ndrange)
-    nothing
-end
-
-function transform_scalar(f, (p, s))
-    f = permutedims(f, p)
-    dims = (findall(==(-1), s)...,)
-    f = reverse(f; dims)
-end
-function transform_vector(u, (p, s))
-    u = permutedims(u, p)
-    dims = (findall(==(-1), s)...,)
-    u = reverse(u; dims)
-    m = roto_reflection_matrix(p, s)
-    u = map(u -> m * u, u)
-end
-function transform_tensor(t, (p, s))
-    t = permutedims(t, p)
-    dims = (findall(==(-1), s)...,)
-    m = roto_reflection_matrix(p, s)
-    t = map(t -> m * t * m', t)
-end
-
 (; permutations, signs, elements, mats, cayley) = octahedral_group()
 
 (; r_lift, r_sink, r_mid) = get_weight_projectors()
@@ -135,16 +83,18 @@ let
     nrx - rnx
 end
 
+rng = Xoshiro(0)
+
 let
-    f = f64
+    f = f32
     proj_lift = Dense(48 * 9 => 48 * 9; use_bias = false)
     proj_sink = Dense(9 * 48 => 9 * 48; use_bias = false)
     proj_mid = Dense(48^2 => 48^2; use_bias = false)
-    proj_lift_ps, _ = Lux.setup(Xoshiro(0), proj_lift) |> f
+    proj_lift_ps, _ = Lux.setup(rng, proj_lift) |> f
     proj_lift_ps.weight .= r_lift
-    proj_sink_ps, _ = Lux.setup(Xoshiro(0), proj_sink) |> f
+    proj_sink_ps, _ = Lux.setup(rng, proj_sink) |> f
     proj_sink_ps.weight .= r_sink
-    proj_mid_ps, _ = Lux.setup(Xoshiro(0), proj_mid) |> f
+    proj_mid_ps, _ = Lux.setup(rng, proj_mid) |> f
     proj_mid_ps.weight .= r_mid
     project(ps, b) = (;
         layer_1 = (;
@@ -153,7 +103,7 @@ let
                 48,
                 9,
             ),
-            bias = fill(b, 48),
+            bias = fill(b.layer_1, 48),
         ),
         layer_2 = (;
             weight = reshape(
@@ -161,7 +111,7 @@ let
                 48,
                 48,
             ),
-            bias = fill(b, 48),
+            bias = fill(b.layer_2, 48),
         ),
         layer_3 = (;
             weight = reshape(
@@ -169,7 +119,7 @@ let
                 48,
                 48,
             ),
-            bias = fill(b, 48),
+            bias = fill(b.layer_3, 48),
         ),
         layer_4 = (;
             weight = reshape(
@@ -177,7 +127,7 @@ let
                 48,
                 48,
             ),
-            bias = fill(b, 48),
+            bias = fill(b.layer_4, 48),
         ),
         layer_5 = (;
             weight = reshape(
@@ -188,23 +138,127 @@ let
         ),
     )
     net = Chain(
-        Dense(9 => 48, relu),
-        Dense(48 => 48, relu),
-        Dense(48 => 48, relu),
-        Dense(48 => 48, relu),
+        Dense(9 => 48, gelu),
+        Dense(48 => 48, gelu),
+        Dense(48 => 48, gelu),
+        Dense(48 => 48, gelu),
         Dense(48 => 9),
     )
-    ps, st = Lux.setup(Xoshiro(0), net) |> f
-    b = 1.0 |> f
+    ps, st = Lux.setup(rng, net) |> f
+    T = eltype(ps.layer_1.weight)
+    a = T(0)
+    b = (;
+        layer_1 = a * randn(rng, T),
+        layer_2 = a * randn(rng, T),
+        layer_3 = a * randn(rng, T),
+        layer_4 = a * randn(rng, T),
+    )
     ps = project(ps, b)
-    i = 5
+    i = 11
     mat = mats[i]
-    x = @SMatrix randn(Float32, 3, 3)
+    x = @SMatrix(randn(3, 3)) |> f
     rx = mat * x * mat'
-    nx = net(reshape(Array(x), 9, 1), ps, st)[1] |> x -> reshape(x, 3, 3) |> SMatrix{3,3,Float32,9}
-    nrx = net(reshape(Array(rx), 9, 1), ps, st)[1] |> x -> reshape(x, 3, 3) |> SMatrix{3,3,Float32,9}
+    nx =
+        net(reshape(Array(x), 9, 1), ps, st)[1] |>
+        x -> reshape(x, 3, 3) |> SMatrix{3,3,eltype(x),9}
+    nrx =
+        net(reshape(Array(rx), 9, 1), ps, st)[1] |>
+        x -> reshape(x, 3, 3) |> SMatrix{3,3,eltype(x),9}
     rnx = mat * nx * mat'
-    nrx - rnx
+    nrx - rnx |> display
+    nothing
+end
+
+# With multiple channels
+let
+    f = f64
+    proj_lift = Dense(48 * 9 => 48 * 9; use_bias = false)
+    proj_sink = Dense(9 * 48 => 9 * 48; use_bias = false)
+    proj_mid = Dense(48^2 => 48^2; use_bias = false)
+    proj_lift_ps, _ = Lux.setup(rng, proj_lift) |> f
+    proj_lift_ps.weight .= r_lift
+    proj_sink_ps, _ = Lux.setup(rng, proj_sink) |> f
+    proj_sink_ps.weight .= r_sink
+    proj_mid_ps, _ = Lux.setup(rng, proj_mid) |> f
+    proj_mid_ps.weight .= r_mid
+    function project_lift(ps)
+        w, b = ps.weight, ps.bias
+        s_out, s_in = size(w)
+        c_out, c_in = div(s_out, 48), div(s_in, 9)
+        w = reshape(w, 48, c_out, 9, c_in)
+        w = permutedims(w, (1, 3, 2, 4))
+        w = reshape(w, 48 * 9, :)
+        w = proj_lift(w, proj_lift_ps, (;)) |> first
+        w = reshape(w, 48, 9, c_out, c_in)
+        w = permutedims(w, (1, 3, 2, 4))
+        weight = reshape(w, s_out, s_in)
+        bias = fill(b, s_out)
+        (; weight, bias)
+    end
+    function project_mid(ps)
+        w, b = ps.weight, ps.bias
+        s_out, s_in = size(w)
+        c_out, c_in = div(s_out, 48), div(s_in, 48)
+        w = reshape(w, 48, c_out, 48, c_in)
+        w = permutedims(w, (1, 3, 2, 4))
+        w = reshape(w, 48 * 48, :)
+        w = proj_mid(w, proj_mid_ps, (;)) |> first
+        w = reshape(w, 48, 48, c_out, c_in)
+        w = permutedims(w, (1, 3, 2, 4))
+        weight = reshape(w, s_out, s_in)
+        bias = fill(b, s_out)
+        (; weight, bias)
+    end
+    function project_sink(ps)
+        w = ps.weight
+        s_out, s_in = size(w)
+        c_out, c_in = div(s_out, 9), div(s_in, 48)
+        w = reshape(w, 9, c_out, 48, c_in)
+        w = permutedims(w, (1, 3, 2, 4))
+        w = reshape(w, 9 * 48, :)
+        w = proj_sink(w, proj_sink_ps, (;)) |> first
+        w = reshape(w, 9, 48, c_out, c_in)
+        w = permutedims(w, (1, 3, 2, 4))
+        weight = reshape(w, s_out, s_in)
+        (; weight)
+    end
+    project(ps) = (;
+        layer_1 = project_lift(ps.layer_1),
+        layer_2 = project_mid(ps.layer_2),
+        layer_3 = project_mid(ps.layer_3),
+        layer_4 = project_mid(ps.layer_4),
+        layer_5 = project_sink(ps.layer_5),
+    )
+    net = Chain(
+        Dense(9 => 48 * 10, gelu),
+        Dense(48 * 10 => 48 * 10, gelu),
+        Dense(48 * 10 => 48 * 20, gelu),
+        Dense(48 * 20 => 48 * 20, gelu),
+        Dense(48 * 20 => 9),
+    )
+    ps, st = Lux.setup(rng, net) |> f
+    T = eltype(ps.layer_1.weight)
+    a = T(0)
+    ps = (;
+        layer_1 = (; ps.layer_1.weight, bias = a * randn(rng, T)),
+        layer_2 = (; ps.layer_2.weight, bias = a * randn(rng, T)),
+        layer_3 = (; ps.layer_3.weight, bias = a * randn(rng, T)),
+        layer_4 = (; ps.layer_4.weight, bias = a * randn(rng, T)),
+        layer_5 = (; ps.layer_5.weight),
+    )
+    ps = project(ps)
+    i = 11
+    mat = mats[i]
+    x = @SMatrix(randn(3, 3)) |> f
+    rx = mat * x * mat'
+    nx =
+        net(reshape(Array(x), 9, 1), ps, st)[1] |> x -> reshape(x, 3, 3) |> SMatrix{3,3,eltype(x),9}
+    nrx =
+        net(reshape(Array(rx), 9, 1), ps, st)[1] |>
+        x -> reshape(x, 3, 3) |> SMatrix{3,3,eltype(x),9}
+    rnx = mat * nx * mat'
+    nrx - rnx |> display
+    nothing
 end
 
 let
