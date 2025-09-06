@@ -10,12 +10,12 @@ if false
 end
 
 # using KernelAbstractions
-# using LinearAlgebra
+using LinearAlgebra
 using Lux
 using Random
 using SymmetryCode
 # using StaticArrays
-# using WGLMakie
+using WGLMakie
 
 
 SymmetryCode.test_equivariant_dense()
@@ -32,6 +32,25 @@ end
 (; permutations, signs, elements, mats, cayley) = octahedral_group()
 
 (; r_lift, r_sink, r_mid) = get_weight_projectors()
+
+e = eigen(r_lift / 48; sortby = -)
+e = eigen(r_mid / 48; sortby = -)
+e = eigen(r_sink / 48; sortby = -)
+e = r_mid / 48 |> svd
+e = r_sink / 48 |> svd
+
+s.U[:, 1:9]
+
+s.S
+
+r_lift * r_lift / 48^2 - r_lift / 48 |> extrema
+
+uu = reshape(s.U[:, 1:9], 48, 9, 9)
+uu[:, :, 1] * sqrt(48)
+uu[:, :, 7] * sqrt(48) .|> x -> round(x; digits = 2)
+
+s.U * Diagonal(s.S) * s.Vt
+s.U[:, 1:9] |> extrema
 
 let
     ip, is = 2, 1

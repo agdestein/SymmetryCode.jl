@@ -1,5 +1,6 @@
 module SymmetryCode
 
+using Adapt
 using LinearAlgebra
 using Lux
 using Random

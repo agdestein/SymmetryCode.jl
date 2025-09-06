@@ -18,6 +18,7 @@ Rz(θ) = @SMatrix [
 
 export Rx, Ry, Rz
 
+"Get roto-reflection matrix from permutation and sign-flip."
 @inline roto_reflection_matrix(p, s) = @SMatrix [s[i] * (p[i] == j) for i = 1:3, j = 1:3]
 @inline function invtransform(p, s)
     pinv = invperm(p)
@@ -26,7 +27,7 @@ export Rx, Ry, Rz
 end
 
 """
-Get group element of the octohedral group and related quantities.
+Get group elements of the octahedral group and related quantities.
 
 The octahedral group is composed of 90-degree rotations around
 (and reflections along) the 3 canonical axes.
@@ -74,31 +75,31 @@ export roto_reflection_matrix, invtransform, octahedral_group
 
 function get_weight_projectors()
     (; permutations, signs, elements, cayley) = octahedral_group()
-    r = map(Iterators.product(1:48, 1:3, 1:3, 1:48, 1:3, 1:3)) do (m, x, y, n, i, j)
+    r_lift = map(Iterators.product(1:48, 1:3, 1:3, 1:48, 1:3, 1:3)) do (m, x, y, n, i, j)
         sum(1:48) do g
             gp, gs = elements[g]
             p, s = permutations[gp], signs[gs]
             s[x] * s[y] * (cayley[g, n] == m) * (p[x] == i) * (p[y] == j)
         end
     end
-    r_lift = reshape(r, 48 * 9, 48 * 9)
-    r = map(Iterators.product(1:3, 1:3, 1:48, 1:3, 1:3, 1:48)) do (x, y, m, i, j, n)
-        sum(1:48) do g
-            gp, gs = elements[g]
-            p, s = permutations[gp], signs[gs]
-            s[x] * s[y] * (cayley[g, n] == m) * (p[x] == i) * (p[y] == j)
-        end
-    end
-    r_sink = reshape(r, 9 * 48, 9 * 48)
-    r = map(Iterators.product(1:48, 1:48, 1:48, 1:48)) do (m, n, a, b)
+    r_lift = reshape(r_lift, 48 * 9, 48 * 9)
+    r_mid = map(Iterators.product(1:48, 1:48, 1:48, 1:48)) do (m, n, a, b)
         sum(1:48) do g
             # a => b
             # m => n
             (cayley[g, a] == m) * (cayley[g, b] == n)
         end
     end
-    r_mid = reshape(r, 48^2, 48^2)
-    (; r_lift, r_sink, r_mid)
+    r_mid = reshape(r_mid, 48^2, 48^2)
+    r_sink = map(Iterators.product(1:3, 1:3, 1:48, 1:3, 1:3, 1:48)) do (x, y, m, i, j, n)
+        sum(1:48) do g
+            gp, gs = elements[g]
+            p, s = permutations[gp], signs[gs]
+            s[x] * s[y] * (cayley[g, n] == m) * (p[x] == i) * (p[y] == j)
+        end
+    end
+    r_sink = reshape(r_sink, 9 * 48, 9 * 48)
+    (; r_lift, r_mid, r_sink)
 end
 
 function test_equivariant_dense()
@@ -277,7 +278,7 @@ function test_equivariant_conv()
     net |> display
     ps, st = Lux.setup(rng, net) |> f
     T = eltype(ps.lift.weight)
-    a = T(0)
+    a = T(0.1)
     ps = (;
         lift = (; ps.lift.weight, bias = a * randn(rng, T)),
         mid_1 = (; ps.mid_1.weight, bias = a * randn(rng, T)),
@@ -304,6 +305,116 @@ function test_equivariant_conv()
     # rnx = nx[cayley[i, :] |> invperm]
     # nrx - rnx |> display
     # nothing
+end
+
+function test_equivariant_conv_sparse()
+    (; permutations, signs, elements, mats, cayley) = octahedral_group()
+    (; r_lift, r_sink, r_mid) = get_weight_projectors()
+    rng = Xoshiro(0)
+    T, f = Float64, f64
+    D = 3
+    nten = D^2
+    nreg = 48
+    e_lift = eigen(r_lift / nreg; sortby = -).vectors[:, 1:nten]
+    e_mid = eigen(r_mid / nreg; sortby = -).vectors[:, 1:nreg]
+    e_sink = eigen(r_sink / nreg; sortby = -).vectors[:, 1:nten]
+    proj_lift = Dense(nten => nten * nreg; use_bias = false)
+    proj_sink = Dense(nten => nreg * nten; use_bias = false)
+    proj_mid = Dense(nreg => nreg^2; use_bias = false)
+    proj_lift_ps, _ = Lux.setup(rng, proj_lift) |> f
+    copyto!(proj_lift_ps.weight, e_lift)
+    proj_sink_ps, _ = Lux.setup(rng, proj_sink) |> f
+    copyto!(proj_sink_ps.weight, e_sink)
+    proj_mid_ps, _ = Lux.setup(rng, proj_mid) |> f
+    copyto!(proj_mid_ps.weight, e_mid)
+    function project_lift(ps)
+        w, b = ps.weight, ps.bias
+        _, c_out = size(w)
+        w = proj_lift(w, proj_lift_ps, (;)) |> first
+        w = reshape(w, nreg, nten, c_out)
+        w = permutedims(w, (2, 1, 3))
+        weight = reshape(w, 1, nten, nreg * c_out)
+        bias = reshape(repeat(reshape(b, 1, :), nreg), :)
+        (; weight, bias)
+    end
+    function project_mid(ps)
+        w, b = ps.weight, ps.bias
+        _, c_out, c_in = size(w)
+        w = reshape(w, nreg, :)
+        w = proj_mid(w, proj_mid_ps, (;)) |> first
+        w = reshape(w, nreg, nreg, c_out, c_in)
+        w = permutedims(w, (2, 4, 1, 3))
+        weight = reshape(w, 1, nreg * c_in, nreg * c_out)
+        bias = reshape(repeat(reshape(b, 1, :), nreg), :)
+        (; weight, bias)
+    end
+    function project_sink(ps)
+        w = ps.weight
+        _, c_in = size(w)
+        w = proj_sink(w, proj_sink_ps, (;)) |> first
+        w = reshape(w, nten, nreg, c_in)
+        w = permutedims(w, (2, 3, 1))
+        weight = reshape(w, 1, nreg * c_in, nten)
+        (; weight)
+    end
+    nchan = [10, 10, 20, 20]
+    project(ps) = (;
+        lift = project_lift(ps.lift),
+        mid_1 = project_mid(ps.mid_1),
+        mid_2 = project_mid(ps.mid_2),
+        mid_3 = project_mid(ps.mid_3),
+        sink = project_sink(ps.sink),
+    )
+    net = Chain(;
+        lift = Conv((1,), nten => nreg * nchan[1], gelu),
+        map(
+            i ->
+                Symbol(:mid_, i) =>
+                    Conv((1,), nreg * nchan[i] => nreg * nchan[i+1], gelu),
+            1:length(nchan)-1,
+        )...,
+        sink = Conv((1,), nreg * nchan[end] => nten),
+    )
+    net |> display
+    ps = (;
+        lift = (; weight = randn(T, 9, nchan[1]), bias = randn(T, nchan[1])),
+        map(
+            i ->
+                Symbol(:mid_, i) => (;
+                    weight = randn(T, 48, nchan[i+1], nchan[i]),
+                    bias = randn(T, nchan[i+1]),
+                ),
+            1:length(nchan)-1,
+        )...,
+        sink = (; weight = randn(T, 9, nchan[end])),
+    )
+    st = map(Returns((;)), ps)
+    ps = project(ps)
+    i = 11
+    mat = mats[i]
+
+    # Input
+    x = @SMatrix(randn(3, 3)) |> f
+
+    # Rotated input
+    rx = mat * x * mat'
+
+    # Net on input
+    nx = reshape(Array(x), 1, nten, 1)
+    nx = net(nx, ps, st)[1]
+    nx = reshape(nx, D, D) |> SMatrix{D,D,T,nten}
+
+    # Net on rotated input
+    nrx = reshape(Array(rx), 1, nten, 1)
+    nrx = net(nrx, ps, st) |> first
+    nrx = reshape(nrx, D, D) |> SMatrix{D,D,T,nten}
+
+    # Rotated net'ed input
+    rnx = mat * nx * mat'
+
+    # Error in output tensor
+    nrx - rnx |> display
+    nothing
 end
 
 export get_weight_projectors
