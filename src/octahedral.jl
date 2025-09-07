@@ -483,10 +483,11 @@ function equivariant_net(setup, nchan)
         weight = reshape(w, 1, nreg * c_in, nten)
         (; weight)
     end
-    project(lift, sink, mids...) = (;
+    project(lift, sink, symm, mids...) = (;
         lift = project_lift(lift),
         map(m -> project_mid(m), mids)...,
         sink = project_sink(sink),
+        # symm = (;),
     )
     function project(ps)
         lift, mids..., sink = ps
@@ -503,18 +504,22 @@ function equivariant_net(setup, nchan)
         sink = Conv((1,), nreg * nchan[end] => nten),
     )
     net |> display
-    ps = (;
-        lift = (; weight = randn(T, nten, nchan[1]), bias = randn(T, nchan[1])),
-        map(
-            i ->
-                Symbol(:mid_, i) => (;
-                    weight = randn(T, nreg, nchan[i+1], nchan[i]),
-                    bias = randn(T, nchan[i+1]),
-                ),
-            1:length(nchan)-1,
-        )...,
-        sink = (; weight = randn(T, nten, nchan[end])),
-    ) |> dev
+    ps =
+        (;
+            lift = (;
+                weight = kaiming_uniform(rng, T, nten, nchan[1]),
+                bias = zeros(T, nchan[1]),
+            ),
+            map(
+                i ->
+                    Symbol(:mid_, i) => (;
+                        weight = kaiming_uniform(rng, T, nreg, nchan[i+1], nchan[i]),
+                        bias = zeros(T, nchan[i+1]),
+                    ),
+                1:length(nchan)-1,
+            )...,
+            sink = (; weight = kaiming_uniform(rng, T, nten, nchan[end])),
+        ) |> dev
     st = map(Returns((;)), ps)
     (; project, net, ps, st)
 end

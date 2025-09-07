@@ -1,10 +1,14 @@
 module Spectral
 
-using CUDA
+using Adapt
 using KernelAbstractions
 using LinearAlgebra
+using Lux
+using Optimisers
 using Random
 using Seneca
+using StaticArrays
+using ..SymmetryCode
 
 @inline function cutoff_index(gbar, g, i, is1)
     comp = div(g.n, gbar.n)
@@ -123,6 +127,99 @@ function create_data(setup)
     fu, fσu
 end
 
-export dns_aid, create_data
+function tensorfield_to_smatrix(t)
+    D = ndims(t[1])
+    T = eltype(t[1])
+    M = SMatrix{D,D,T,D^2}
+    M.(t...)
+end
+function smatrix_to_tensorfield(t)
+    M = eltype(t)
+    z = zero(M)
+    D = size(z, 1)
+    if D == 2
+        (;
+            xx = getindex.(t, 1, 1),
+            yx = getindex.(t, 2, 1),
+            xy = getindex.(t, 1, 2),
+            yy = getindex.(t, 2, 2),
+        )
+    elseif D == 3
+        (;
+            xx = getindex.(t, 1, 1),
+            yx = getindex.(t, 2, 1),
+            zx = getindex.(t, 3, 1),
+            xy = getindex.(t, 1, 2),
+            yy = getindex.(t, 2, 2),
+            zy = getindex.(t, 3, 2),
+            xz = getindex.(t, 1, 3),
+            yz = getindex.(t, 2, 3),
+            zz = getindex.(t, 3, 3),
+        )
+    end
+end
+
+function transform_scalar(f, (p, s))
+    f = permutedims(f, p)
+    dims = (findall(==(-1), s)...,)
+    f = reverse(f; dims)
+end
+function transform_vector(u, (p, s))
+    u = permutedims(u, p)
+    dims = (findall(==(-1), s)...,)
+    u = reverse(u; dims)
+    m = roto_reflection_matrix(p, s)
+    u = map(u -> m * u, u)
+end
+function transform_tensor(t, (p, s))
+    t = permutedims(t, p)
+    dims = (findall(==(-1), s)...,)
+    m = roto_reflection_matrix(p, s)
+    t = map(t -> m * t * m', t)
+end
+
+function train(; setup, dataloader, nepoch, learning_rate, net_stuff)
+    (; D, backend) = setup
+    g = Grid{D}(; setup.l, n = setup.n_les, backend)
+    (; project, net, ps, st) = net_stuff
+    device = adapt(backend)
+    opt = Adam(learning_rate)
+    train_state = Training.TrainState(net, ps, st, opt)
+    function loss(model, ps, st, (x, y))
+        ps = project(ps)
+        yhat = net(x, ps, st) |> first
+        ysym = if D == 2
+            xx = selectdim(yhat, 2, 1:1)
+            xy = (selectdim(yhat, 2, 2:2) + selectdim(yhat, 2, 3:3)) / 2
+            yy = selectdim(yhat, 2, 4:4)
+            hcat(xx, yy, xy)
+        else
+            xx = selectdim(yhat, 2, 1:1)
+            yy = selectdim(yhat, 2, 5:5)
+            zz = selectdim(yhat, 2, 9:9)
+            xy = (selectdim(yhat, 2, 2:2) + selectdim(yhat, 2, 4:4)) / 2
+            yz = (selectdim(yhat, 2, 6:6) + selectdim(yhat, 2, 8:8)) / 2
+            zx = (selectdim(yhat, 2, 3:3) + selectdim(yhat, 2, 7:7)) / 2
+            hcat(xx, yy, zz, xy, yz, zx)
+        end
+        l = MSELoss()(ysym, y)
+        l, st, (;)
+    end
+    for iepoch = 1:nepoch, (ibatch, batch) in enumerate(dataloader)
+        x, y = batch |> device
+        # loss(net, ps, st, (x, y)) |> display
+        _, l, _, train_state =
+            Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
+        ibatch % 1 == 0 && @info "iepoch = $iepoch, ibatch = $ibatch, loss = $l"
+    end
+    ps = train_state.parameters
+    st = train_state.states
+    net, ps, st
+end
+
+export tensorfield_to_smatrix, smatrix_to_tensorfield
+export transform_scalar, transform_vector, transform_tensor
+
+export dns_aid, create_data, train
 
 end
