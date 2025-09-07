@@ -79,15 +79,11 @@ function dns_aid()
     sum(i -> sum(abs2, v[i] - ubar[i]) / sum(abs2, ubar[i]), 1:D)
 end
 
-function create_data()
-    visc = 4e-4
+function create_data(setup)
+    (; visc, D, n_dns, n_les, backend) = setup
     t = 0.0
     cfl = 0.35
     tstop = 2e-1
-    D = 2
-    n_dns = 1024
-    n_les = 128
-    backend = CUDABackend()
     g_dns = Grid{D}(; l = 1.0, n = n_dns, backend)
     g_les = Grid{D}(; l = 1.0, n = n_les, backend)
     u = randomfield(g_dns; rng = Xoshiro(0), kpeak = 5)

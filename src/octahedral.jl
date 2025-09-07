@@ -19,7 +19,10 @@ Rz(θ) = @SMatrix [
 export Rx, Ry, Rz
 
 "Get roto-reflection matrix from permutation and sign-flip."
-@inline roto_reflection_matrix(p, s) = @SMatrix [s[i] * (p[i] == j) for i = 1:3, j = 1:3]
+@inline roto_reflection_matrix(p::NTuple{2}, s) =
+    @SMatrix [s[i] * (p[i] == j) for i = 1:2, j = 1:2]
+@inline roto_reflection_matrix(p::NTuple{3}, s) =
+    @SMatrix [s[i] * (p[i] == j) for i = 1:3, j = 1:3]
 @inline function invtransform(p, s)
     pinv = invperm(p)
     sinv = map(p -> s[p], pinv)
@@ -34,18 +37,23 @@ The octahedral group is composed of 90-degree rotations around
 We parameterize the group elements as a permutation
 of the axes followed by a sign-flip of each the axes.
 """
-function octahedral_group()
-    permutations = [(1, 2, 3), (2, 3, 1), (3, 1, 2), (3, 2, 1), (2, 1, 3), (1, 3, 2)]
-    signs = [
-        (+1, +1, +1),
-        (-1, +1, +1),
-        (+1, -1, +1),
-        (+1, +1, -1),
-        (-1, -1, +1),
-        (+1, -1, -1),
-        (-1, +1, -1),
-        (-1, -1, -1),
-    ]
+function group_stuff(D)
+    if D == 2
+        permutations = [(1, 2), (2, 1)]
+        signs = [(+1, +1), (-1, +1), (+1, -1), (-1, -1)]
+    elseif D == 3
+        permutations = [(1, 2, 3), (2, 3, 1), (3, 1, 2), (3, 2, 1), (2, 1, 3), (1, 3, 2)]
+        signs = [
+            (+1, +1, +1),
+            (-1, +1, +1),
+            (+1, -1, +1),
+            (+1, +1, -1),
+            (-1, -1, +1),
+            (+1, -1, -1),
+            (-1, +1, -1),
+            (-1, -1, -1),
+        ]
+    end
     elements =
         Iterators.product(eachindex(permutations), eachindex(signs)) |> collect |> vec
     indices = eachindex(elements)
@@ -71,45 +79,53 @@ function octahedral_group()
     )
 end
 
-export roto_reflection_matrix, invtransform, octahedral_group
+export roto_reflection_matrix, invtransform, group_stuff
 
-function get_weight_projectors()
-    (; permutations, signs, elements, cayley) = octahedral_group()
-    r_lift = map(Iterators.product(1:48, 1:3, 1:3, 1:48, 1:3, 1:3)) do (m, x, y, n, i, j)
-        sum(1:48) do g
+function get_weight_projectors(D)
+    (; permutations, signs, elements, cayley) = group_stuff(D)
+    nelement = length(elements)
+    r_lift = map(
+        Iterators.product(1:nelement, 1:D, 1:D, 1:nelement, 1:D, 1:D),
+    ) do (m, x, y, n, i, j)
+        sum(1:nelement) do g
             gp, gs = elements[g]
             p, s = permutations[gp], signs[gs]
             s[x] * s[y] * (cayley[g, n] == m) * (p[x] == i) * (p[y] == j)
         end
     end
-    r_lift = reshape(r_lift, 48 * 9, 48 * 9)
-    r_mid = map(Iterators.product(1:48, 1:48, 1:48, 1:48)) do (m, n, a, b)
-        sum(1:48) do g
+    r_lift = reshape(r_lift, nelement * D^2, nelement * D^2)
+    r_mid = map(
+        Iterators.product(1:nelement, 1:nelement, 1:nelement, 1:nelement),
+    ) do (m, n, a, b)
+        sum(1:nelement) do g
             # a => b
             # m => n
             (cayley[g, a] == m) * (cayley[g, b] == n)
         end
     end
-    r_mid = reshape(r_mid, 48^2, 48^2)
-    r_sink = map(Iterators.product(1:3, 1:3, 1:48, 1:3, 1:3, 1:48)) do (x, y, m, i, j, n)
-        sum(1:48) do g
+    r_mid = reshape(r_mid, nelement^2, nelement^2)
+    r_sink = map(
+        Iterators.product(1:D, 1:D, 1:nelement, 1:D, 1:D, 1:nelement),
+    ) do (x, y, m, i, j, n)
+        sum(1:nelement) do g
             gp, gs = elements[g]
             p, s = permutations[gp], signs[gs]
             s[x] * s[y] * (cayley[g, n] == m) * (p[x] == i) * (p[y] == j)
         end
     end
-    r_sink = reshape(r_sink, 9 * 48, 9 * 48)
+    r_sink = reshape(r_sink, D^2 * nelement, D^2 * nelement)
     (; r_lift, r_mid, r_sink)
 end
 
-function test_equivariant_dense()
-    (; permutations, signs, elements, mats, cayley) = octahedral_group()
-    (; r_lift, r_sink, r_mid) = get_weight_projectors()
+function test_equivariant_dense(D)
     rng = Xoshiro(0)
     f = f64
-    proj_lift = Dense(48 * 9 => 48 * 9; use_bias = false)
-    proj_sink = Dense(9 * 48 => 9 * 48; use_bias = false)
-    proj_mid = Dense(48^2 => 48^2; use_bias = false)
+    (; permutations, signs, elements, mats, cayley) = group_stuff(D)
+    (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
+    nelement = length(elements)
+    proj_lift = Dense(nelement * D^2 => nelement * D^2; use_bias = false)
+    proj_sink = Dense(D^2 * nelement => D^2 * nelement; use_bias = false)
+    proj_mid = Dense(nelement^2 => nelement^2; use_bias = false)
     proj_lift_ps, _ = Lux.setup(rng, proj_lift) |> f
     proj_lift_ps.weight .= r_lift
     proj_sink_ps, _ = Lux.setup(rng, proj_sink) |> f
@@ -119,12 +135,12 @@ function test_equivariant_dense()
     function project_lift(ps)
         w, b = ps.weight, ps.bias
         s_out, s_in = size(w)
-        c_out, c_in = div(s_out, 48), div(s_in, 9)
-        w = reshape(w, 48, c_out, 9, c_in)
+        c_out, c_in = div(s_out, nelement), div(s_in, D^2)
+        w = reshape(w, nelement, c_out, D^2, c_in)
         w = permutedims(w, (1, 3, 2, 4))
-        w = reshape(w, 48 * 9, :)
+        w = reshape(w, nelement * D^2, :)
         w = proj_lift(w, proj_lift_ps, (;)) |> first
-        w = reshape(w, 48, 9, c_out, c_in)
+        w = reshape(w, nelement, D^2, c_out, c_in)
         w = permutedims(w, (1, 3, 2, 4))
         weight = reshape(w, s_out, s_in)
         bias = fill(b, s_out)
@@ -133,12 +149,12 @@ function test_equivariant_dense()
     function project_mid(ps)
         w, b = ps.weight, ps.bias
         s_out, s_in = size(w)
-        c_out, c_in = div(s_out, 48), div(s_in, 48)
-        w = reshape(w, 48, c_out, 48, c_in)
+        c_out, c_in = div(s_out, nelement), div(s_in, nelement)
+        w = reshape(w, nelement, c_out, nelement, c_in)
         w = permutedims(w, (1, 3, 2, 4))
-        w = reshape(w, 48 * 48, :)
+        w = reshape(w, nelement * nelement, :)
         w = proj_mid(w, proj_mid_ps, (;)) |> first
-        w = reshape(w, 48, 48, c_out, c_in)
+        w = reshape(w, nelement, nelement, c_out, c_in)
         w = permutedims(w, (1, 3, 2, 4))
         weight = reshape(w, s_out, s_in)
         bias = fill(b, s_out)
@@ -147,12 +163,12 @@ function test_equivariant_dense()
     function project_sink(ps)
         w = ps.weight
         s_out, s_in = size(w)
-        c_out, c_in = div(s_out, 9), div(s_in, 48)
-        w = reshape(w, 9, c_out, 48, c_in)
+        c_out, c_in = div(s_out, D^2), div(s_in, nelement)
+        w = reshape(w, D^2, c_out, nelement, c_in)
         w = permutedims(w, (1, 3, 2, 4))
-        w = reshape(w, 9 * 48, :)
+        w = reshape(w, D^2 * nelement, :)
         w = proj_sink(w, proj_sink_ps, (;)) |> first
-        w = reshape(w, 9, 48, c_out, c_in)
+        w = reshape(w, D^2, nelement, c_out, c_in)
         w = permutedims(w, (1, 3, 2, 4))
         weight = reshape(w, s_out, s_in)
         (; weight)
@@ -165,11 +181,11 @@ function test_equivariant_dense()
         sink = project_sink(ps.sink),
     )
     net = Chain(;
-        lift = Dense(9 => 48 * 10, gelu),
-        mid_1 = Dense(48 * 10 => 48 * 10, gelu),
-        mid_2 = Dense(48 * 10 => 48 * 20, gelu),
-        mid_3 = Dense(48 * 20 => 48 * 20, gelu),
-        sink = Dense(48 * 20 => 9),
+        lift = Dense(D^2 => nelement * 10, gelu),
+        mid_1 = Dense(nelement * 10 => nelement * 10, gelu),
+        mid_2 = Dense(nelement * 10 => nelement * 20, gelu),
+        mid_3 = Dense(nelement * 20 => nelement * 20, gelu),
+        sink = Dense(nelement * 20 => D^2),
     )
     net |> display
     ps, st = Lux.setup(rng, net) |> f
@@ -183,34 +199,33 @@ function test_equivariant_dense()
         sink = (; ps.sink.weight),
     )
     ps = project(ps)
-    i = 11
+    i = 7
     mat = mats[i]
-    x = @SMatrix(randn(3, 3)) |> f
+    x = @SMatrix(randn(D, D)) |> f
     rx = mat * x * mat'
     nx =
-        net(reshape(Array(x), 9, 1), ps, st)[1] |>
-        x -> reshape(x, 3, 3) |> SMatrix{3,3,eltype(x),9}
+        net(reshape(Array(x), D^2, 1), ps, st)[1] |>
+        x -> reshape(x, D, D) |> SMatrix{D,D,eltype(x),D^2}
     nrx =
-        net(reshape(Array(rx), 9, 1), ps, st)[1] |>
-        x -> reshape(x, 3, 3) |> SMatrix{3,3,eltype(x),9}
+        net(reshape(Array(rx), D^2, 1), ps, st)[1] |>
+        x -> reshape(x, D, D) |> SMatrix{D,D,eltype(x),D^2}
     rnx = mat * nx * mat'
     nrx - rnx |> display
     nothing
-    # nx = net(reshape(Array(x), 9, 1), ps, st)[1] |> x -> reshape(x, 48)
-    # nrx = net(reshape(Array(rx), 9, 1), ps, st)[1] |> x -> reshape(x, 48)
+    # nx = net(reshape(Array(x), D^2, 1), ps, st)[1] |> x -> reshape(x, 48)
+    # nrx = net(reshape(Array(rx), D^2, 1), ps, st)[1] |> x -> reshape(x, 48)
     # rnx = nx[invperm(cayley[i, :])]
     # nrx - rnx |> display
     # nothing
 end
 
-function test_equivariant_conv()
-    (; permutations, signs, elements, mats, cayley) = octahedral_group()
-    (; r_lift, r_sink, r_mid) = get_weight_projectors()
+function test_equivariant_conv(D)
     rng = Xoshiro(0)
     f = f64
-    D = 3
     nten = D^2
-    nreg = 48
+    (; permutations, signs, elements, mats, cayley) = group_stuff(D)
+    (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
+    nreg = length(elements)
     proj_lift = Dense(nten * nreg => nten * nreg; use_bias = false)
     proj_sink = Dense(nreg * nten => nreg * nten; use_bias = false)
     proj_mid = Dense(nreg^2 => nreg^2; use_bias = false)
@@ -287,9 +302,9 @@ function test_equivariant_conv()
         sink = (; ps.sink.weight),
     )
     ps = project(ps)
-    i = 11
+    i = 7
     mat = mats[i]
-    x = @SMatrix(randn(3, 3)) |> f
+    x = @SMatrix(randn(D, D)) |> f
     rx = mat * x * mat'
     nx =
         net(reshape(Array(x), 1, nten, 1), ps, st)[1] |>
@@ -307,14 +322,13 @@ function test_equivariant_conv()
     # nothing
 end
 
-function test_equivariant_conv_sparse()
-    (; permutations, signs, elements, mats, cayley) = octahedral_group()
-    (; r_lift, r_sink, r_mid) = get_weight_projectors()
+function test_equivariant_conv_sparse(D)
     rng = Xoshiro(0)
     T, f = Float64, f64
-    D = 3
     nten = D^2
-    nreg = 48
+    (; permutations, signs, elements, mats, cayley) = group_stuff(D)
+    (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
+    nreg = length(elements)
     e_lift = eigen(r_lift / nreg; sortby = -).vectors[:, 1:nten]
     e_mid = eigen(r_mid / nreg; sortby = -).vectors[:, 1:nreg]
     e_sink = eigen(r_sink / nreg; sortby = -).vectors[:, 1:nten]
@@ -377,24 +391,24 @@ function test_equivariant_conv_sparse()
     )
     net |> display
     ps = (;
-        lift = (; weight = randn(T, 9, nchan[1]), bias = randn(T, nchan[1])),
+        lift = (; weight = randn(T, nten, nchan[1]), bias = randn(T, nchan[1])),
         map(
             i ->
                 Symbol(:mid_, i) => (;
-                    weight = randn(T, 48, nchan[i+1], nchan[i]),
+                    weight = randn(T, nreg, nchan[i+1], nchan[i]),
                     bias = randn(T, nchan[i+1]),
                 ),
             1:length(nchan)-1,
         )...,
-        sink = (; weight = randn(T, 9, nchan[end])),
+        sink = (; weight = randn(T, nten, nchan[end])),
     )
     st = map(Returns((;)), ps)
     ps = project(ps)
-    i = 11
+    i = 6
     mat = mats[i]
 
     # Input
-    x = @SMatrix(randn(3, 3)) |> f
+    x = @SMatrix(randn(D, D)) |> f
 
     # Rotated input
     rx = mat * x * mat'
@@ -417,4 +431,92 @@ function test_equivariant_conv_sparse()
     nothing
 end
 
-export get_weight_projectors
+function equivariant_net(setup, nchan)
+    (; D, backend) = setup
+    dev = adapt(backend)
+    # dev = identity
+    rng = Xoshiro(0)
+    T, f = Float64, f64
+    nten = D^2
+    (; elements) = group_stuff(D)
+    (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
+    nreg = length(elements)
+    e_lift = eigen(r_lift / nreg; sortby = -).vectors[:, 1:nten]
+    e_mid = eigen(r_mid / nreg; sortby = -).vectors[:, 1:nreg]
+    e_sink = eigen(r_sink / nreg; sortby = -).vectors[:, 1:nten]
+    proj_lift = Dense(nten => nten * nreg; use_bias = false)
+    proj_sink = Dense(nten => nreg * nten; use_bias = false)
+    proj_mid = Dense(nreg => nreg^2; use_bias = false)
+    proj_lift_ps, _ = Lux.setup(rng, proj_lift) |> f |> dev
+    copyto!(proj_lift_ps.weight, e_lift)
+    proj_sink_ps, _ = Lux.setup(rng, proj_sink) |> f |> dev
+    copyto!(proj_sink_ps.weight, e_sink)
+    proj_mid_ps, _ = Lux.setup(rng, proj_mid) |> f |> dev
+    copyto!(proj_mid_ps.weight, e_mid)
+    function project_lift(ps)
+        w, b = ps.weight, ps.bias
+        _, c_out = size(w)
+        w = proj_lift(w, proj_lift_ps, (;)) |> first
+        w = reshape(w, nreg, nten, c_out)
+        w = permutedims(w, (2, 1, 3))
+        weight = reshape(w, 1, nten, nreg * c_out)
+        bias = reshape(repeat(reshape(b, 1, :), nreg), :)
+        (; weight, bias)
+    end
+    function project_mid(ps)
+        w, b = ps.weight, ps.bias
+        _, c_out, c_in = size(w)
+        w = reshape(w, nreg, :)
+        w = proj_mid(w, proj_mid_ps, (;)) |> first
+        w = reshape(w, nreg, nreg, c_out, c_in)
+        w = permutedims(w, (2, 4, 1, 3))
+        weight = reshape(w, 1, nreg * c_in, nreg * c_out)
+        bias = reshape(repeat(reshape(b, 1, :), nreg), :)
+        (; weight, bias)
+    end
+    function project_sink(ps)
+        w = ps.weight
+        _, c_in = size(w)
+        w = proj_sink(w, proj_sink_ps, (;)) |> first
+        w = reshape(w, nten, nreg, c_in)
+        w = permutedims(w, (2, 3, 1))
+        weight = reshape(w, 1, nreg * c_in, nten)
+        (; weight)
+    end
+    project(lift, sink, mids...) = (;
+        lift = project_lift(lift),
+        map(m -> project_mid(m), mids)...,
+        sink = project_sink(sink),
+    )
+    function project(ps)
+        lift, mids..., sink = ps
+        (; lift = project_lift(lift), map(project_mid, mids)..., sink = project_sink(sink))
+    end
+    net = Chain(;
+        lift = Conv((1,), nten => nreg * nchan[1], gelu),
+        map(
+            i ->
+                Symbol(:mid_, i) =>
+                    Conv((1,), nreg * nchan[i] => nreg * nchan[i+1], gelu),
+            1:length(nchan)-1,
+        )...,
+        sink = Conv((1,), nreg * nchan[end] => nten),
+    )
+    net |> display
+    ps = (;
+        lift = (; weight = randn(T, nten, nchan[1]), bias = randn(T, nchan[1])),
+        map(
+            i ->
+                Symbol(:mid_, i) => (;
+                    weight = randn(T, nreg, nchan[i+1], nchan[i]),
+                    bias = randn(T, nchan[i+1]),
+                ),
+            1:length(nchan)-1,
+        )...,
+        sink = (; weight = randn(T, nten, nchan[end])),
+    ) |> dev
+    st = map(Returns((;)), ps)
+    (; project, net, ps, st)
+end
+
+export get_weight_projectors, equivariant_net

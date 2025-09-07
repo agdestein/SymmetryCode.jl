@@ -61,3 +61,41 @@ function transform_tensor(t, (p, s))
     m = roto_reflection_matrix(p, s)
     t = map(t -> m * t * m', t)
 end
+
+let
+    ip, is = 2, 1
+    p, s = permutations[ip], signs[is]
+    g = Grid(1.0, 16)
+    u = [@SVector(randn(3)) for i = 1:g.n, j = 1:g.n, k = 1:g.n]
+    Gu = fill(@SMatrix(zeros(3, 3)), g.n, g.n, g.n)
+    GRu = fill(@SMatrix(zeros(3, 3)), g.n, g.n, g.n)
+    apply!(grad!, g, (g, Gu, u))
+    Ru = transform_vector(u, (p, s))
+    RGu = transform_tensor(Gu, (p, s))
+    apply!(grad!, g, (g, GRu, Ru))
+    GRu - RGu |> norm
+end
+
+let
+    ip, is = 5, 2
+    p, s = permutations[ip], signs[is]
+    g = Grid(1.0, 16)
+    f = randn(g.n, g.n, g.n)
+    Gf = [@SVector(zeros(3)) for i = 1:g.n, j = 1:g.n, k = 1:g.n]
+    GRf = [@SVector(zeros(3)) for i = 1:g.n, j = 1:g.n, k = 1:g.n]
+    apply!(grad_scalar!, g, (g, Gf, f))
+    Rf = transform_scalar(f, (p, s))
+    RGf = transform_vector(Gf, (p, s))
+    apply!(grad_scalar!, g, (g, GRf, Rf))
+    GRf - RGf |> norm
+end
+
+let
+    ip, is = 2, 5
+    p, s = permutations[ip], signs[is]
+    g = Grid(1.0, 16)
+    f = randn(g.n, g.n, g.n)
+    Rf = transform_scalar(f, (p, s))
+    RRf = transform_scalar(Rf, invtransform(p, s))
+    f - RRf |> norm
+end
