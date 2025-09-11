@@ -483,15 +483,9 @@ function equivariant_net(setup, nchan)
         weight = reshape(w, 1, nreg * c_in, nten)
         (; weight)
     end
-    project(lift, sink, symm, mids...) = (;
-        lift = project_lift(lift),
-        map(m -> project_mid(m), mids)...,
-        sink = project_sink(sink),
-        # symm = (;),
-    )
     function project(ps)
-        lift, mids..., sink = ps
-        (; lift = project_lift(lift), map(project_mid, mids)..., sink = project_sink(sink))
+        lift, mids..., sink, symm = ps
+        (; lift = project_lift(lift), map(project_mid, mids)..., sink = project_sink(sink), symm)
     end
     net = Chain(;
         lift = Conv((1,), nten => nreg * nchan[1], gelu),
@@ -502,6 +496,22 @@ function equivariant_net(setup, nchan)
             1:length(nchan)-1,
         )...,
         sink = Conv((1,), nreg * nchan[end] => nten),
+        symm = WrappedFunction() do σ
+            if D == 2
+                xx = selectdim(σ, 2, 1:1)
+                xy = (selectdim(σ, 2, 2:2) + selectdim(σ, 2, 3:3)) / 2
+                yy = selectdim(σ, 2, 4:4)
+                hcat(xx, yy, xy)
+            else
+                xx =  selectdim(σ, 2, 1:1)
+                yy =  selectdim(σ, 2, 5:5)
+                zz =  selectdim(σ, 2, 9:9)
+                xy = (selectdim(σ, 2, 2:2) + selectdim(σ, 2, 4:4)) / 2
+                yz = (selectdim(σ, 2, 6:6) + selectdim(σ, 2, 8:8)) / 2
+                zx = (selectdim(σ, 2, 3:3) + selectdim(σ, 2, 7:7)) / 2
+                hcat(xx, yy, zz, xy, yz, zx)
+            end
+        end,
     )
     net |> display
     ps =
@@ -519,9 +529,54 @@ function equivariant_net(setup, nchan)
                 1:length(nchan)-1,
             )...,
             sink = (; weight = kaiming_uniform(rng, T, nten, nchan[end])),
+            symm = (;),
         ) |> dev
     st = map(Returns((;)), ps)
     (; project, net, ps, st)
 end
 
-export get_weight_projectors, equivariant_net
+
+"Same as `equivariant_net` but without the weight projection."
+function cnn(setup, nchan)
+    (; D, backend) = setup
+    dev = adapt(backend)
+    # dev = identity
+    rng = Xoshiro(0)
+    T, f = Float64, f64
+    nten = D^2
+    (; elements) = group_stuff(D)
+    nreg = length(elements)
+    net = Chain(;
+        lift = Conv((1,), nten => nreg * nchan[1], gelu),
+        map(
+            i ->
+                Symbol(:mid_, i) =>
+                    Conv((1,), nreg * nchan[i] => nreg * nchan[i+1], gelu),
+            1:length(nchan)-1,
+        )...,
+        sink = Conv((1,), nreg * nchan[end] => 3), # nten),
+        symm = WrappedFunction(identity)
+        # symm = WrappedFunction() do σ
+        #     if D == 2
+        #         xx = selectdim(σ, 2, 1:1)
+        #         xy = (selectdim(σ, 2, 2:2) + selectdim(σ, 2, 3:3)) / 2
+        #         yy = selectdim(σ, 2, 4:4)
+        #         hcat(xx, yy, xy)
+        #     else
+        #         xx =  selectdim(σ, 2, 1:1)
+        #         yy =  selectdim(σ, 2, 5:5)
+        #         zz =  selectdim(σ, 2, 9:9)
+        #         xy = (selectdim(σ, 2, 2:2) + selectdim(σ, 2, 4:4)) / 2
+        #         yz = (selectdim(σ, 2, 6:6) + selectdim(σ, 2, 8:8)) / 2
+        #         zx = (selectdim(σ, 2, 3:3) + selectdim(σ, 2, 7:7)) / 2
+        #         hcat(xx, yy, zz, xy, yz, zx)
+        #     end
+        # end,
+    )
+    net |> display
+    ps, st = Lux.setup(rng, net) |> f |> dev
+    project = identity # No projection
+    (; project, net, ps, st)
+end
+
+export get_weight_projectors, equivariant_net, cnn
