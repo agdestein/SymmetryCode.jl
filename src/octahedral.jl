@@ -385,7 +385,7 @@ function test_equivariant_conv_sparse(D)
             i ->
                 Symbol(:mid_, i) =>
                     Conv((1,), nreg * nchan[i] => nreg * nchan[i+1], gelu),
-            1:length(nchan)-1,
+            1:(length(nchan)-1),
         )...,
         sink = Conv((1,), nreg * nchan[end] => nten),
     )
@@ -398,7 +398,7 @@ function test_equivariant_conv_sparse(D)
                     weight = randn(T, nreg, nchan[i+1], nchan[i]),
                     bias = randn(T, nchan[i+1]),
                 ),
-            1:length(nchan)-1,
+            1:(length(nchan)-1),
         )...,
         sink = (; weight = randn(T, nten, nchan[end])),
     )
@@ -485,7 +485,12 @@ function equivariant_net(setup, nchan)
     end
     function project(ps)
         lift, mids..., sink, symm = ps
-        (; lift = project_lift(lift), map(project_mid, mids)..., sink = project_sink(sink), symm)
+        (;
+            lift = project_lift(lift),
+            map(project_mid, mids)...,
+            sink = project_sink(sink),
+            symm,
+        )
     end
     net = Chain(;
         lift = Conv((1,), nten => nreg * nchan[1], gelu),
@@ -493,7 +498,7 @@ function equivariant_net(setup, nchan)
             i ->
                 Symbol(:mid_, i) =>
                     Conv((1,), nreg * nchan[i] => nreg * nchan[i+1], gelu),
-            1:length(nchan)-1,
+            1:(length(nchan)-1),
         )...,
         sink = Conv((1,), nreg * nchan[end] => nten),
         symm = WrappedFunction() do σ
@@ -503,9 +508,9 @@ function equivariant_net(setup, nchan)
                 yy = selectdim(σ, 2, 4:4)
                 hcat(xx, yy, xy)
             else
-                xx =  selectdim(σ, 2, 1:1)
-                yy =  selectdim(σ, 2, 5:5)
-                zz =  selectdim(σ, 2, 9:9)
+                xx = selectdim(σ, 2, 1:1)
+                yy = selectdim(σ, 2, 5:5)
+                zz = selectdim(σ, 2, 9:9)
                 xy = (selectdim(σ, 2, 2:2) + selectdim(σ, 2, 4:4)) / 2
                 yz = (selectdim(σ, 2, 6:6) + selectdim(σ, 2, 8:8)) / 2
                 zx = (selectdim(σ, 2, 3:3) + selectdim(σ, 2, 7:7)) / 2
@@ -526,7 +531,7 @@ function equivariant_net(setup, nchan)
                         weight = kaiming_uniform(rng, T, nreg, nchan[i+1], nchan[i]),
                         bias = zeros(T, nchan[i+1]),
                     ),
-                1:length(nchan)-1,
+                1:(length(nchan)-1),
             )...,
             sink = (; weight = kaiming_uniform(rng, T, nten, nchan[end])),
             symm = (;),
@@ -534,7 +539,6 @@ function equivariant_net(setup, nchan)
     st = map(Returns((;)), ps)
     (; project, net, ps, st)
 end
-
 
 "Same as `equivariant_net` but without the weight projection."
 function cnn(setup, nchan)
@@ -552,10 +556,10 @@ function cnn(setup, nchan)
             i ->
                 Symbol(:mid_, i) =>
                     Conv((1,), nreg * nchan[i] => nreg * nchan[i+1], gelu),
-            1:length(nchan)-1,
+            1:(length(nchan)-1),
         )...,
         sink = Conv((1,), nreg * nchan[end] => 3), # nten),
-        symm = WrappedFunction(identity)
+        symm = WrappedFunction(identity),
         # symm = WrappedFunction() do σ
         #     if D == 2
         #         xx = selectdim(σ, 2, 1:1)

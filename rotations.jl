@@ -17,7 +17,6 @@ using SymmetryCode
 # using StaticArrays
 using WGLMakie
 
-
 SymmetryCode.test_equivariant_dense(3)
 SymmetryCode.test_equivariant_conv(2)
 SymmetryCode.test_equivariant_conv_sparse(2)
@@ -28,7 +27,6 @@ let
     ps, st = Lux.setup(Xoshiro(0), net)
     ps.weight
 end
-
 
 (; permutations, signs, elements, mats, cayley) = group_stuff(3)
 

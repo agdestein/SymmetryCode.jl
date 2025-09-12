@@ -5,6 +5,7 @@ if false
 end
 
 using Adapt
+using ComponentArrays
 using CUDA, cuDNN
 using FFTW
 using KernelAbstractions
@@ -20,13 +21,73 @@ using SymmetryCode
 using SymmetryCode.Spectral
 using WGLMakie
 using Zygote
-lines([1,2,3])
+lines([1, 2, 3])
 
 dns_aid()
 
-setup = (; visc = 5e-7, D = 2, l = 1.0, n_dns = 1024, n_les = 128, backend = CUDABackend())
+setup = (; visc = 5e-5, D = 2, l = 1.0, n_dns = 1024, n_les = 128, backend = CUDABackend())
 
-data = create_data(setup; nstep = 100, nsubstep = 100, rng = Xoshiro(0));
+dns = create_dns(setup; nstep = 100, nsubstep = 100, rng = Xoshiro(0));
+
+let
+    Δ = 4 * setup.l / setup.n_les
+    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    u = dns
+    ubar = vectorfield(g_les)
+    for (ubar, u) in zip(ubar, u)
+        apply!(cutoff!, g_les, (ubar, u, g_les, g_dns))
+        apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
+    end
+    D = dim(g_dns)
+    stat = turbulence_statistics(u, setup.visc, g_dns)
+    s_dns = spectrum(u, g_dns)
+    s_les = spectrum(ubar, g_les)
+    fig = Figure()
+    ax = Axis(fig[1, 1]; xscale = log10, yscale = log10)
+    k = [2, g_dns.n / 8]
+    if D == 2
+        kolmo = @. 2e0 * stat.diss^(2 / 3) * k^(-3)
+        escale = stat.diss^(-2 / 3) * stat.l_kol^(-3)
+    elseif D == 3
+        kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
+        escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
+    end
+    kscale = stat.l_kol
+    lines!(ax, kscale * s_dns.k, escale * s_dns.s)
+    lines!(ax, kscale * s_les.k, escale * s_les.s)
+    lines!(kscale * k, escale * kolmo)
+    # ylims!(1e-7, 1)
+    fig
+end
+
+data = create_data(
+    setup;
+    nstep = 100,
+    nsubstep = 100,
+    rng = Xoshiro(0),
+    Δ = 4 * setup.l / setup.n_les,
+);
+
+let
+    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    u = data[1][1] |> adapt(setup.backend)
+    i, b = Spectral.build_tensorbasis(u, g)
+    b[:, :, :, :, 4]
+end
+
+let
+    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    net = Chain(
+        Conv((1, 1), Spectral.ninvariant(g) => 10, gelu),
+        Conv((1, 1), 10 => 20, gelu),
+        Conv((1, 1), 20 => Spectral.nbasis(g); use_bias = false),
+    )
+    ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
+    model = tbnn(net, ps, st, g)
+    u = data[1][1] |> adapt(setup.backend)
+    model(u)
+end
 
 let
     (; visc, D, n_dns, n_les, backend) = setup
@@ -54,10 +115,10 @@ data[2][end].xy .|> abs |> extrema
 let
     (; D) = setup
     g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
-    τ = data[1][end][1] |> adapt(setup.backend)
+    τ = data[2][end][1] |> adapt(setup.backend)
     τxx = spacescalarfield(g)
     plan = plan_rfft(τxx)
-    # apply!(twothirds!, g, (τ, g))
+    apply!(twothirds!, g, (τ, g))
     ldiv!(τxx, plan, τ)
     τxx .*= g.n^D
     sum(abs2, τxx) / prod(size(τxx)) |> display
@@ -116,24 +177,44 @@ let
     norm(nrx - rnx) / norm(rnx)
 end
 
-using ComponentArrays
-# net_stuff = equivariant_net(setup, [24, 32, 32, 32]);
-net_stuff = cnn(setup, [32, 32, 32, 32]);
-net_stuff = (; net_stuff..., ps = NamedTuple(0.1 * ComponentArray(net_stuff.ps |> adapt(CPU())) |> adapt(setup.backend)))
-ps, st = train(;
+m_equi = let
+    net_stuff = equivariant_net(setup, [24, 32, 32, 32])
+    ps, st = train(;
+        setup,
+        dataloader = create_dataloader(setup, data; batchsize = 5),
+        nepoch = 50,
+        learning_rate = 1e-3,
+        net_stuff,
+    )
+    (; net, project) = net_stuff
+    fullchain(setup, net, project, ps, st)
+end
+
+m_conv = let
+    net_stuff = cnn(setup, [24, 32, 32, 32])
+    net_stuff = (;
+        net_stuff...,
+        ps = NamedTuple(
+            0.1 * ComponentArray(net_stuff.ps |> adapt(CPU())) |> adapt(setup.backend),
+        ),
+    )
+    ps, st = train(;
+        setup,
+        dataloader = create_dataloader(setup, data; batchsize = 5),
+        nepoch = 50,
+        learning_rate = 1e-3,
+        net_stuff,
+    )
+    (; net, project) = net_stuff
+    fullchain(setup, net, project, ps, st)
+end
+
+inference_post(;
     setup,
-    dataloader = create_dataloader(setup, data; batchsize = 10),
-    nepoch = 500,
-    learning_rate = 1e-3,
-    net_stuff,
-);
-(; net, project) = net_stuff;
-
-net_stuff.ps.mid_1.weight |> std
-net_stuff.project(net_stuff.ps).mid_1.weight |> std
-
-model = fullchain(setup, net, project, ps, st)
-inference_post(; setup, model)
+    models = (; conv = m_conv, equi = m_equi),
+    Δ = 4 * setup.l / setup.n_les,
+    tstop = tstop = 1e-2,
+)
 
 data_test = create_data(setup; nstep = 100, nsubstep = 100, rng = Xoshiro(321));
 # dataloader_test = create_dataloader(setup, data_test; batchsize = 1)
