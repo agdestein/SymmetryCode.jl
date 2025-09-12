@@ -345,24 +345,25 @@ function transform_tensor(t, (p, s))
     t = map(t -> m * t * m', t)
 end
 
-function train(; setup, dataloader, nepoch, learning_rate, net_stuff)
+create_loss(project) = function loss(net, ps, st, (x, y))
+    ps = project(ps)
+    yhat = net(x, ps, st) |> first
+    # l = MSELoss()(yhat, y)
+    l = sum(abs2, yhat - y) / sum(abs2, y)
+    l, st, (;)
+end
+
+function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
     (; D, backend) = setup
     g = Grid{D}(; setup.l, n = setup.n_les, backend)
-    (; project, net, ps, st) = net_stuff
+    (; net, ps, st) = net_stuff
     ps = deepcopy(ps)
     device = adapt(backend)
     opt = AdamW(learning_rate)
     train_state = Training.TrainState(net, ps, st, opt)
-    function loss(net, ps, st, (x, y))
-        ps = project(ps)
-        yhat = net(x, ps, st) |> first
-        # l = MSELoss()(yhat, y)
-        l = sum(abs2, yhat - y) / sum(abs2, y)
-        l, st, (;)
-    end
     for iepoch = 1:nepoch, (ibatch, batch) in enumerate(dataloader)
         x, y = batch |> device
-        # loss(net, ps, st, (x, y)) |> display
+        loss(net, ps, st, (x, y)) |> display
         _, l, _, train_state =
             Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
         ibatch % 1 == 0 && @info "iepoch = $iepoch, ibatch = $ibatch, loss = $l"
@@ -536,7 +537,6 @@ tbnn(net, ps, st, g) = function model(u)
     # Compute invariants and basis tensors
     invariants, basis = build_tensorbasis(u, g)
 
-
     # Compute coefficients
     invariants = reshape(invariants, size(invariants)..., 1) # One sample
     w = net(invariants, ps, st) |> first
@@ -565,10 +565,89 @@ tbnn(net, ps, st, g) = function model(u)
     reshape(m, space_ndrange(g)..., tensordim(g))
 end
 
+function create_dataloader_tbnn(setup, data; batchsize)
+    (; D) = setup
+    g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
+    # G = tensorfield_nonsym(g)
+    u = vectorfield(g)
+    τ = scalarfield(g)
+    # GG = spacetensorfield_nonsym(g)
+    ττ = spacetensorfield(g)
+    plan = plan_rfft(ττ.xx)
+    snaps = map(zip(data...)) do (ucpu, τcpu)
+        map(copyto!, u, ucpu)
+        # apply!(vectorgradient!, g, (G, u, g))
+        # for (GG, G) in zip(GG, G)
+        #     apply!(twothirds!, g, (G, g))
+        #     ldiv!(GG, plan, G) # Inverse RFFT
+        #     GG .*= g.n^D # FFT factor
+        # end
+        for (ττ, τcpu) in zip(ττ, τcpu)
+            copyto!(τ, τcpu)
+            apply!(twothirds!, g, (τ, g))
+            ldiv!(ττ, plan, τ) # Inverse RFFT
+            ττ .*= g.n^D # FFT factor
+        end
+        i, b = build_tensorbasis(u, g)
+        i = i |> cpu_device()
+        b = reshape(b, space_ndrange(g)..., :) |> cpu_device()
+        x = cat(i, b; dims = D + 1)
+        y = reshape(stack(ττ), space_ndrange(g)..., tensordim(g)) |> cpu_device()
+        x, y
+    end
+    x = stack(first, snaps)
+    y = stack(last, snaps)
+    DataLoader((x, y); batchsize, shuffle = true, partial = false)
+end
+
+create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
+    D = dim(g)
+    ni = ninvariant(g)
+    nb = nbasis(g)
+
+    # Destructure invariants and basis
+    i = selectdim(x, D + 1, 1:ni)
+    b = selectdim(x, D + 1, ni+1:size(x, D + 1))
+
+    # Compute coefficients
+    w = net(i, ps, st) |> first
+
+    # Basis contraction
+    w = reshape(w, space_ndrange(g)..., 1, nb, :)
+    b = reshape(b, space_ndrange(g)..., D^2, nb, :)
+    wb = @. w * b
+    m = sum(wb; dims = D + 2)
+    m = reshape(m, space_ndrange(g)..., D^2, :)
+
+    # Symmetrize tensor
+    m = if D == 2
+        cat(
+            selectdim(m, D + 1, 1:1),
+            selectdim(m, D + 1, 4:4),
+            (selectdim(m, D + 1, 2:2) + selectdim(m, D + 1, 3:3)) / 2;
+            dims = D + 1,
+        )
+    elseif D == 3
+        cat(
+            selectdim(m, :, 1:1),
+            selectdim(m, :, 5:5),
+            selectdim(m, :, 9:9),
+            (selectdim(m, :, 2:2) + selectdim(m, :, 4:4)) / 2,
+            (selectdim(m, :, 6:6) + selectdim(m, :, 8:8)) / 2,
+            (selectdim(m, :, 3:3) + selectdim(m, :, 7:7)) / 2;
+            dims = D + 1,
+        )
+    end
+
+    # l = MSELoss()(m, y)
+    l = sum(abs2, m - y) / sum(abs2, y)
+    l, st, (;)
+end
+
 export tensorfield_to_smatrix, smatrix_to_tensorfield
 export transform_scalar, transform_vector, transform_tensor
 export dns_aid, create_dns, create_data, create_dataloader, train, fullchain, inference_post
 export sfs!, cutoff!, gaussianfilter!
-export tbnn, ninvariant, nbasis
+export tbnn, ninvariant, nbasis, create_dataloader_tbnn, create_loss_tbnn
 
 end

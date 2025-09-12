@@ -76,6 +76,26 @@ let
     b[:, :, :, :, 4]
 end
 
+d = create_dataloader_tbnn(setup, data; batchsize = 5)
+
+let
+    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    net = Chain(
+        Conv((1, 1), Spectral.ninvariant(g) => 10, gelu),
+        Conv((1, 1), 10 => 20, gelu),
+        Conv((1, 1), 20 => Spectral.nbasis(g); use_bias = false),
+    )
+    ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
+    ps, st = train(;
+        loss = create_loss_tbnn(g),
+        setup,
+        dataloader = d,
+        nepoch = 5,
+        learning_rate = 1e-3,
+        net_stuff = (; net, ps, st),
+    )
+end
+
 let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     net = Chain(
