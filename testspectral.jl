@@ -76,9 +76,14 @@ let
     b[:, :, :, :, 4]
 end
 
-d = create_dataloader_tbnn(setup, data; batchsize = 5)
+d = create_dataloader_tbnn(setup, data; batchsize = 5, rng = Xoshiro(0));
 
-let
+d
+
+first(d)[1] |> size
+first(d)[1][:, :, 11, 1]
+
+m_tbnn = let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     net = Chain(
         Conv((1, 1), Spectral.ninvariant(g) => 10, gelu),
@@ -86,14 +91,56 @@ let
         Conv((1, 1), 20 => Spectral.nbasis(g); use_bias = false),
     )
     ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
+    # @show typeof(ps.layer_1.weight); error()
+    # for l in ps
+    #     l.weight .*= 0.000001
+    # end
     ps, st = train(;
         loss = create_loss_tbnn(g),
         setup,
-        dataloader = d,
-        nepoch = 5,
+        dataloader = create_dataloader_tbnn(setup, data; batchsize = 10, rng = Xoshiro(0)),
+        nepoch = 500,
         learning_rate = 1e-3,
         net_stuff = (; net, ps, st),
     )
+    m_tbnn = tbnn(net, ps, st, g)
+end
+
+let
+    (; D) = setup
+    g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
+    T = typeof(g.l)
+    (; elements, permutations, signs, mats) = group_stuff(setup.D)
+    i = 6
+    ip, is = elements[i]
+    p, s = permutations[ip], signs[is]
+    u = spacevectorfield(g)
+    rng = Xoshiro(0)
+    foreach(u -> randn!(rng, u), u)
+    u_sa = map(SVector{D,T}, u...)
+    ru_sa = transform_vector(u_sa, (p, s))
+    ru = (; x = getindex.(ru_sa, 1), y = getindex.(ru_sa, 2))
+    uhat = map(rfft, u)
+    ruhat = map(rfft, ru)
+    nu = m_tbnn(uhat)
+    nru = m_tbnn(ruhat)
+    M = SMatrix{2,2,T,4}
+    nu = M.(
+        selectdim(nu, 3, 1),
+        selectdim(nu, 3, 3),
+        selectdim(nu, 3, 3),
+        selectdim(nu, 3, 2),
+    )
+    nru = M.(
+        selectdim(nru, 3, 1),
+        selectdim(nru, 3, 3),
+        selectdim(nru, 3, 3),
+        selectdim(nru, 3, 2),
+    )
+    rnu = transform_tensor(nu, (p, s))
+    rnu = smatrix_to_tensorfield(rnu) |> stack
+    nru = smatrix_to_tensorfield(nru) |> stack
+    norm(nru - rnu) / norm(rnu)
 end
 
 let
@@ -175,26 +222,96 @@ let
     net_stuff = equivariant_net(setup, [10, 10, 20, 20])
     (; project, net, ps, st) = net_stuff
     ps = project(ps)
-    x = stack(grad)
     (; elements, permutations, signs) = group_stuff(setup.D)
     i = 6
     ip, is = elements[i]
     p, s = permutations[ip], signs[is]
+    u = spacevectorfield(g)
+    foreach(randn!, u)
+    u = map(rfft, u)
+    # u = vectorfield(g)
+    # foreach(randn!, u)
+    grad = getgradient(u, g)
+    x = stack(grad)
     xx = tensorfield_to_smatrix(grad)
     rxx = transform_tensor(xx, (p, s))
     rx = smatrix_to_tensorfield(rxx) |> stack
-    nx = net(reshape(x, :, 4, 1), ps, st) |> first
-    nrx = net(reshape(rx, :, 4, 1), ps, st) |> first
-    nx = hcat(nx[:, 1, :], nx[:, 3, :], nx[:, 3, :], nx[:, 2, :]) # Desymmetrize
-    nrx = hcat(nrx[:, 1, :], nrx[:, 3, :], nrx[:, 3, :], nrx[:, 2, :]) # Desymmetrize
-    nxx = reshape(nx, g.n, g.n, 4)
-    nxx = ntuple(i -> view(nxx, :, :, i), 4)
-    nxx = tensorfield_to_smatrix(nxx)
-    rnxx = transform_tensor(nxx, (p, s))
-    rnx = smatrix_to_tensorfield(rnxx) |> stack
-    rnx = reshape(rnx, :, 4)
-    @show norm(rnx)
+    nx = net(reshape(x, size(x)..., 1), ps, st) |> first
+    nrx = net(reshape(rx, size(rx)..., 1), ps, st) |> first
+    nx = cat(selectdim(nx, 3, 1), selectdim(nx, 3, 3), selectdim(nx, 3, 3), selectdim(nx, 3, 2); dims = 3) # Desymmetrize
+    nrx = cat(selectdim(nrx, 3, 1), selectdim(nrx, 3, 3), selectdim(nrx, 3, 3), selectdim(nrx, 3, 2); dims = 3) # Desymmetrize
+    nx = nx
+    nx = ntuple(i -> view(nx, :, :, i), 4)
+    nx = tensorfield_to_smatrix(nx)
+    rnx = transform_tensor(nx, (p, s))
+    rnx = smatrix_to_tensorfield(rnx) |> stack
     norm(nrx - rnx) / norm(rnx)
+end
+
+let
+    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    (; elements, permutations, signs, mats) = group_stuff(setup.D)
+    i = 6
+    ip, is = elements[i]
+    # mats[i] |> display; error()
+    p, s = permutations[ip], signs[is]
+    u = spacevectorfield(g)
+    foreach(randn!, u)
+    # u[1][1:1] .= 1
+    uu = vectorfield_to_svector(u)
+    ruu = transform_vector(uu, (p, s))
+    ru = svector_to_vectorfield(ruu)
+    uhat = map(rfft, u)
+    ruhat = map(rfft, ru)
+    foreach(u -> (u ./= g.n^dim(g)), uhat)
+    foreach(u -> (u ./= g.n^dim(g)), ruhat)
+    Gu = getgradient(uhat, g)
+    Gru = getgradient(ruhat, g)
+    Gu = stack(Gu)
+    Gru = stack(Gru)
+    GGu = ntuple(i -> view(Gu, :, :, i), 4)
+    GGu = tensorfield_to_smatrix(GGu)
+    rGGu = transform_tensor(GGu, (p, s))
+    rGu = smatrix_to_tensorfield(rGGu) |> stack
+    norm(rGu - Gru) / norm(Gru)
+    # rGu
+    # Gru
+end
+
+
+let
+    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    net_stuff = equivariant_net(setup, [10, 10, 20, 20])
+    (; project, net, ps, st) = net_stuff
+    ps = project(ps)
+    (; elements, permutations, signs) = group_stuff(setup.D)
+    i = 6
+    ip, is = elements[i]
+    p, s = permutations[ip], signs[is]
+    u = spacevectorfield(g)
+    foreach(randn!, u)
+    uu = vectorfield_to_svector(u)
+    ruu = transform_vector(uu, (p, s))
+    ru = svector_to_vectorfield(ruu)
+    uhat = map(rfft, u)
+    ruhat = map(rfft, ru)
+    foreach(u -> (u ./= g.n^dim(g)), uhat)
+    foreach(u -> (u ./= g.n^dim(g)), ruhat)
+    G = getgradient(uhat, g)
+    rG = getgradient(ruhat, g)
+    G = stack(G)
+    rG = stack(rG)
+    nG = net(reshape(G, :, 4, 1), ps, st) |> first
+    nrG = net(reshape(rG, :, 4, 1), ps, st) |> first
+    nG = hcat(nG[:, 1, :], nG[:, 3, :], nG[:, 3, :], nG[:, 2, :]) # Desymmetrize
+    nrG = hcat(nrG[:, 1, :], nrG[:, 3, :], nrG[:, 3, :], nrG[:, 2, :]) # Desymmetrize
+    nGG = reshape(nG, g.n, g.n, 4)
+    nGG = ntuple(i -> view(nGG, :, :, i), 4)
+    nGG = tensorfield_to_smatrix(nGG)
+    rnGG = transform_tensor(nGG, (p, s))
+    rnG = smatrix_to_tensorfield(rnGG) |> stack
+    rnG = reshape(rnG, :, 4)
+    norm(nrG - rnG) / norm(rnG)
 end
 
 m_equi = let
@@ -231,7 +348,7 @@ end
 
 inference_post(;
     setup,
-    models = (; conv = m_conv, equi = m_equi),
+    models = (; tbnn = m_tbnn, conv = m_conv, equi = m_equi),
     Δ = 4 * setup.l / setup.n_les,
     tstop = tstop = 1e-2,
 )

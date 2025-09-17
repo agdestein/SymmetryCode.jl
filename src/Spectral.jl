@@ -285,13 +285,37 @@ function create_dataloader(setup, data; batchsize)
             ldiv!(ττ, plan, τ) # Inverse RFFT
             ττ .*= g.n^D # FFT factor
         end
-        x = reshape(stack(GG), :, D^2) |> cpu_device()
-        y = reshape(stack(ττ), :, tensordim(g)) |> cpu_device()
+        x = stack(GG) |> cpu_device()
+        y = stack(ττ) |> cpu_device()
         x, y
     end
     x = stack(first, snaps)
     y = stack(last, snaps)
     DataLoader((x, y); batchsize, shuffle = true, partial = false)
+end
+
+function vectorfield_to_svector(u)
+    D = ndims(u[1])
+    T = eltype(u[1])
+    M = SVector{D,T}
+    M.(u...)
+end
+function svector_to_vectorfield(u)
+    V = eltype(u)
+    z = zero(V)
+    D = size(z, 1)
+    if D == 2
+        (;
+            x = getindex.(u, 1),
+            y = getindex.(u, 2),
+        )
+    elseif D == 3
+        (;
+            x = getindex.(u, 1),
+            y = getindex.(u, 2),
+            z = getindex.(u, 3),
+        )
+    end
 end
 
 function tensorfield_to_smatrix(t)
@@ -341,8 +365,9 @@ end
 function transform_tensor(t, (p, s))
     t = permutedims(t, p)
     dims = (findall(==(-1), s)...,)
+    t = reverse(t; dims)
     m = roto_reflection_matrix(p, s)
-    t = map(t -> m * t * m', t)
+    map(t -> m * t * m', t)
 end
 
 create_loss(project) = function loss(net, ps, st, (x, y))
@@ -363,7 +388,7 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
     train_state = Training.TrainState(net, ps, st, opt)
     for iepoch = 1:nepoch, (ibatch, batch) in enumerate(dataloader)
         x, y = batch |> device
-        loss(net, ps, st, (x, y)) |> display
+        # loss(net, ps, st, (x, y)); error()
         _, l, _, train_state =
             Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
         ibatch % 1 == 0 && @info "iepoch = $iepoch, ibatch = $ibatch, loss = $l"
@@ -382,6 +407,7 @@ end
 function les!(du, u, grid, cache; model, visc)
     D = dim(grid)
     (; plan, σ, vi_vj, v, G) = cache
+    nx = space_ndrange(grid)
     stress!(σ, vi_vj, v, u, plan, visc, grid)
     apply!(vectorgradient!, grid, (G, u, grid))
     x = map(G) do G
@@ -390,10 +416,10 @@ function les!(du, u, grid, cache; model, visc)
     end
     x = stack(x)
     x .*= grid.n^D # FFT factor
-    x = reshape(x, :, D^2, 1)
+    x = reshape(x, size(x)..., 1)
     y = model(x)
     for (i, σ) in enumerate(σ)
-        yi = view(y, :, i, 1)
+        yi = selectdim(y, D + 1, i)
         yi = reshape(yi, size(vi_vj))
         mul!(du.x, plan, yi) # Use du as temp storage
         @. σ += du.x / grid.n^D # With FFT factor
@@ -460,27 +486,36 @@ function inference_post(; setup, models, cfl = 0.35, tstop = 1e-1, Δ)
     nothing
 end
 
-nbasis(::Grid{2}) = 4
-nbasis(::Grid{3}) = 11
-ninvariant(::Grid{2}) = 2
-ninvariant(::Grid{3}) = 2
+@inline nbasis(::Grid{2}) = 1
+@inline nbasis(::Grid{3}) = 11
+@inline ninvariant(::Grid{2}) = 1
+@inline ninvariant(::Grid{3}) = 2
 
 "Compute deviatoric part of a tensor."
 @inline deviator(σ) = σ - tr(σ) / 3 * one(σ)
 
 @kernel function tb_kernel!(invariants, basis, grads, g::Grid{2})
+    nb = nbasis(g)
+    ni = ninvariant(g)
     I = @index(Global, Cartesian)
     Gxx, Gyx, Gxy, Gyy = grads.xx[I], grads.yx[I], grads.xy[I], grads.yy[I]
     G = @SMatrix [Gxx Gxy; Gyx Gyy]
+    G2 = sum(abs2, G)
+    G = G / (sqrt(G2) + eps(eltype(G))) # Normalize gradient
     S = (G + G') / 2
     R = (G - G') / 2
     i = tr(S * S), tr(R * R)
-    b = S, S * R - R * S, deviator(S * S), deviator(R * R)
-    for iinv in Base.OneTo(2)
+    b = S, S * R - R * S #, deviator(S * S), deviator(R * R)
+    for iinv in Base.OneTo(ni)
         invariants[I, iinv] = i[iinv]
     end
-    for ibas in Base.OneTo(4), y in Base.OneTo(2), x in Base.OneTo(2)
-        basis[I, x, y, ibas] = b[ibas][x, y]
+    for ibas in Base.OneTo(nb)
+        # Convert 2x2 tensor b to symmetric tensor [xx, yy, xy]
+        # Also premultiply by |G|^2, since the output tensor is
+        # |G|^2 * coeffs * basis
+        basis[I, 1, ibas] = b[ibas][1, 1] * sqrt(G2)
+        basis[I, 2, ibas] = b[ibas][2, 2] * sqrt(G2)
+        basis[I, 3, ibas] = b[ibas][1, 2] * sqrt(G2)
     end
 end
 
@@ -508,18 +543,30 @@ end
     for iinv in Base.OneTo(5)
         invariants[I, iinv] = i[iinv]
     end
-    for ibas in Base.OneTo(11), y in Base.OneTo(3), x in Base.OneTo(3)
-        basis[I, x, y, ibas] = b[ibas][x, y]
+    for ibas in Base.OneTo(11)
+        # Convert 3x3 tensor b to flattened symmetric tensor [xx, yy, zz, xy, yz, zx]
+        basis[I, 1, ibas] = b[ibas][1, 1]
+        basis[I, 2, ibas] = b[ibas][2, 2]
+        basis[I, 3, ibas] = b[ibas][3, 3]
+        basis[I, 4, ibas] = b[ibas][1, 2]
+        basis[I, 5, ibas] = b[ibas][2, 3]
+        basis[I, 6, ibas] = b[ibas][3, 1]
     end
 end
 
-function build_tensorbasis(u, g)
+function build_tensorbasis(grad, g)
+    T = typeof(g.l)
+    nx, nb, ni, nt = space_ndrange(g), nbasis(g), ninvariant(g), tensordim(g)
+    basis = KernelAbstractions.zeros(g.backend, T, nx..., nt, nb)
+    invariants = KernelAbstractions.zeros(g.backend, T, nx..., ni)
+    apply!(tb_kernel!, g, (invariants, basis, grad, g); ndrange = nx)
+    invariants, basis
+end
+
+function getgradient(u, g)
     D = dim(g)
-    nb, ni = nbasis(g), ninvariant(g)
     G = tensorfield_nonsym(g)
     GG = spacetensorfield_nonsym(g)
-    basis = KernelAbstractions.zeros(g.backend, typeof(g.l), space_ndrange(g)..., D, D, nb)
-    invariants = KernelAbstractions.zeros(g.backend, typeof(g.l), space_ndrange(g)..., ni)
     apply!(vectorgradient!, g, (G, u, g))
     plan = plan_rfft(GG.xx)
     for (GG, G) in zip(GG, G)
@@ -527,81 +574,66 @@ function build_tensorbasis(u, g)
         ldiv!(GG, plan, G) # Inverse RFFT
         GG .*= g.n^D # FFT factor
     end
-    apply!(tb_kernel!, g, (invariants, basis, GG, g); ndrange = space_ndrange(g))
-    invariants, basis
+    GG
 end
 
 tbnn(net, ps, st, g) = function model(u)
     D = dim(g)
+    nx = space_ndrange(g)
+    nt = tensordim(g)
+    nb = nbasis(g)
 
     # Compute invariants and basis tensors
-    invariants, basis = build_tensorbasis(u, g)
+    G = getgradient(u, g)
+    invariants, basis = build_tensorbasis(G, g)
 
     # Compute coefficients
     invariants = reshape(invariants, size(invariants)..., 1) # One sample
     w = net(invariants, ps, st) |> first
 
     # Basis contraction
-    b = reshape(basis, :, D^2, nbasis(g))
-    w = reshape(w, :, 1, nbasis(g))
+    b = reshape(basis, :, nt, nb)
+    w = reshape(w, :, 1, nb)
     wb = @. w * b
     m = sum(wb; dims = 3)
-    m = reshape(m, :, D^2)
-
-    # Symmetrize tensor
-    m = if D == 2
-        hcat(m[:, 1], m[:, 4], (m[:, 2] + m[:, 3]) / 2)
-    elseif D == 3
-        hcat(
-            m[:, 1],
-            m[:, 5],
-            m[:, 9],
-            (m[:, 2] + m[:, 4]) / 2,
-            (m[:, 6] + m[:, 8]) / 2,
-            (m[:, 3] + m[:, 7]) / 2,
-        )
-    end
-
-    reshape(m, space_ndrange(g)..., tensordim(g))
+    m = reshape(m, :, nt)
+    reshape(m, nx..., nt)
 end
 
-function create_dataloader_tbnn(setup, data; batchsize)
+function create_dataloader_tbnn(setup, data; batchsize, rng)
     (; D) = setup
     g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
-    # G = tensorfield_nonsym(g)
+    T = typeof(g.l)
+    nx = space_ndrange(g)
     u = vectorfield(g)
     τ = scalarfield(g)
-    # GG = spacetensorfield_nonsym(g)
     ττ = spacetensorfield(g)
     plan = plan_rfft(ττ.xx)
     snaps = map(zip(data...)) do (ucpu, τcpu)
-        map(copyto!, u, ucpu)
-        # apply!(vectorgradient!, g, (G, u, g))
-        # for (GG, G) in zip(GG, G)
-        #     apply!(twothirds!, g, (G, g))
-        #     ldiv!(GG, plan, G) # Inverse RFFT
-        #     GG .*= g.n^D # FFT factor
-        # end
+        foreach(copyto!, u, ucpu)
+        G = getgradient(u, g)
         for (ττ, τcpu) in zip(ττ, τcpu)
             copyto!(τ, τcpu)
             apply!(twothirds!, g, (τ, g))
             ldiv!(ττ, plan, τ) # Inverse RFFT
             ττ .*= g.n^D # FFT factor
         end
-        i, b = build_tensorbasis(u, g)
+        i, b = build_tensorbasis(G, g)
         i = i |> cpu_device()
-        b = reshape(b, space_ndrange(g)..., :) |> cpu_device()
+        b = reshape(b, nx..., :) |> cpu_device()
         x = cat(i, b; dims = D + 1)
-        y = reshape(stack(ττ), space_ndrange(g)..., tensordim(g)) |> cpu_device()
+        y = reshape(stack(ττ), nx..., tensordim(g)) |> cpu_device()
         x, y
     end
     x = stack(first, snaps)
     y = stack(last, snaps)
-    DataLoader((x, y); batchsize, shuffle = true, partial = false)
+    DataLoader((x, y); batchsize, shuffle = true, partial = false, rng)
 end
 
 create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
     D = dim(g)
+    nx = space_ndrange(g)
+    nt = tensordim(g)
     ni = ninvariant(g)
     nb = nbasis(g)
 
@@ -613,39 +645,20 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
     w = net(i, ps, st) |> first
 
     # Basis contraction
-    w = reshape(w, space_ndrange(g)..., 1, nb, :)
-    b = reshape(b, space_ndrange(g)..., D^2, nb, :)
+    w = reshape(w, nx..., 1, nb, :)
+    b = reshape(b, nx..., nt, nb, :)
     wb = @. w * b
     m = sum(wb; dims = D + 2)
-    m = reshape(m, space_ndrange(g)..., D^2, :)
+    m = reshape(m, nx..., nt, :)
 
-    # Symmetrize tensor
-    m = if D == 2
-        cat(
-            selectdim(m, D + 1, 1:1),
-            selectdim(m, D + 1, 4:4),
-            (selectdim(m, D + 1, 2:2) + selectdim(m, D + 1, 3:3)) / 2;
-            dims = D + 1,
-        )
-    elseif D == 3
-        cat(
-            selectdim(m, :, 1:1),
-            selectdim(m, :, 5:5),
-            selectdim(m, :, 9:9),
-            (selectdim(m, :, 2:2) + selectdim(m, :, 4:4)) / 2,
-            (selectdim(m, :, 6:6) + selectdim(m, :, 8:8)) / 2,
-            (selectdim(m, :, 3:3) + selectdim(m, :, 7:7)) / 2;
-            dims = D + 1,
-        )
-    end
-
-    # l = MSELoss()(m, y)
-    l = sum(abs2, m - y) / sum(abs2, y)
+    l = MSELoss()(m, y)
+    # l = sum(abs2, m - y) / sum(abs2, y)
     l, st, (;)
 end
 
-export tensorfield_to_smatrix, smatrix_to_tensorfield
+export vectorfield_to_svector, svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield
 export transform_scalar, transform_vector, transform_tensor
+export getgradient
 export dns_aid, create_dns, create_data, create_dataloader, train, fullchain, inference_post
 export sfs!, cutoff!, gaussianfilter!
 export tbnn, ninvariant, nbasis, create_dataloader_tbnn, create_loss_tbnn

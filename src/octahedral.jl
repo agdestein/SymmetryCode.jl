@@ -453,13 +453,14 @@ function equivariant_net(setup, nchan)
     copyto!(proj_sink_ps.weight, e_sink)
     proj_mid_ps, _ = Lux.setup(rng, proj_mid) |> f |> dev
     copyto!(proj_mid_ps.weight, e_mid)
+    kern = ntuple(Returns(1), D)
     function project_lift(ps)
         w, b = ps.weight, ps.bias
         _, c_out = size(w)
         w = proj_lift(w, proj_lift_ps, (;)) |> first
         w = reshape(w, nreg, nten, c_out)
         w = permutedims(w, (2, 1, 3))
-        weight = reshape(w, 1, nten, nreg * c_out)
+        weight = reshape(w, kern..., nten, nreg * c_out)
         bias = reshape(repeat(reshape(b, 1, :), nreg), :)
         (; weight, bias)
     end
@@ -470,7 +471,7 @@ function equivariant_net(setup, nchan)
         w = proj_mid(w, proj_mid_ps, (;)) |> first
         w = reshape(w, nreg, nreg, c_out, c_in)
         w = permutedims(w, (2, 4, 1, 3))
-        weight = reshape(w, 1, nreg * c_in, nreg * c_out)
+        weight = reshape(w, kern..., nreg * c_in, nreg * c_out)
         bias = reshape(repeat(reshape(b, 1, :), nreg), :)
         (; weight, bias)
     end
@@ -480,7 +481,7 @@ function equivariant_net(setup, nchan)
         w = proj_sink(w, proj_sink_ps, (;)) |> first
         w = reshape(w, nten, nreg, c_in)
         w = permutedims(w, (2, 3, 1))
-        weight = reshape(w, 1, nreg * c_in, nten)
+        weight = reshape(w, kern..., nreg * c_in, nten)
         (; weight)
     end
     function project(ps)
@@ -493,28 +494,28 @@ function equivariant_net(setup, nchan)
         )
     end
     net = Chain(;
-        lift = Conv((1,), nten => nreg * nchan[1], gelu),
+        lift = Conv(kern, nten => nreg * nchan[1], gelu),
         map(
             i ->
                 Symbol(:mid_, i) =>
-                    Conv((1,), nreg * nchan[i] => nreg * nchan[i+1], gelu),
+                    Conv(kern, nreg * nchan[i] => nreg * nchan[i+1], gelu),
             1:(length(nchan)-1),
         )...,
-        sink = Conv((1,), nreg * nchan[end] => nten),
+        sink = Conv(kern, nreg * nchan[end] => nten),
         symm = WrappedFunction() do σ
             if D == 2
-                xx = selectdim(σ, 2, 1:1)
-                xy = (selectdim(σ, 2, 2:2) + selectdim(σ, 2, 3:3)) / 2
-                yy = selectdim(σ, 2, 4:4)
-                hcat(xx, yy, xy)
+                xx = selectdim(σ, 3, 1:1)
+                xy = (selectdim(σ, 3, 2:2) + selectdim(σ, 3, 3:3)) / 2
+                yy = selectdim(σ, 3, 4:4)
+                cat(xx, yy, xy; dims = 3)
             else
-                xx = selectdim(σ, 2, 1:1)
-                yy = selectdim(σ, 2, 5:5)
-                zz = selectdim(σ, 2, 9:9)
-                xy = (selectdim(σ, 2, 2:2) + selectdim(σ, 2, 4:4)) / 2
-                yz = (selectdim(σ, 2, 6:6) + selectdim(σ, 2, 8:8)) / 2
-                zx = (selectdim(σ, 2, 3:3) + selectdim(σ, 2, 7:7)) / 2
-                hcat(xx, yy, zz, xy, yz, zx)
+                xx = selectdim(σ, 4, 1:1)
+                yy = selectdim(σ, 4, 5:5)
+                zz = selectdim(σ, 4, 9:9)
+                xy = (selectdim(σ, 4, 2:2) + selectdim(σ, 4, 4:4)) / 2
+                yz = (selectdim(σ, 4, 6:6) + selectdim(σ, 4, 8:8)) / 2
+                zx = (selectdim(σ, 4, 3:3) + selectdim(σ, 4, 7:7)) / 2
+                cat(xx, yy, zz, xy, yz, zx; dims = 4)
             end
         end,
     )
@@ -550,12 +551,13 @@ function cnn(setup, nchan)
     nten = D^2
     (; elements) = group_stuff(D)
     nreg = length(elements)
+    kern = ntuple(Returns(1), D)
     net = Chain(;
-        lift = Conv((1,), nten => nreg * nchan[1], gelu),
+        lift = Conv(kern, nten => nreg * nchan[1], gelu),
         map(
             i ->
                 Symbol(:mid_, i) =>
-                    Conv((1,), nreg * nchan[i] => nreg * nchan[i+1], gelu),
+                    Conv(kern, nreg * nchan[i] => nreg * nchan[i+1], gelu),
             1:(length(nchan)-1),
         )...,
         sink = Conv((1,), nreg * nchan[end] => 3), # nten),

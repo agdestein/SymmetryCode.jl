@@ -58,6 +58,7 @@ end
 function transform_tensor(t, (p, s))
     t = permutedims(t, p)
     dims = (findall(==(-1), s)...,)
+    t = reverse(t; dims)
     m = roto_reflection_matrix(p, s)
     t = map(t -> m * t * m', t)
 end
