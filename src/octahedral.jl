@@ -542,42 +542,31 @@ function equivariant_net(setup, nchan)
 end
 
 "Same as `equivariant_net` but without the weight projection."
-function cnn(setup, nchan)
+function cnn(setup, nchan; same_as_equi)
     (; D, backend) = setup
     dev = adapt(backend)
     # dev = identity
     rng = Xoshiro(0)
     T, f = Float64, f64
-    nten = D^2
+    nt_nonsym = D^2
+    nt = D == 2 ? 3 : 6
     (; elements) = group_stuff(D)
-    nreg = length(elements)
+    nreg = if same_as_equi
+        length(elements)
+    else
+        1
+    end
     kern = ntuple(Returns(1), D)
     net = Chain(;
-        lift = Conv(kern, nten => nreg * nchan[1], gelu),
+        lift = Conv(kern, nt_nonsym => nreg * nchan[1], gelu),
         map(
             i ->
                 Symbol(:mid_, i) =>
                     Conv(kern, nreg * nchan[i] => nreg * nchan[i+1], gelu),
             1:(length(nchan)-1),
         )...,
-        sink = Conv((1,), nreg * nchan[end] => 3), # nten),
+        sink = Conv(kern, nreg * nchan[end] => nt),
         symm = WrappedFunction(identity),
-        # symm = WrappedFunction() do σ
-        #     if D == 2
-        #         xx = selectdim(σ, 2, 1:1)
-        #         xy = (selectdim(σ, 2, 2:2) + selectdim(σ, 2, 3:3)) / 2
-        #         yy = selectdim(σ, 2, 4:4)
-        #         hcat(xx, yy, xy)
-        #     else
-        #         xx =  selectdim(σ, 2, 1:1)
-        #         yy =  selectdim(σ, 2, 5:5)
-        #         zz =  selectdim(σ, 2, 9:9)
-        #         xy = (selectdim(σ, 2, 2:2) + selectdim(σ, 2, 4:4)) / 2
-        #         yz = (selectdim(σ, 2, 6:6) + selectdim(σ, 2, 8:8)) / 2
-        #         zx = (selectdim(σ, 2, 3:3) + selectdim(σ, 2, 7:7)) / 2
-        #         hcat(xx, yy, zz, xy, yz, zx)
-        #     end
-        # end,
     )
     net |> display
     ps, st = Lux.setup(rng, net) |> f |> dev

@@ -249,6 +249,17 @@ function create_data(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 
     inputs, outputs
 end
 
+export sfs
+function sfs(u, g_dns, g_les)
+    c_dns = getcache(g_dns)
+    c_les = getcache(g_les)
+    ubar = vectorfield(g_les)
+    σbar1 = tensorfield(g_les)
+    σbar2 = tensorfield(g_les)
+    τ = tensorfield(g_les)
+    sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les)
+    τ
+end
 function sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les)
     D = dim(g_dns)
     nonlinearity!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, g_dns)
@@ -305,16 +316,9 @@ function svector_to_vectorfield(u)
     z = zero(V)
     D = size(z, 1)
     if D == 2
-        (;
-            x = getindex.(u, 1),
-            y = getindex.(u, 2),
-        )
+        (; x = getindex.(u, 1), y = getindex.(u, 2))
     elseif D == 3
-        (;
-            x = getindex.(u, 1),
-            y = getindex.(u, 2),
-            z = getindex.(u, 3),
-        )
+        (; x = getindex.(u, 1), y = getindex.(u, 2), z = getindex.(u, 3))
     end
 end
 
@@ -401,7 +405,13 @@ end
 function fullchain(setup, net, project, ps, st)
     (; D) = setup
     ps = project(ps)
-    model(x) = net(x, ps, st) |> first
+    function model(x)
+        x = stack(x)
+        s = size(x)
+        x = reshape(x, s..., 1) # Add sample dimension
+        y = net(x, ps, st) |> first
+        reshape(y, s[1:D]..., :)
+    end
 end
 
 function les!(du, u, grid, cache; model, visc)
@@ -412,27 +422,27 @@ function les!(du, u, grid, cache; model, visc)
     apply!(vectorgradient!, grid, (G, u, grid))
     x = map(G) do G
         apply!(twothirds!, grid, (G, grid))
-        plan \ G
+        res = plan \ G
+        res .*= grid.n^D # FFT factor
+        res
     end
-    x = stack(x)
-    x .*= grid.n^D # FFT factor
-    x = reshape(x, size(x)..., 1)
+    # x = stack(x)
+    # x = reshape(x, size(x)..., 1)
     y = model(x)
     for (i, σ) in enumerate(σ)
-        yi = selectdim(y, D + 1, i)
-        yi = reshape(yi, size(vi_vj))
-        mul!(du.x, plan, yi) # Use du as temp storage
+        copyto!(vi_vj, selectdim(y, D + 1, i))
+        mul!(du.x, plan, vi_vj) # Use du as temp storage
         @. σ += du.x / grid.n^D # With FFT factor
     end
     apply!(tensordivergence!, grid, (du, σ, grid))
 end
 
-function inference_post(; setup, models, cfl = 0.35, tstop = 1e-1, Δ)
+function inference_post(; ustart, setup, models, cfl = 0.35, tstop = 1e-1, Δ)
     (; visc, D, n_dns, n_les, backend) = setup
     t = 0.0
     g_dns = Grid{D}(; setup.l, n = n_dns, backend)
     g_les = Grid{D}(; setup.l, n = n_les, backend)
-    u = randomfield(g_dns; rng = Xoshiro(123), kpeak = 5)
+    u = map(copy, ustart)
     c_dns = getcache(g_dns)
     c_les = (; getcache(g_les)..., G = tensorfield_nonsym(g_les))
     fu = vectorfield(g_les)
@@ -471,41 +481,71 @@ function inference_post(; setup, models, cfl = 0.35, tstop = 1e-1, Δ)
         apply!(cutoff!, g_les, (fu, u, g_les, g_dns))
         apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
     end
-    u_models = (; nomo = u_nomo, u_models...)
-    for u in (fu, u_models...)
+    u_les = (; ref = fu, nomo = u_nomo, u_models...)
+    for u in u_models
         for u in u
             apply!(twothirds!, g_les, (u, g_les))
         end
     end
-    fu = stack(fu)
-    u_models = map(stack, u_models)
-    for (key, u) in pairs(u_models)
-        err = norm(u - fu) / norm(fu)
-        @show key => err
-    end
-    nothing
+    u, u_les
 end
 
-@inline nbasis(::Grid{2}) = 1
-@inline nbasis(::Grid{3}) = 11
-@inline ninvariant(::Grid{2}) = 1
-@inline ninvariant(::Grid{3}) = 2
+function get_errors(setup, u_les)
+    u_les = map(stack, u_les)
+    k = keys(u_les)
+    k_les = filter(!=(:ref), k)
+    u_ref = u_les.ref
+    errs = map(k_les) do key
+        u = u_les[key]
+        err = norm(u - u_ref) / norm(u_ref)
+        @show key => err
+        key => err
+    end
+end
+
+@inline nbasis(::Grid{2}) = 3 # Number of entries below
+@inline getbasis(::Grid{2}, S, R) = (
+    one(S),
+    S,
+    S * R - R * S,
+    # deviator(S * S),
+    # deviator(R * R),
+)
+
+@inline nbasis(::Grid{3}) = 10
+@inline getbasis(::Grid{3}, S, R) = (
+    # one(S),
+    S,
+    S * R - R * S,
+    deviator(S * S),
+    deviator(R * R),
+    R * S * S - S * S * R,
+    deviator(S * R * R + R * R * S),
+    R * S * R * R - R * R * S * R,
+    S * R * S * S - S * S * R * S,
+    deviator(R * R * S * S + S * S * R * R),
+    R * S * S * R * R - R * R * S * S * R,
+)
+
+@inline ninvariant(::Grid{2}) = 2
+@inline getinvariants(::Grid{2}, S, R) = tr(S * S), tr(R * R)
+
+@inline ninvariant(::Grid{3}) = 5
+@inline getinvariants(::Grid{3}, S, R) =
+    tr(S * S), tr(R * R), tr(S * S * S), tr(S * R * R), tr(S * S * R * R)
 
 "Compute deviatoric part of a tensor."
 @inline deviator(σ) = σ - tr(σ) / 3 * one(σ)
 
 @kernel function tb_kernel!(invariants, basis, grads, g::Grid{2})
-    nb = nbasis(g)
-    ni = ninvariant(g)
+    nb, ni = nbasis(g), ninvariant(g)
     I = @index(Global, Cartesian)
     Gxx, Gyx, Gxy, Gyy = grads.xx[I], grads.yx[I], grads.xy[I], grads.yy[I]
     G = @SMatrix [Gxx Gxy; Gyx Gyy]
     G2 = sum(abs2, G)
     G = G / (sqrt(G2) + eps(eltype(G))) # Normalize gradient
-    S = (G + G') / 2
-    R = (G - G') / 2
-    i = tr(S * S), tr(R * R)
-    b = S, S * R - R * S #, deviator(S * S), deviator(R * R)
+    S, R = (G + G') / 2, (G - G') / 2
+    i, b = getinvariants(g, S, R), getbasis(g, S, R)
     for iinv in Base.OneTo(ni)
         invariants[I, iinv] = i[iinv]
     end
@@ -520,37 +560,27 @@ end
 end
 
 @kernel function tb_kernel!(invariants, basis, grads, g::Grid{3})
+    ni, nb = ninvariant(g), nbasis(g)
     I = @index(Global, Cartesian)
     Gxx, Gxy, Gxz = grads.xx[I], grads.xy[I], grads.xz[I]
     Gyx, Gyy, Gyz = grads.yx[I], grads.yy[I], grads.yz[I]
     Gzx, Gzy, Gzz = grads.zx[I], grads.zy[I], grads.zz[I]
     G = @SMatrix [Gxx Gxy Gxz; Gyx Gyy Gyz; Gzx Gzy Gzz]
-    S = (G + G') / 2
-    R = (G - G') / 2
-    i = tr(S * S), tr(R * R), tr(S * S * S), tr(S * R * R), tr(S * S * R * R)
-    b = (
-        S,
-        S * R - R * S,
-        deviator(S * S),
-        deviator(R * R),
-        R * S * S - S * S * R,
-        deviator(S * R * R + R * R * S),
-        R * S * R * R - R * R * S * R,
-        S * R * S * S - S * S * R * S,
-        deviator(R * R * S * S + S * S * R * R),
-        R * S * S * R * R - R * R * S * S * R,
-    )
-    for iinv in Base.OneTo(5)
+    G2 = sum(abs2, G)
+    G = G / (sqrt(G2) + eps(eltype(G))) # Normalize gradient
+    S, R = (G + G') / 2, (G - G') / 2
+    i, b = getinvariants(g, S, R), getbasis(g, S, R)
+    for iinv in Base.OneTo(ni)
         invariants[I, iinv] = i[iinv]
     end
-    for ibas in Base.OneTo(11)
+    for ibas in Base.OneTo(nb)
         # Convert 3x3 tensor b to flattened symmetric tensor [xx, yy, zz, xy, yz, zx]
-        basis[I, 1, ibas] = b[ibas][1, 1]
-        basis[I, 2, ibas] = b[ibas][2, 2]
-        basis[I, 3, ibas] = b[ibas][3, 3]
-        basis[I, 4, ibas] = b[ibas][1, 2]
-        basis[I, 5, ibas] = b[ibas][2, 3]
-        basis[I, 6, ibas] = b[ibas][3, 1]
+        basis[I, 1, ibas] = b[ibas][1, 1] * sqrt(G2)
+        basis[I, 2, ibas] = b[ibas][2, 2] * sqrt(G2)
+        basis[I, 3, ibas] = b[ibas][3, 3] * sqrt(G2)
+        basis[I, 4, ibas] = b[ibas][1, 2] * sqrt(G2)
+        basis[I, 5, ibas] = b[ibas][2, 3] * sqrt(G2)
+        basis[I, 6, ibas] = b[ibas][3, 1] * sqrt(G2)
     end
 end
 
@@ -577,14 +607,13 @@ function getgradient(u, g)
     GG
 end
 
-tbnn(net, ps, st, g) = function model(u)
+tbnn(net, ps, st, g) = function model(G)
     D = dim(g)
     nx = space_ndrange(g)
     nt = tensordim(g)
     nb = nbasis(g)
 
     # Compute invariants and basis tensors
-    G = getgradient(u, g)
     invariants, basis = build_tensorbasis(G, g)
 
     # Compute coefficients
@@ -596,7 +625,6 @@ tbnn(net, ps, st, g) = function model(u)
     w = reshape(w, :, 1, nb)
     wb = @. w * b
     m = sum(wb; dims = 3)
-    m = reshape(m, :, nt)
     reshape(m, nx..., nt)
 end
 
@@ -651,16 +679,65 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
     m = sum(wb; dims = D + 2)
     m = reshape(m, nx..., nt, :)
 
-    l = MSELoss()(m, y)
-    # l = sum(abs2, m - y) / sum(abs2, y)
+    # l = MSELoss()(m, y)
+    l = sum(abs2, m - y) / sum(abs2, y)
     l, st, (;)
 end
 
-export vectorfield_to_svector, svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield
+export getdissipation
+function getdissipation(g, u, m)
+    nx = space_ndrange(g)
+    D = dim(g)
+    G = getgradient(u, g)
+    τ = m(G)
+    # G = stack(G)
+    S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
+    # τ = if D == 2
+    #     xx, yy, xy = 1, 2, 3
+    #     cat(
+    #         selectdim(τ, D + 1, xx),
+    #         selectdim(τ, D + 1, xy),
+    #         selectdim(τ, D + 1, xy),
+    #         selectdim(τ, D + 1, yy);
+    #         dims = D + 1,
+    #     )
+    # elseif D == 3
+    #     xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
+    #     cat(
+    #         selectdim(τ, D + 1, xx),
+    #         selectdim(τ, D + 1, xy),
+    #         selectdim(τ, D + 1, zx),
+    #         selectdim(τ, D + 1, xy),
+    #         selectdim(τ, D + 1, yy),
+    #         selectdim(τ, D + 1, yz),
+    #         selectdim(τ, D + 1, zx),
+    #         selectdim(τ, D + 1, yz),
+    #         selectdim(τ, D + 1, zz);
+    #         dims = D + 1
+    #     )
+    # end
+    # diss = sum(τ .* S; dims = D + 1)
+    # reshape(diss, nx)
+    if D == 2
+        xx, yy, xy = 1, 2, 3
+        τ = (;
+            xx = selectdim(τ, D + 1, xx),
+            yy = selectdim(τ, D + 1, yy),
+            xy = selectdim(τ, D + 1, xy),
+        )
+        @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
+    elseif D == 3
+        error()
+    end
+end
+
+export vectorfield_to_svector,
+    svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield
 export transform_scalar, transform_vector, transform_tensor
 export getgradient
 export dns_aid, create_dns, create_data, create_dataloader, train, fullchain, inference_post
 export sfs!, cutoff!, gaussianfilter!
-export tbnn, ninvariant, nbasis, create_dataloader_tbnn, create_loss_tbnn
+export tbnn, ninvariant, nbasis, create_dataloader_tbnn, create_loss, create_loss_tbnn
+export get_errors
 
 end

@@ -5,9 +5,9 @@ if false
 end
 
 using Adapt
-using ComponentArrays
 using CUDA, cuDNN
 using FFTW
+using JLD2
 using KernelAbstractions
 using KernelDensity
 using LinearAlgebra
@@ -22,6 +22,8 @@ using SymmetryCode.Spectral
 using WGLMakie
 using Zygote
 lines([1, 2, 3])
+
+outdir = joinpath(@__DIR__, "output") |> mkpath
 
 dns_aid()
 
@@ -63,7 +65,7 @@ end
 
 data = create_data(
     setup;
-    nstep = 100,
+    nstep = 1000,
     nsubstep = 100,
     rng = Xoshiro(0),
     Δ = 4 * setup.l / setup.n_les,
@@ -83,29 +85,6 @@ d
 first(d)[1] |> size
 first(d)[1][:, :, 11, 1]
 
-m_tbnn = let
-    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    net = Chain(
-        Conv((1, 1), Spectral.ninvariant(g) => 10, gelu),
-        Conv((1, 1), 10 => 20, gelu),
-        Conv((1, 1), 20 => Spectral.nbasis(g); use_bias = false),
-    )
-    ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
-    # @show typeof(ps.layer_1.weight); error()
-    # for l in ps
-    #     l.weight .*= 0.000001
-    # end
-    ps, st = train(;
-        loss = create_loss_tbnn(g),
-        setup,
-        dataloader = create_dataloader_tbnn(setup, data; batchsize = 10, rng = Xoshiro(0)),
-        nepoch = 500,
-        learning_rate = 1e-3,
-        net_stuff = (; net, ps, st),
-    )
-    m_tbnn = tbnn(net, ps, st, g)
-end
-
 let
     (; D) = setup
     g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
@@ -122,25 +101,29 @@ let
     ru = (; x = getindex.(ru_sa, 1), y = getindex.(ru_sa, 2))
     uhat = map(rfft, u)
     ruhat = map(rfft, ru)
-    nu = m_tbnn(uhat)
-    nru = m_tbnn(ruhat)
+    Gu = getgradient(uhat, g)
+    Gru = getgradient(ruhat, g)
+    nGu = m_tbnn(Gu)
+    nGru = m_tbnn(Gru)
     M = SMatrix{2,2,T,4}
-    nu = M.(
-        selectdim(nu, 3, 1),
-        selectdim(nu, 3, 3),
-        selectdim(nu, 3, 3),
-        selectdim(nu, 3, 2),
-    )
-    nru = M.(
-        selectdim(nru, 3, 1),
-        selectdim(nru, 3, 3),
-        selectdim(nru, 3, 3),
-        selectdim(nru, 3, 2),
-    )
-    rnu = transform_tensor(nu, (p, s))
-    rnu = smatrix_to_tensorfield(rnu) |> stack
-    nru = smatrix_to_tensorfield(nru) |> stack
-    norm(nru - rnu) / norm(rnu)
+    nGu =
+        M.(
+            selectdim(nGu, 3, 1),
+            selectdim(nGu, 3, 3),
+            selectdim(nGu, 3, 3),
+            selectdim(nGu, 3, 2),
+        )
+    nGru =
+        M.(
+            selectdim(nGru, 3, 1),
+            selectdim(nGru, 3, 3),
+            selectdim(nGru, 3, 3),
+            selectdim(nGru, 3, 2),
+        )
+    rnGu = transform_tensor(nGu, (p, s))
+    rnGu = smatrix_to_tensorfield(rnGu) |> stack
+    nGru = smatrix_to_tensorfield(nGru) |> stack
+    norm(nGru - rnGu) / norm(rnGu)
 end
 
 let
@@ -238,8 +221,20 @@ let
     rx = smatrix_to_tensorfield(rxx) |> stack
     nx = net(reshape(x, size(x)..., 1), ps, st) |> first
     nrx = net(reshape(rx, size(rx)..., 1), ps, st) |> first
-    nx = cat(selectdim(nx, 3, 1), selectdim(nx, 3, 3), selectdim(nx, 3, 3), selectdim(nx, 3, 2); dims = 3) # Desymmetrize
-    nrx = cat(selectdim(nrx, 3, 1), selectdim(nrx, 3, 3), selectdim(nrx, 3, 3), selectdim(nrx, 3, 2); dims = 3) # Desymmetrize
+    nx = cat(
+        selectdim(nx, 3, 1),
+        selectdim(nx, 3, 3),
+        selectdim(nx, 3, 3),
+        selectdim(nx, 3, 2);
+        dims = 3,
+    ) # Desymmetrize
+    nrx = cat(
+        selectdim(nrx, 3, 1),
+        selectdim(nrx, 3, 3),
+        selectdim(nrx, 3, 3),
+        selectdim(nrx, 3, 2);
+        dims = 3,
+    ) # Desymmetrize
     nx = nx
     nx = ntuple(i -> view(nx, :, :, i), 4)
     nx = tensorfield_to_smatrix(nx)
@@ -278,7 +273,6 @@ let
     # Gru
 end
 
-
 let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     net_stuff = equivariant_net(setup, [10, 10, 20, 20])
@@ -314,44 +308,169 @@ let
     norm(nrG - rnG) / norm(rnG)
 end
 
-m_equi = let
-    net_stuff = equivariant_net(setup, [24, 32, 32, 32])
+m_tbnn = let
+    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    net = Chain(
+        Conv((1, 1), Spectral.ninvariant(g) => 64, gelu),
+        Conv((1, 1), 64 => 64, gelu),
+        Conv((1, 1), 64 => 128, gelu),
+        Conv((1, 1), 128 => Spectral.nbasis(g); use_bias = false),
+    ) # 13_056 parameters
+    net |> display
+    ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
+    for l in ps
+        l.weight .*= 0.1
+    end
     ps, st = train(;
+        loss = create_loss_tbnn(g),
         setup,
-        dataloader = create_dataloader(setup, data; batchsize = 5),
-        nepoch = 50,
+        dataloader = create_dataloader_tbnn(setup, data; batchsize = 5, rng = Xoshiro(0)),
+        nepoch = 5,
         learning_rate = 1e-3,
-        net_stuff,
+        net_stuff = (; net, ps, st),
     )
+    file = joinpath(outdir, "ps_tbnn.jld2")
+    jldsave(file; ps = ps |> cpu_device())
+    # ps = load(file, "ps") |> adapt(setup.backend)
+    m_tbnn = tbnn(net, ps, st, g)
+end;
+
+m_equi = let
+    net_stuff = equivariant_net(
+        setup,
+        [16, 24, 24, 32], # 14112 actual params
+    )
+    # ps, st = train(;
+    #     loss = create_loss(net_stuff.project),
+    #     setup,
+    #     dataloader = create_dataloader(setup, data; batchsize = 5),
+    #     nepoch = 5,
+    #     learning_rate = 1e-3,
+    #     net_stuff,
+    # )
+    file = joinpath(outdir, "ps_equi.jld2")
+    # jldsave(file; ps = ps |> cpu_device())
+    ps = load(file, "ps") |> adapt(setup.backend)
+    ps |> cpu_device() |> ComponentArray |> length |> display
     (; net, project) = net_stuff
     fullchain(setup, net, project, ps, st)
-end
+end;
 
 m_conv = let
-    net_stuff = cnn(setup, [24, 32, 32, 32])
-    net_stuff = (;
-        net_stuff...,
-        ps = NamedTuple(
-            0.1 * ComponentArray(net_stuff.ps |> adapt(CPU())) |> adapt(setup.backend),
-        ),
-    )
-    ps, st = train(;
+    net_stuff = cnn(
         setup,
-        dataloader = create_dataloader(setup, data; batchsize = 5),
-        nepoch = 50,
-        learning_rate = 1e-3,
-        net_stuff,
+        [24, 64, 64, 128]; # 14_587 parameters
+        same_as_equi = false,
     )
+    for ps in net_stuff.ps
+        # Initialize weights are too large
+        hasfield(typeof(ps), :weight) && (ps.weight .*= 0.1)
+    end
+    # ps, st = train(;
+    #     loss = create_loss(net_stuff.project),
+    #     setup,
+    #     dataloader = create_dataloader(setup, data; batchsize = 5),
+    #     nepoch = 5,
+    #     learning_rate = 1e-3,
+    #     net_stuff,
+    # )
+    file = joinpath(outdir, "ps_conv.jld2")
+    # jldsave(file; ps = ps |> cpu_device())
+    ps = load(file, "ps") |> adapt(setup.backend)
     (; net, project) = net_stuff
     fullchain(setup, net, project, ps, st)
 end
 
-inference_post(;
-    setup,
-    models = (; tbnn = m_tbnn, conv = m_conv, equi = m_equi),
-    Δ = 4 * setup.l / setup.n_les,
-    tstop = tstop = 1e-2,
-)
+u_dns, u_les = let
+    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    ustart = randomfield(g_dns; rng = Xoshiro(123), kpeak = 5)
+    inference_post(;
+        ustart,
+        setup,
+        models = (; tbnn = m_tbnn, conv = m_conv, equi = m_equi),
+        Δ = 4 * setup.l / setup.n_les,
+        tstop = 1e-1,
+    )
+end
+
+get_errors(setup, u_les)
+
+let
+    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    D = dim(g_dns)
+    stat = turbulence_statistics(u_dns, setup.visc, g_dns)
+    s = spectrum(u_dns, g_dns)
+    s_les = map(u -> spectrum(u, g_les), u_les)
+    fig = Figure()
+    ax = Makie.Axis(fig[1, 1]; xscale = log10, yscale = log10)
+    k = [2, g_dns.n / 8]
+    if D == 2
+        kolmo = @. 2e0 * stat.diss^(1 / 3) * k^(-3)
+        escale = stat.diss^(-2 / 3) * stat.l_kol^(-3)
+    elseif D == 3
+        kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
+        escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
+    end
+    kscale = stat.l_kol
+    # lines!(ax, kscale * s.k, escale * s.s)
+    # lines!(kscale * k, escale * kolmo)
+    for (key, val) in pairs(s_les)
+        lines!(ax, kscale * val.k, escale * val.s; label = string(key))
+    end
+    axislegend(ax)
+    # ylims!(1e-7, 1)
+    fig
+end
+
+let
+    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    u_ref = u_les.ref
+    τrefhat = sfs(u_dns, g_dns, g_les)
+    τref = spacetensorfield(g_les)
+    plan = Seneca.getplan(g_les)
+    for (τ, τhat) in zip(τref, τrefhat)
+        ldiv!(τ, plan, τhat)
+        τ .*= g_les.n^dim(g_les)
+    end
+    m_ref(G) = stack(τref)
+    models = (; ref = m_ref, tbnn = m_tbnn, conv = m_conv, equi = m_equi)
+    diss = map(m -> getdissipation(g_les, u_ref, m), models)
+    # @show map(median, diss); error()
+    dens = map(diss) do d
+        kde(d |> vec |> Array) |> x -> (; x.x, x.density)
+    end
+    fig = Figure()
+    ax = Makie.Axis(
+        fig[1, 1];
+        xlabel = "Dissipation",
+        ylabel = "Density",
+        yscale = log10,
+    )
+    for (key, val) in pairs(dens)
+        lines!(ax, val.x, val.density; label = string(key))
+    end
+    ylims!(ax, 1e-2, 1e2)
+    xlims!(ax, -2.5, 2.5)
+    axislegend(ax)
+    fig
+end
+
+let
+    g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    u = u_dns
+    s = turbulence_statistics(u, setup.visc, g)
+    s |> pairs
+end
+
+let
+    u = u_dns
+    g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    k = div(g.n, 2)
+    plan = plan_rfft(spacescalarfield(g))
+    plan \ copy(u.y) |> Array |> heatmap
+end
 
 data_test = create_data(setup; nstep = 100, nsubstep = 100, rng = Xoshiro(321));
 # dataloader_test = create_dataloader(setup, data_test; batchsize = 1)
