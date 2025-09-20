@@ -140,6 +140,11 @@ equi_errors_post = let
     grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     models = (; nomo = m_nomo, tbnn = m_tbnn, conv = m_conv, equi = m_equi)
     ustart = data[1][end] |> adapt(setup.backend)
+    groupindex = 6
+    (; mats, dets) = group_stuff(setup.D)
+    m = mats[groupindex]
+    d = dets[groupindex]
+    @info "Roto-reflection matrix = $(m) (with determinant = $(d))"
     map(keys(models)) do key
         model = models[key]
         @info "Computing equivariance error for $(key)"
