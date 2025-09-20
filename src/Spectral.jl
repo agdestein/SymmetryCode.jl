@@ -44,11 +44,11 @@ end
 end
 @kernel function gaussianfilter!(u, Δ, g::Grid{3})
     I = @index(Global, Cartesian)
-    # kΔ = pi / Δ * 2
+    kΔ = pi / Δ * 2
     kx, ky, kz = wavenumbers(g, I)
-    # k2 = kx^2 + ky^2 + kz^2
-    # w = exp(-k2 / kΔ^2 / 2)
-    # u[I] *= w
+    k2 = kx^2 + ky^2 + kz^2
+    w = exp(-k2 / kΔ^2 / 2)
+    u[I] *= w
 end
 
 "Verification with DNS-aided LES."
@@ -250,24 +250,27 @@ function create_data(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 
 end
 
 export sfs
-function sfs(u, g_dns, g_les)
+function sfs(u, g_dns, g_les, Δ)
     c_dns = getcache(g_dns)
     c_les = getcache(g_les)
     ubar = vectorfield(g_les)
     σbar1 = tensorfield(g_les)
     σbar2 = tensorfield(g_les)
     τ = tensorfield(g_les)
-    sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les)
+    sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     τ
 end
-function sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les)
+function sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     D = dim(g_dns)
     nonlinearity!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, g_dns)
-    foreach(i -> apply!(cutoff!, g_les, (ubar[i], u[i], g_les, g_dns)), 1:D)
-    foreach(
-        i -> apply!(cutoff!, g_les, (σbar1[i], c_dns.σ[i], g_les, g_dns)),
-        1:tensordim(g_dns),
-    )
+    for (ubar, u) in zip(ubar, u)
+        apply!(cutoff!, g_les, (ubar, u, g_les, g_dns))
+        apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
+    end
+    for (σbar1, σ) in zip(σbar1, c_dns.σ)
+        apply!(cutoff!, g_les, (σbar1, σ, g_les, g_dns))
+        apply!(gaussianfilter!, g_les, (σbar1, Δ, g_les))
+    end
     nonlinearity!(σbar2, c_les.vi_vj, c_les.v, ubar, c_les.plan, g_les)
     foreach(i -> (τ[i] .= σbar1[i] .- σbar2[i]), 1:tensordim(g_dns))
     foreach(τ -> apply!(twothirds!, g_les, (τ, g_les)), τ)
@@ -354,25 +357,65 @@ function smatrix_to_tensorfield(t)
     end
 end
 
-function transform_scalar(f, (p, s))
-    f = permutedims(f, p)
-    dims = (findall(==(-1), s)...,)
-    f = reverse(f; dims)
+export inverse_vector_fourier
+function inverse_vector_fourier(u, g)
+    uu = spacevectorfield(g)
+    temp = scalarfield(g)
+    plan = plan_rfft(uu.x)
+    for (uu, u) in zip(uu, u)
+        copyto!(temp, u)
+        temp .*= g.n^dim(g) # FFT factor
+        apply!(twothirds!, g, (temp, g))
+        ldiv!(uu, plan, temp)
+    end
+    uu
 end
-function transform_vector(u, (p, s))
-    u = permutedims(u, p)
+
+export forward_vector_fourier
+function forward_vector_fourier(uu, g)
+    u = vectorfield(g)
+    plan = plan_rfft(uu.x)
+    for (uu, u) in zip(uu, u)
+        mul!(u, plan, uu)
+        u ./= g.n^dim(g) # FFT factor
+    end
+    u
+end
+
+function transform_vector(u, g, (p, s))
+    T, D = typeof(g.l), dim(g)
+    u_sa = SVector{D,T}.(u...)
+    u_sa = permutedims(u_sa, p)
     dims = (findall(==(-1), s)...,)
-    u = reverse(u; dims)
+    u_sa = reverse(u_sa; dims)
     m = roto_reflection_matrix(p, s)
-    u = map(u -> m * u, u)
+    ru_sa = map(u -> m * u, u_sa)
+    ru = if D == 2
+        (; x = getindex.(ru_sa, 1), y = getindex.(ru_sa, 2))
+    elseif D == 3
+        (; x = getindex.(ru_sa, 1), y = getindex.(ru_sa, 2), z = getindex.(ru_sa, 3))
+    end
 end
-function transform_tensor(t, (p, s))
-    t = permutedims(t, p)
-    dims = (findall(==(-1), s)...,)
-    t = reverse(t; dims)
-    m = roto_reflection_matrix(p, s)
-    map(t -> m * t * m', t)
-end
+
+# function transform_scalar(f, (p, s))
+#     f = permutedims(f, p)
+#     dims = (findall(==(-1), s)...,)
+#     f = reverse(f; dims)
+# end
+# function transform_vector(u, (p, s))
+#     u = permutedims(u, p)
+#     dims = (findall(==(-1), s)...,)
+#     u = reverse(u; dims)
+#     m = roto_reflection_matrix(p, s)
+#     u = map(u -> m * u, u)
+# end
+# function transform_tensor(t, (p, s))
+#     t = permutedims(t, p)
+#     dims = (findall(==(-1), s)...,)
+#     t = reverse(t; dims)
+#     m = roto_reflection_matrix(p, s)
+#     map(t -> m * t * m', t)
+# end
 
 create_loss(project) = function loss(net, ps, st, (x, y))
     ps = project(ps)
@@ -390,14 +433,32 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
     device = adapt(backend)
     opt = AdamW(learning_rate)
     train_state = Training.TrainState(net, ps, st, opt)
+    b_valid = first(dataloader) |> device
+    ps_best = deepcopy(ps)
+    l_best = Inf
     for iepoch = 1:nepoch, (ibatch, batch) in enumerate(dataloader)
         x, y = batch |> device
         # loss(net, ps, st, (x, y)); error()
         _, l, _, train_state =
             Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
-        ibatch % 1 == 0 && @info "iepoch = $iepoch, ibatch = $ibatch, loss = $l"
+        if ibatch % 1 == 0
+            l_valid = loss(net, ps, st, b_valid) |> first
+            @info join(
+                [
+                    "iepoch = $iepoch",
+                    "ibatch = $ibatch",
+                    "loss (valid) = $(round(l_valid; sigdigits = 4))",
+                    "loss (train) = $(round(l; sigdigits = 4))",
+                ],
+                ",\t",
+            )
+            if l_valid < l_best
+                l_best = l_valid
+                ps_best = deepcopy(train_state.parameters)
+            end
+        end
     end
-    ps = train_state.parameters
+    ps = ps_best
     st = train_state.states
     ps, st
 end
@@ -450,7 +511,6 @@ function inference_post(; ustart, setup, models, cfl = 0.35, tstop = 1e-1, Δ)
         apply!(cutoff!, g_les, (fu, u, g_les, g_dns))
         apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
     end
-    u_nomo = map(copy, fu)
     u_models = map(m -> map(copy, fu), models)
     t = zero(tstop)
     i = 0
@@ -459,7 +519,6 @@ function inference_post(; ustart, setup, models, cfl = 0.35, tstop = 1e-1, Δ)
         Δt = min(Δt, tstop - t)
         t += Δt
         wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
-        wray3!(convectiondiffusion!, u_nomo, Δt, g_les, c_les; visc)
         for (u, model) in zip(u_models, models)
             wray3!(les!, u, Δt, g_les, c_les; model, visc)
         end
@@ -481,11 +540,9 @@ function inference_post(; ustart, setup, models, cfl = 0.35, tstop = 1e-1, Δ)
         apply!(cutoff!, g_les, (fu, u, g_les, g_dns))
         apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
     end
-    u_les = (; ref = fu, nomo = u_nomo, u_models...)
+    u_les = (; ref = fu, u_models...)
     for u in u_models
-        for u in u
-            apply!(twothirds!, g_les, (u, g_les))
-        end
+        foreach(u -> apply!(twothirds!, g_les, (u, g_les)), u)
     end
     u, u_les
 end
@@ -690,34 +747,7 @@ function getdissipation(g, u, m)
     D = dim(g)
     G = getgradient(u, g)
     τ = m(G)
-    # G = stack(G)
     S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
-    # τ = if D == 2
-    #     xx, yy, xy = 1, 2, 3
-    #     cat(
-    #         selectdim(τ, D + 1, xx),
-    #         selectdim(τ, D + 1, xy),
-    #         selectdim(τ, D + 1, xy),
-    #         selectdim(τ, D + 1, yy);
-    #         dims = D + 1,
-    #     )
-    # elseif D == 3
-    #     xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
-    #     cat(
-    #         selectdim(τ, D + 1, xx),
-    #         selectdim(τ, D + 1, xy),
-    #         selectdim(τ, D + 1, zx),
-    #         selectdim(τ, D + 1, xy),
-    #         selectdim(τ, D + 1, yy),
-    #         selectdim(τ, D + 1, yz),
-    #         selectdim(τ, D + 1, zx),
-    #         selectdim(τ, D + 1, yz),
-    #         selectdim(τ, D + 1, zz);
-    #         dims = D + 1
-    #     )
-    # end
-    # diss = sum(τ .* S; dims = D + 1)
-    # reshape(diss, nx)
     if D == 2
         xx, yy, xy = 1, 2, 3
         τ = (;
@@ -729,6 +759,80 @@ function getdissipation(g, u, m)
     elseif D == 3
         error()
     end
+end
+
+export test_equivariance_post
+function test_equivariance_post(;
+    ustart,
+    setup,
+    grid,
+    model,
+    groupindex,
+    rng,
+    cfl = 0.35,
+    tstop = 1e-2,
+)
+    T, D = typeof(setup.l), setup.D
+
+    # Group element
+    (; elements, permutations, signs, mats) = group_stuff(setup.D)
+    ip, is = elements[groupindex]
+    p, s = permutations[ip], signs[is]
+    # mats[groupindex] |> display
+    # mats[groupindex] |> det |> display
+    # error()
+
+    # Initial conditions + rotated copy
+    u = map(copy, ustart)
+    # u = randomfield(grid; rng = Xoshiro(123), kpeak = 5)
+    # foreach(u -> randn!(Xoshiro(123), u), u)
+    # apply!(project!, grid, (u, grid))
+    # foreach(u -> apply!(twothirds!, grid, (u, grid)), u)
+    space_u = inverse_vector_fourier(u, grid)
+    space_ru = transform_vector(space_u, grid, (p, s))
+    ru = forward_vector_fourier(space_ru, grid)
+    foreach(u -> apply!(twothirds!, grid, (u, grid)), ru)
+
+    # Time stepping
+    (; visc) = setup
+    cache = (; getcache(grid)..., G = tensorfield_nonsym(grid))
+    t = zero(tstop)
+    i = 0
+    while t < tstop
+        Δt_u = cfl * propose_timestep(u, grid, visc, cache)
+        Δt_ru = cfl * propose_timestep(ru, grid, visc, cache)
+        Δt = min(Δt_u, Δt_ru, tstop - t)
+        t += Δt
+        wray3!(les!, u, Δt, grid, cache; model, visc)
+        wray3!(les!, ru, Δt, grid, cache; model, visc)
+        if i % 10 == 0
+            e = energy(u)
+            @info join(
+                [
+                    "i = $i",
+                    "t = $(round(t; sigdigits = 4))",
+                    "Δt = $(round(Δt; sigdigits = 4))",
+                    "energy = $(round(e; sigdigits = 4))",
+                ],
+                ",\t",
+            )
+        end
+        i += 1
+    end
+
+    # Rotate stepped u
+    space_su = inverse_vector_fourier(u, grid)
+    space_rsu = transform_vector(space_su, grid, (p, s))
+    rsu = forward_vector_fourier(space_rsu, grid)
+
+    # Remove noisy ghost components
+    foreach(u -> apply!(twothirds!, grid, (u, grid)), rsu)
+    foreach(u -> apply!(twothirds!, grid, (u, grid)), ru)
+
+    # Commutation error between rotation and time-stepping
+    rsu = stack(rsu)
+    sru = stack(ru)
+    norm(rsu - sru) / norm(sru)
 end
 
 export vectorfield_to_svector,
