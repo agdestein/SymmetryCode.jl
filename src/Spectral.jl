@@ -148,11 +148,11 @@ function create_dns(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 1
     u
 end
 
-function create_data(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 10, Δ, rng)
+function create_data(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 10, kpeak, Δ, rng)
     (; visc, D, n_dns, n_les, backend) = setup
     g_dns = Grid{D}(; setup.l, n = n_dns, backend)
     g_les = Grid{D}(; setup.l, n = n_les, backend)
-    u = randomfield(g_dns; rng, kpeak = 5)
+    u = randomfield(g_dns; rng, kpeak)
     c_dns = getcache(g_dns)
     c_les = getcache(g_les)
     fu = vectorfield(g_les)
@@ -555,7 +555,7 @@ function get_errors(setup, u_les)
     errs = map(k_les) do key
         u = u_les[key]
         err = norm(u - u_ref) / norm(u_ref)
-        @show key => err
+        println(key => round(err; sigdigits = 4))
         key => err
     end
 end

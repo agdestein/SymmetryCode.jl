@@ -5,10 +5,10 @@ if false
 end
 
 using Adapt
+using CairoMakie
 using CUDA, cuDNN
 using FFTW
 using JLD2
-using KernelAbstractions
 using KernelDensity
 using LinearAlgebra
 using Lux
@@ -20,10 +20,11 @@ using Statistics
 using SymmetryCode
 using SymmetryCode.Spectral
 using WGLMakie
-using Zygote
 lines([1, 2, 3])
 
 outdir = joinpath(@__DIR__, "output") |> mkpath
+# plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
+plotdir = outdir
 
 dns_aid()
 
@@ -31,13 +32,13 @@ setup = let
     l = 1.0
     n_les = 256
     Δ = 4 * l / n_les
-    (; visc = 5e-5, D = 2, l = 1.0, n_dns = 1024, n_les, Δ, backend = CUDABackend())
+    (; visc = 5e-5, D = 2, l = 1.0, n_dns = 1024, n_les, kpeak = 5, Δ, backend = CUDABackend())
 end
 
 data = let
     filename = joinpath(outdir, "data-$(setup.n_les).jld2")
     if false
-        d = create_data(setup; nstep = 1000, nsubstep = 100, rng = Xoshiro(0), setup.Δ)
+        d = create_data(setup; nstep = 1000, nsubstep = 100, kpeak, rng = Xoshiro(0), setup.Δ)
         jldsave(filename; data = d)
     end
     load(filename, "data")
@@ -180,12 +181,17 @@ get_errors(setup, u_les);
 let
     g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
     g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    labels = (; ref = "Filtered DNS", nomo = "No-model", tbnn = "TBNN", conv = "Conv", equi = "G-Conv")
     D = dim(g_dns)
     stat = turbulence_statistics(u_dns, setup.visc, g_dns)
     s = spectrum(u_dns, g_dns)
     s_les = map(u -> spectrum(u, g_les), u_les)
-    fig = Figure()
-    ax = Makie.Axis(fig[1, 1]; xscale = log10, yscale = log10)
+    fig = Figure(; size = (400, 300))
+    ax = Axis(
+        fig[1, 1]; xscale = log10, yscale = log10,
+        xlabel = "Normalized wavenumber",
+        ylabel = "Normalized spectrum",
+    )
     k = [2, g_dns.n / 8]
     if D == 2
         kolmo = @. 2e0 * stat.diss^(1 / 3) * k^(-3)
@@ -195,13 +201,15 @@ let
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
     end
     kscale = stat.l_kol
-    # lines!(ax, kscale * s.k, escale * s.s)
+    # kscale = 1
+    lines!(ax, kscale * s.k, escale * s.s; label = "DNS")
     # lines!(kscale * k, escale * kolmo)
     for (key, val) in pairs(s_les)
-        lines!(ax, kscale * val.k, escale * val.s; label = string(key))
+        lines!(ax, kscale * val.k, escale * val.s; label = labels[key])
     end
-    axislegend(ax)
+    axislegend(ax; position = :lb)
     # ylims!(1e-7, 1)
+    save("$(plotdir)/spectrum-$(setup.n_les).pdf", fig; backend = CairoMakie)
     fig
 end
 
@@ -244,7 +252,7 @@ let
     # τ.xx |> Array |> heatmap |> display; error()
     # τ.xx |> Array |> display
     # error()
-    fig = Figure(; size = (700, 300))
+    fig = Figure(; size = (800, 300))
     #
     ax_xx =
         Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density", yscale = log10)
@@ -252,16 +260,16 @@ let
     for (key, val) in pairs(τxx)
         lines!(ax_xx, val.x / setup.Δ, val.density; label = labels[key])
     end
-    ylims!(ax_xx, 3e-2, 2e2)
-    # xlims!(ax_xx, -0.1, 0.4)
+    xlims!(ax_xx, -0.5, 5)
+    ylims!(ax_xx, 2e-1, 3e2)
     #
     ax_xy = Makie.Axis(fig[1, 2]; xlabel = "xy-component", yscale = log10)
     τxy = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), τxy)
     for (key, val) in pairs(τxy)
         lines!(ax_xy, val.x / setup.Δ, val.density)
     end
-    ylims!(ax_xy, 5e-2, 1e2)
-    # xlims!(ax_xy, -0.2, 0.12)
+    xlims!(ax_xy, -3, 2)
+    ylims!(ax_xy, 2e-1, 5e2)
     #
     ax_diss = Makie.Axis(fig[1, 3]; xlabel = "Dissipation", yscale = log10)
     diss = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), diss)
@@ -273,9 +281,10 @@ let
             val.density,
         )
     end
-    ylims!(ax_diss, 1e-1, 7e1)
-    xlims!(ax_diss, -20, 20)
+    xlims!(ax_diss, -15, 16)
+    ylims!(ax_diss, 1e-1, 2e2)
     Legend(fig[0, :], ax_xx; orientation = :horizontal)
+    save("$(plotdir)/tensor-distributions-$(setup.n_les).pdf", fig; backend = CairoMakie)
     fig
 end
 
