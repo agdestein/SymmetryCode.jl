@@ -38,7 +38,7 @@ end
 data = let
     filename = joinpath(outdir, "data-$(setup.n_les).jld2")
     if false
-        d = create_data(setup; nstep = 1000, nsubstep = 100, kpeak, rng = Xoshiro(0), setup.Δ)
+        d = create_data(setup; nstep = 1000, nsubstep = 100, setup.kpeak, rng = Xoshiro(0), setup.Δ)
         jldsave(filename; data = d)
     end
     load(filename, "data")
@@ -145,7 +145,7 @@ equi_errors_post = let
     (; mats, dets) = group_stuff(setup.D)
     m = mats[groupindex]
     d = dets[groupindex]
-    @info "Roto-reflection matrix = $(m) (with determinant = $(d))"
+    @info "Roto-reflection matrix $(m) (with determinant $(d))"
     map(keys(models)) do key
         model = models[key]
         @info "Computing equivariance error for $(key)"
@@ -157,6 +157,7 @@ equi_errors_post = let
             groupindex = 6,
             rng = Xoshiro(123),
             tstop = 1e-1,
+            cfl = 0.35,
         )
         key => e
     end |> NamedTuple
@@ -214,78 +215,9 @@ let
 end
 
 let
-    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    D = dim(g_dns)
-    u_ref = u_les.ref
-    τhat = sfs(u_dns, g_dns, g_les, setup.Δ)
-    τ = spacetensorfield(g_les)
-    plan = Seneca.getplan(g_les)
-    for (τ, τhat) in zip(τ, τhat)
-        apply!(twothirds!, g_les, (τhat, g_les))
-        ldiv!(τ, plan, τhat)
-        τ .*= g_les.n^dim(g_les)
-    end
-    G = getgradient(u_ref, g_les)
-    S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
     models = (; tbnn = m_tbnn, conv = m_conv, equi = m_equi)
     labels = (; ref = "Reference", tbnn = "TBNN", conv = "Conv", equi = "G-Conv")
-    τ_les = map(models) do m
-        y = m(G)
-        if D == 2
-            xx, yy, xy = 1, 2, 3
-            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
-        elseif D == 3
-            error()
-        end
-    end
-    τ_all = (; ref = τ, τ_les...)
-    τxx = map(τ -> τ.xx, τ_all)
-    τyy = map(τ -> τ.yy, τ_all)
-    τxy = map(τ -> τ.xy, τ_all)
-    diss = map(τ_all) do τ
-        @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
-    end
-    # τ.xx |> x -> plan \ x |> display; error()
-    # τ.xx |> display; error()
-    # map(mean, τxx) |> pairs |> display; error()
-    # τ.xx |> Array |> heatmap |> display; error()
-    # τ.xx |> Array |> display
-    # error()
-    fig = Figure(; size = (800, 300))
-    #
-    ax_xx =
-        Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density", yscale = log10)
-    τxx = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), τxx)
-    for (key, val) in pairs(τxx)
-        lines!(ax_xx, val.x / setup.Δ, val.density; label = labels[key])
-    end
-    xlims!(ax_xx, -0.5, 5)
-    ylims!(ax_xx, 2e-1, 3e2)
-    #
-    ax_xy = Makie.Axis(fig[1, 2]; xlabel = "xy-component", yscale = log10)
-    τxy = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), τxy)
-    for (key, val) in pairs(τxy)
-        lines!(ax_xy, val.x / setup.Δ, val.density)
-    end
-    xlims!(ax_xy, -3, 2)
-    ylims!(ax_xy, 2e-1, 5e2)
-    #
-    ax_diss = Makie.Axis(fig[1, 3]; xlabel = "Dissipation", yscale = log10)
-    diss = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), diss)
-    for (key, val) in pairs(diss)
-        lines!(
-            ax_diss,
-            # val.x,
-            val.x / setup.Δ,
-            val.density,
-        )
-    end
-    xlims!(ax_diss, -15, 16)
-    ylims!(ax_diss, 1e-1, 2e2)
-    Legend(fig[0, :], ax_xx; orientation = :horizontal)
-    save("$(plotdir)/tensor-distributions-$(setup.n_les).pdf", fig; backend = CairoMakie)
-    fig
+    plot_densities(setup, u_dns, u_les, models, labels, plotdir)
 end
 
 let

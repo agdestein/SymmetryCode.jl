@@ -5,35 +5,49 @@ using FFTW
 using KernelAbstractions
 using LinearAlgebra
 using Lux
+using Makie
 using MLUtils
 using Optimisers
 using Random
 using Seneca
 using StaticArrays
 using ..SymmetryCode
+using Zygote
 
-@inline function cutoff_index(gbar, g, i, is1)
-    comp = div(g.n, gbar.n)
-    imax = div(gbar.n, 2) + is1
+@inline function cutoff_index(nbar, n, i, is1)
+    imax = div(nbar, 2) + is1
     isneg = i > imax
-    ifelse(isneg, g.n - gbar.n + i, i) # Negative wavenumbers count backwards
+    ifelse(isneg, n - nbar + i, i) # Negative wavenumbers count backwards
 end
-@inline cutoff_index(gbar, g, I::CartesianIndex{2}) = CartesianIndex((
-    cutoff_index(gbar, g, I.I[1], true),
-    cutoff_index(gbar, g, I.I[2], false),
+@inline cutoff_index(nbar, n, I::CartesianIndex{2}) = CartesianIndex((
+    cutoff_index(nbar, n, I.I[1], true),
+    cutoff_index(nbar, n, I.I[2], false),
 ))
-@inline cutoff_index(gbar, g, I::CartesianIndex{3}) = CartesianIndex((
-    cutoff_index(gbar, g, I.I[1], true),
-    cutoff_index(gbar, g, I.I[2], false),
-    cutoff_index(gbar, g, I.I[3], false),
+@inline cutoff_index(nbar, n, I::CartesianIndex{3}) = CartesianIndex((
+    cutoff_index(nbar, n, I.I[1], true),
+    cutoff_index(nbar, n, I.I[2], false),
+    cutoff_index(nbar, n, I.I[3], false),
 ))
 
-@kernel function cutoff!(ubar, u, gbar, g)
+export cutoff!
+@kernel function cutoff!(ubar, u)
+    nbar = size(ubar, 2)
+    n = size(u, 2)
     I = @index(Global, Cartesian)
-    J = cutoff_index(gbar, g, I)
+    J = cutoff_index(nbar, n, I)
     ubar[I] = u[J]
 end
 
+export inverse_cutoff!
+@kernel function inverse_cutoff!(u, ubar)
+    nbar = size(ubar, 2)
+    n = size(u, 2)
+    I = @index(Global, Cartesian)
+    J = cutoff_index(nbar, n, I)
+    u[J] = ubar[I]
+end
+
+export gaussianfilter!
 @kernel function gaussianfilter!(u, Δ, g::Grid{2})
     I = @index(Global, Cartesian)
     kΔ = pi / Δ * 2
@@ -64,7 +78,7 @@ function dns_aid()
     foreach(randn!, u)
     apply!(project!, g, (u, g))
     ubar = vectorfield(gbar)
-    foreach(i -> apply!(cutoff!, gbar, (ubar[i], u[i], gbar, g)), 1:D)
+    foreach(i -> apply!(cutoff!, gbar, (ubar[i], u[i])), 1:D)
     v = map(copy, ubar)
     fσ = tensorfield(gbar)
     σf = tensorfield(gbar)
@@ -81,10 +95,10 @@ function dns_aid()
         stress!(c.σ, c.vi_vj, c.v, u, c.plan, visc, g)
         apply!(tensordivergence!, g, (c.du, c.σ, g))
         # LES
-        foreach(i -> apply!(cutoff!, gbar, (ubar[i], u[i], gbar, g)), 1:D)
+        foreach(i -> apply!(cutoff!, gbar, (ubar[i], u[i])), 1:D)
         stress!(σf, cbar.vi_vj, cbar.v, ubar, cbar.plan, visc, gbar)
         stress!(cbar.σ, cbar.vi_vj, cbar.v, v, cbar.plan, visc, gbar)
-        foreach(i -> apply!(cutoff!, gbar, (fσ[i], c.σ[i], gbar, g)), 1:tensordim(g))
+        foreach(i -> apply!(cutoff!, gbar, (fσ[i], c.σ[i])), 1:tensordim(g))
         foreach(i -> (cbar.σ[i] .+= fσ[i] .- σf[i]), 1:tensordim(g))
         apply!(tensordivergence!, gbar, (cbar.du, cbar.σ, gbar))
         # Step
@@ -95,7 +109,7 @@ function dns_aid()
         apply!(project!, g, (u, g))
         apply!(project!, gbar, (v, gbar))
     end
-    foreach(i -> apply!(cutoff!, gbar, (ubar[i], u[i], gbar, g)), 1:D)
+    foreach(i -> apply!(cutoff!, gbar, (ubar[i], u[i])), 1:D)
     sum(i -> sum(abs2, v[i] - ubar[i]) / sum(abs2, ubar[i]), 1:D)
 end
 
@@ -183,9 +197,9 @@ function create_data(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 
         @. ou.b *= sqrt(2 * var^2 * Δt / t_ou)
         @. ou.b += (1 - Δt / t_ou) * ou.bold
         copyto!(ou.bold, ou.b)
-        @. u.x[ou.iuse] += Δt * ou.b[:, 1]
-        @. u.y[ou.iuse] += Δt * ou.b[:, 2]
-        D == 3 && @. u.z[ou.iuse] += Δt * ou.b[:, 3]
+        for (i, u) in enumerate(u)
+            @. u[ou.iuse] += Δt * ou.b[:, i]
+        end
         apply!(project!, g_dns, (u, g_dns))
 
         if k % 10 == 0
@@ -194,7 +208,7 @@ function create_data(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 
                 [
                     "k = $k",
                     "t = $(round(t; sigdigits = 4))",
-                    # "Δt = $(round(Δt; sigdigits = 4))",
+                    "Δt = $(round(Δt; sigdigits = 4))",
                     # "umax = $(round(maximum(u -> maximum(abs, u), u); sigdigits = 4))",
                     "energy = $(round(e; sigdigits = 4))",
                 ],
@@ -214,31 +228,31 @@ function create_data(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 
             @. ou.b *= sqrt(2 * var^2 * Δt / t_ou)
             @. ou.b += (1 - Δt / t_ou) * ou.bold
             copyto!(ou.bold, ou.b)
-            @. u.x[ou.iuse] += Δt * ou.b[:, 1]
-            @. u.y[ou.iuse] += Δt * ou.b[:, 2]
-            D == 3 && @. u.z[ou.iuse] += Δt * ou.b[:, 3]
+            for (i, u) in enumerate(u)
+                @. u[ou.iuse] += Δt * ou.b[:, i]
+            end
             apply!(project!, g_dns, (u, g_dns))
-        end
-        if i % 1 == 0
-            e = energy(u)
-            @info join(
-                [
-                    "i = $i",
-                    "t = $(round(t; sigdigits = 4))",
-                    # "Δt = $(round(Δt; sigdigits = 4))",
-                    # "umax = $(round(maximum(u -> maximum(abs, u), u); sigdigits = 4))",
-                    "energy = $(round(e; sigdigits = 4))",
-                ],
-                ",\t",
-            )
+            if j == nsubstep && i % 1 == 0
+                e = energy(u)
+                @info join(
+                    [
+                        "i = $i",
+                        "t = $(round(t; sigdigits = 4))",
+                        "Δt = $(round(Δt; sigdigits = 4))",
+                        # "umax = $(round(maximum(u -> maximum(abs, u), u); sigdigits = 4))",
+                        "energy = $(round(e; sigdigits = 4))",
+                    ],
+                    ",\t",
+                )
+            end
         end
         stress!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, visc, g_dns)
         for (fu, u) in zip(fu, u)
-            apply!(cutoff!, g_les, (fu, u, g_les, g_dns))
+            apply!(cutoff!, g_les, (fu, u))
             apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
         end
         for (fσu, σu) in zip(fσu, c_dns.σ)
-            apply!(cutoff!, g_les, (fσu, σu, g_les, g_dns))
+            apply!(cutoff!, g_les, (fσu, σu))
             apply!(gaussianfilter!, g_les, (fσu, Δ, g_les))
         end
         stress!(σfu, c_les.vi_vj, c_les.v, fu, c_les.plan, visc, g_les)
@@ -264,11 +278,11 @@ function sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     D = dim(g_dns)
     nonlinearity!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, g_dns)
     for (ubar, u) in zip(ubar, u)
-        apply!(cutoff!, g_les, (ubar, u, g_les, g_dns))
+        apply!(cutoff!, g_les, (ubar, u))
         apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
     end
     for (σbar1, σ) in zip(σbar1, c_dns.σ)
-        apply!(cutoff!, g_les, (σbar1, σ, g_les, g_dns))
+        apply!(cutoff!, g_les, (σbar1, σ))
         apply!(gaussianfilter!, g_les, (σbar1, Δ, g_les))
     end
     nonlinearity!(σbar2, c_les.vi_vj, c_les.v, ubar, c_les.plan, g_les)
@@ -427,7 +441,6 @@ end
 
 function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
     (; D, backend) = setup
-    g = Grid{D}(; setup.l, n = setup.n_les, backend)
     (; net, ps, st) = net_stuff
     ps = deepcopy(ps)
     device = adapt(backend)
@@ -769,8 +782,8 @@ function test_equivariance_post(;
     model,
     groupindex,
     rng,
-    cfl = 0.35,
-    tstop = 1e-2,
+    tstop,
+    cfl,
 )
     T, D = typeof(setup.l), setup.D
 
@@ -835,12 +848,93 @@ function test_equivariance_post(;
     norm(rsu - sru) / norm(sru)
 end
 
+export plot_densities
+function plot_densities(setup, u_dns, u_les, models, labels, plotdir)
+    (; visc, D) = setup
+    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    D = dim(g_dns)
+    u_ref = u_les.ref
+    τhat = sfs(u_dns, g_dns, g_les, setup.Δ)
+    τ = spacetensorfield(g_les)
+    plan = Seneca.getplan(g_les)
+    for (τ, τhat) in zip(τ, τhat)
+        apply!(twothirds!, g_les, (τhat, g_les))
+        ldiv!(τ, plan, τhat)
+        τ .*= g_les.n^dim(g_les)
+    end
+    G = getgradient(u_ref, g_les)
+    S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
+    τ_les = map(models) do m
+        y = m(G)
+        if D == 2
+            xx, yy, xy = 1, 2, 3
+            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
+        elseif D == 3
+            error()
+        end
+    end
+    τ_all = (; ref = τ, τ_les...)
+    τxx = map(τ -> τ.xx, τ_all)
+    τyy = map(τ -> τ.yy, τ_all)
+    τxy = map(τ -> τ.xy, τ_all)
+    diss = map(τ_all) do τ
+        @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
+    end
+    # τ.xx |> x -> plan \ x |> display; error()
+    # τ.xx |> display; error()
+    # map(mean, τxx) |> pairs |> display; error()
+    # τ.xx |> Array |> heatmap |> display; error()
+    # τ.xx |> Array |> display
+    # error()
+    fig = Figure(; size = (800, 300))
+    #
+    ax_xx =
+        Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density", yscale = log10)
+    τxx = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), τxx)
+    for (key, val) in pairs(τxx)
+        lines!(ax_xx, val.x / setup.Δ, val.density; label = labels[key])
+    end
+    xlims!(ax_xx, -0.5, 5)
+    ylims!(ax_xx, 2e-1, 3e2)
+    #
+    ax_xy = Makie.Axis(fig[1, 2]; xlabel = "xy-component", yscale = log10)
+    τxy = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), τxy)
+    for (key, val) in pairs(τxy)
+        lines!(ax_xy, val.x / setup.Δ, val.density)
+    end
+    xlims!(ax_xy, -3, 2)
+    ylims!(ax_xy, 2e-1, 5e2)
+    #
+    ax_diss = Makie.Axis(fig[1, 3]; xlabel = "Dissipation", yscale = log10)
+    diss = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), diss)
+    for (key, val) in pairs(diss)
+        lines!(
+            ax_diss,
+            # val.x,
+            val.x / setup.Δ,
+            val.density,
+        )
+    end
+    xlims!(ax_diss, -15, 16)
+    ylims!(ax_diss, 1e-1, 2e2)
+    Legend(fig[0, :], ax_xx; orientation = :horizontal)
+    save("$(plotdir)/tensor-distributions-$(setup.n_les).pdf", fig; backend = CairoMakie)
+    fig
+end
+
+
+
+
+
+
+
 export vectorfield_to_svector,
     svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield
 export transform_scalar, transform_vector, transform_tensor
 export getgradient
 export dns_aid, create_dns, create_data, create_dataloader, train, fullchain, inference_post
-export sfs!, cutoff!, gaussianfilter!
+export sfs!, gaussianfilter!
 export tbnn, ninvariant, nbasis, create_dataloader_tbnn, create_loss, create_loss_tbnn
 export get_errors
 
