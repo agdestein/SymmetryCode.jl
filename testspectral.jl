@@ -365,13 +365,7 @@ let
 end
 
 let
-    models = (;
-        tbnn = m_tbnn,
-        conv = m_conv,
-        equi = m_equi,
-        smag = m_smag,
-        clar = m_clar,
-    )
+    models = (; tbnn = m_tbnn, conv = m_conv, equi = m_equi, smag = m_smag, clar = m_clar)
     labels = (;
         ref = "Reference",
         tbnn = "TBNN",
@@ -406,13 +400,7 @@ end
 apriori_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
 apriori_equi_errors = let
-    models = (;
-        tbnn = m_tbnn,
-        conv = m_conv,
-        equi = m_equi,
-        smag = m_smag,
-        clar = m_clar,
-    )
+    models = (; tbnn = m_tbnn, conv = m_conv, equi = m_equi, smag = m_smag, clar = m_clar)
     labels = (;
         tbnn = "TBNN",
         conv = "Conv",
@@ -430,4 +418,11 @@ let
     u = u_dns
     s = turbulence_statistics(u, setup.visc, g)
     s |> pairs
+end
+
+let
+    comp = :x
+    fig = plot_velocities(setup, u_dns, u_les, comp)
+    save("$(plotdir)/velocities-$(comp)-$(setup.D)D-$(setup.n_les).pdf", fig; backend = CairoMakie)
+    fig
 end

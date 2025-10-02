@@ -1213,6 +1213,67 @@ function apriori_equivariance_error(; setup, u_les, models, labels, plotdir, gro
     errors
 end
 
+
+export plot_velocities
+function plot_velocities(setup, u_dns, u_les, comp)
+    fig = Figure(; size = (800, 440))
+    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    ui = spacescalarfield(g_dns)
+    plan = plan_rfft(ui)
+    ldiv!(ui, plan, copy(u_dns[comp])) # Make copy, ldiv! overwrites...
+    ui .*= g_dns.n^3 # FFT factor
+    data = ui[:, :, end] |> Array
+    ax = Axis(
+        fig[1, 1];
+        xlabelvisible = false,
+        xticksvisible = false,
+        xticklabelsvisible = false,
+        ylabelvisible = false,
+        yticksvisible = false,
+        yticklabelsvisible = false,
+        aspect = DataAspect(),
+        title = "DNS",
+    )
+    colormap = :seaborn_icefire_gradient
+    image!(ax, data; colormap, interpolate = false)
+    labels = (;
+        ref = "Filtered DNS",
+        nomo = "No-model",
+        tbnn = "TBNN",
+        conv = "Conv",
+        equi = "G-Conv",
+        smag = "Smagorinsky",
+        clar = "Clark",
+    )
+    for (k, key) in enumerate(keys(u_les))
+        k += 1 # First for DNS
+        u = u_les[key]
+        title = labels[key]
+        j, i = CartesianIndices((4, 2))[k].I
+        ax = Axis(
+            fig[i, j];
+            xlabelvisible = false,
+            xticksvisible = false,
+            xticklabelsvisible = false,
+            ylabelvisible = false,
+            yticksvisible = false,
+            yticklabelsvisible = false,
+            aspect = DataAspect(),
+            title,
+        )
+        g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+        ui = spacescalarfield(g)
+        plan = plan_rfft(ui)
+        ldiv!(ui, plan, copy(u[comp])) # Make copy, ldiv! overwrites...
+        ui .*= g.n^3 # FFT factor
+        range = (:, :)
+        # range = (40:60, 40:60)
+        data = ui[range..., end] |> Array
+        image!(ax, data; colormap, interpolate = false)
+    end
+    fig
+end
+
 export vectorfield_to_svector,
     svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield
 export transform_scalar, transform_vector, transform_tensor
