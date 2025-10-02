@@ -13,6 +13,7 @@ using Optimisers
 using Random
 using Seneca
 using StaticArrays
+using Statistics
 using ..SymmetryCode
 using Zygote
 
@@ -1272,6 +1273,87 @@ function plot_velocities(setup, u_dns, u_les, comp)
         image!(ax, data; colormap, interpolate = false)
     end
     fig
+end
+
+export get_dissipation_errors
+function get_dissipation_errors(; setup, u, models)
+    (; visc, D, Δ) = setup
+    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    D = dim(g_dns)
+    ubar = vectorfield(g_les)
+    for (ubar, u) in zip(ubar, u)
+        apply!(cutoff!, g_les, (ubar, u))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
+    end
+    τhat = sfs(u, g_dns, g_les, Δ)
+    τ = spacetensorfield(g_les)
+    plan = Seneca.getplan(g_les)
+    for (τ, τhat) in zip(τ, τhat)
+        # apply!(twothirds!, g_les, (τhat, g_les))
+        ldiv!(τ, plan, τhat)
+        τ .*= g_les.n^dim(g_les)
+    end
+    G = getgradient(ubar, g_les)
+    if D == 2
+        S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
+    elseif D == 3
+        S = (;
+            G.xx,
+            G.yy,
+            G.zz,
+            xy = (G.xy .+ G.yx) ./ 2,
+            yz = (G.yz .+ G.zy) ./ 2,
+            zx = (G.zx .+ G.xz) ./ 2,
+        )
+    end
+    τ_les = map(models) do m
+        y = m(G)
+        if D == 2
+            xx, yy, xy = 1, 2, 3
+            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
+        elseif D == 3
+            xx, yy, zz = 1, 2, 3
+            xy, yz, zx = 4, 5, 6
+            (;
+                xx = view(y, :, :, :, xx),
+                yy = view(y, :, :, :, yy),
+                zz = view(y, :, :, :, zz),
+                xy = view(y, :, :, :, xy),
+                yz = view(y, :, :, :, yz),
+                zx = view(y, :, :, :, zx),
+            )
+        end
+    end
+    τ_all = (; ref = τ, τ_les...)
+    temp = scalarfield(g_les)
+    diss = map(τ_all) do τ
+        d = if D == 2
+            @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
+        else
+            @. τ.xx * S.xx + τ.yy * S.yy + τ.zz * S.zz +
+                2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+        end
+        # mul!(temp, plan, d)
+        # apply!(twothirds!, g_les, (temp, g_les))
+        # ldiv!(d, plan, temp)
+        d
+    end
+    leskeys = filter(!=(:ref), keys(diss))
+
+    # e = map(leskeys) do k
+    #     k => norm(diss[k] - diss.ref) / norm(diss.ref)
+    # end
+    # NamedTuple(e)
+
+    # map(mean, NamedTuple(diss))
+
+    e = map(median, NamedTuple(diss))
+
+    # e = map(leskeys) do k
+    #     k => (e[k] - e.ref) / norm(e.ref)
+    # end
+    # NamedTuple(e)
 end
 
 export vectorfield_to_svector,

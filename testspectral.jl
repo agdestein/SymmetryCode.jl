@@ -400,7 +400,7 @@ end
 apriori_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
 apriori_equi_errors = let
-    models = (; tbnn = m_tbnn, conv = m_conv, equi = m_equi, smag = m_smag, clar = m_clar)
+    models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, conv = m_conv, equi = m_equi)
     labels = (;
         tbnn = "TBNN",
         conv = "Conv",
@@ -412,6 +412,28 @@ apriori_equi_errors = let
 end
 
 apriori_equi_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
+
+dissipation_errors = let
+    u = u_dns
+    models = (; nomo = m_nomo, smag = m_smag, clar = m_clar, tbnn = m_tbnn, conv = m_conv, equi = m_equi)
+    labels = (;
+        nomo = "No-model",
+        tbnn = "TBNN",
+        conv = "Conv",
+        equi = "G-Conv",
+        smag = "Smagorinsky",
+        clar = "Clark",
+    )
+    get_dissipation_errors(; setup, u, models)
+end;
+dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
+
+# :nomo => 1.0
+# :smag => 0.9132
+# :clar => 0.5875
+# :tbnn => 0.7187
+# :conv => 0.5612
+# :equi => 0.5805
 
 let
     g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
