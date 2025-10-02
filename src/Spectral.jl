@@ -1,8 +1,10 @@
 module Spectral
 
 using Adapt
+using CairoMakie
 using FFTW
 using KernelAbstractions
+using KernelDensity
 using LinearAlgebra
 using Lux
 using Makie
@@ -50,18 +52,16 @@ end
 export gaussianfilter!
 @kernel function gaussianfilter!(u, Δ, g::Grid{2})
     I = @index(Global, Cartesian)
-    kΔ = pi / Δ * 2
     kx, ky = wavenumbers(g, I)
     k2 = kx^2 + ky^2
-    w = exp(-k2 / kΔ^2 / 2)
+    w = exp(-Δ^2 * k2 / 24)
     u[I] *= w
 end
 @kernel function gaussianfilter!(u, Δ, g::Grid{3})
     I = @index(Global, Cartesian)
-    kΔ = pi / Δ * 2
     kx, ky, kz = wavenumbers(g, I)
     k2 = kx^2 + ky^2 + kz^2
-    w = exp(-k2 / kΔ^2 / 2)
+    w = exp(-Δ^2 * k2 / 24)
     u[I] *= w
 end
 
@@ -140,9 +140,9 @@ function create_dns(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 1
         @. ou.b *= sqrt(2 * var^2 * Δt / t_ou)
         @. ou.b += (1 - Δt / t_ou) * ou.bold
         copyto!(ou.bold, ou.b)
-        @. u.x[ou.iuse] += Δt * ou.b[:, 1]
-        @. u.y[ou.iuse] += Δt * ou.b[:, 2]
-        D == 3 && @. u.z[ou.iuse] += Δt * ou.b[:, 3]
+        for (i, u) in enumerate(u)
+            @. u[ou.iuse] += Δt * ou.b[:, i]
+        end
         apply!(project!, g, (u, g))
 
         if k % 10 == 0
@@ -151,7 +151,7 @@ function create_dns(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 1
                 [
                     "k = $k",
                     "t = $(round(t; sigdigits = 4))",
-                    # "Δt = $(round(Δt; sigdigits = 4))",
+                    "Δt = $(round(Δt; sigdigits = 4))",
                     # "umax = $(round(maximum(u -> maximum(abs, u), u); sigdigits = 4))",
                     "energy = $(round(e; sigdigits = 4))",
                 ],
@@ -162,7 +162,7 @@ function create_dns(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 1
     u
 end
 
-function create_data(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 10, kpeak, Δ, rng)
+function create_data(setup; t_warmup, cfl, nstep, nsubstep, kpeak, Δ, rng)
     (; visc, D, n_dns, n_les, backend) = setup
     g_dns = Grid{D}(; setup.l, n = n_dns, backend)
     g_les = Grid{D}(; setup.l, n = n_les, backend)
@@ -246,17 +246,21 @@ function create_data(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 
                 )
             end
         end
-        stress!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, visc, g_dns)
+
+        # Compute sub-filter stress
+        nonlinearity!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, g_dns)
         for (fu, u) in zip(fu, u)
             apply!(cutoff!, g_les, (fu, u))
-            apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
+            isnothing(Δ) || apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
         end
         for (fσu, σu) in zip(fσu, c_dns.σ)
             apply!(cutoff!, g_les, (fσu, σu))
-            apply!(gaussianfilter!, g_les, (fσu, Δ, g_les))
+            isnothing(Δ) || apply!(gaussianfilter!, g_les, (fσu, Δ, g_les))
         end
-        stress!(σfu, c_les.vi_vj, c_les.v, fu, c_les.plan, visc, g_les)
+        nonlinearity!(σfu, c_les.vi_vj, c_les.v, fu, c_les.plan, g_les)
         foreach(i -> (fσu[i] .-= σfu[i]), 1:tensordim(g_dns))
+
+        # Save current (ubar,tau)-pair
         push!(inputs, map(Array, fu))
         push!(outputs, map(Array, fσu))
     end
@@ -274,20 +278,22 @@ function sfs(u, g_dns, g_les, Δ)
     sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     τ
 end
+
+export sfs!
 function sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     D = dim(g_dns)
     nonlinearity!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, g_dns)
     for (ubar, u) in zip(ubar, u)
         apply!(cutoff!, g_les, (ubar, u))
-        apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
     end
     for (σbar1, σ) in zip(σbar1, c_dns.σ)
         apply!(cutoff!, g_les, (σbar1, σ))
-        apply!(gaussianfilter!, g_les, (σbar1, Δ, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (σbar1, Δ, g_les))
     end
     nonlinearity!(σbar2, c_les.vi_vj, c_les.v, ubar, c_les.plan, g_les)
     foreach(i -> (τ[i] .= σbar1[i] .- σbar2[i]), 1:tensordim(g_dns))
-    foreach(τ -> apply!(twothirds!, g_les, (τ, g_les)), τ)
+    # foreach(τ -> apply!(twothirds!, g_les, (τ, g_les)), τ)
 end
 
 function create_dataloader(setup, data; batchsize)
@@ -319,6 +325,16 @@ function create_dataloader(setup, data; batchsize)
     end
     x = stack(first, snaps)
     y = stack(last, snaps)
+    if D == 3
+        # Put one of the spatial dimensions into the batch dimension,
+        # so that each snapshot is smaller. The models do not use
+        # neighboring information anyway.
+        x = permutedims(x, (1, 2, 4, 3, 5))
+        y = permutedims(y, (1, 2, 4, 3, 5))
+        nx = size(x, 1)
+        x = reshape(x, nx, nx, 1, size(x, 3), :)
+        y = reshape(y, nx, nx, 1, size(y, 3), :)
+    end
     DataLoader((x, y); batchsize, shuffle = true, partial = false)
 end
 
@@ -411,6 +427,51 @@ function transform_vector(u, g, (p, s))
     end
 end
 
+function transform_tensor(t, g, (p, s))
+    T, D = typeof(g.l), dim(g)
+    SM = SMatrix{D,D,T,D^2}
+    t = if D == 2
+        SM.(t.xx, t.xy, t.xy, t.yy)
+    else
+        SM.(t.xx, t.xy, t.zx, t.xy, t.yy, t.yz, t.zx, t.yz, t.zz)
+    end
+    t = permutedims(t, p)
+    dims = (findall(==(-1), s)...,)
+    t = reverse(t; dims)
+    m = roto_reflection_matrix(p, s)
+    t = map(t -> m * t * m', t)
+    if D == 2
+        (; xx = getindex.(t, 1, 1), yy = getindex.(t, 2, 2), xy = getindex.(t, 1, 2))
+    elseif D == 3
+        (;
+            xx = getindex.(t, 1, 1),
+            yy = getindex.(t, 2, 2),
+            zz = getindex.(t, 3, 3),
+            xy = getindex.(t, 1, 2),
+            yz = getindex.(t, 2, 3),
+            zx = getindex.(t, 3, 1),
+        )
+    end
+end
+
+function transform_tensor_nonsym(t, g, (p, s))
+    T, D = typeof(g.l), dim(g)
+    SM = SMatrix{D,D,T,D^2}
+    t = SM.(t...)
+    t = permutedims(t, p)
+    dims = (findall(==(-1), s)...,)
+    t = reverse(t; dims)
+    m = roto_reflection_matrix(p, s)
+    t = map(t -> m * t * m', t)
+    pairs = map(Iterators.product(1:D, 1:D)) do (i, j)
+        symbols = :x, :y, :z
+        s = Symbol(symbols[i], symbols[j])
+        val = getindex.(t, i, j)
+        s => val
+    end
+    NamedTuple(pairs)
+end
+
 # function transform_scalar(f, (p, s))
 #     f = permutedims(f, p)
 #     dims = (findall(==(-1), s)...,)
@@ -449,10 +510,14 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
     b_valid = first(dataloader) |> device
     ps_best = deepcopy(ps)
     l_best = Inf
+    losses_train = zeros(0)
+    losses_valid = zeros(0)
+    i = 0
     for iepoch = 1:nepoch, (ibatch, batch) in enumerate(dataloader)
+        i += 1
         x, y = batch |> device
         # loss(net, ps, st, (x, y)); error()
-        _, l, _, train_state =
+        _, l_train, _, train_state =
             Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
         if ibatch % 1 == 0
             l_valid = loss(net, ps, st, b_valid) |> first
@@ -461,7 +526,7 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
                     "iepoch = $iepoch",
                     "ibatch = $ibatch",
                     "loss (valid) = $(round(l_valid; sigdigits = 4))",
-                    "loss (train) = $(round(l; sigdigits = 4))",
+                    "loss (train) = $(round(l_train; sigdigits = 4))",
                 ],
                 ",\t",
             )
@@ -469,11 +534,13 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
                 l_best = l_valid
                 ps_best = deepcopy(train_state.parameters)
             end
+            push!(losses_train, l_train)
+            push!(losses_valid, l_valid)
         end
     end
     ps = ps_best
     st = train_state.states
-    ps, st
+    (; ps, st, losses_train, losses_valid)
 end
 
 function fullchain(setup, net, project, ps, st)
@@ -511,7 +578,7 @@ function les!(du, u, grid, cache; model, visc)
     apply!(tensordivergence!, grid, (du, σ, grid))
 end
 
-function inference_post(; ustart, setup, models, cfl = 0.35, tstop = 1e-1, Δ)
+function inference_post(; ustart, setup, models, cfl, tstop, Δ)
     (; visc, D, n_dns, n_les, backend) = setup
     t = 0.0
     g_dns = Grid{D}(; setup.l, n = n_dns, backend)
@@ -521,8 +588,8 @@ function inference_post(; ustart, setup, models, cfl = 0.35, tstop = 1e-1, Δ)
     c_les = (; getcache(g_les)..., G = tensorfield_nonsym(g_les))
     fu = vectorfield(g_les)
     for (fu, u) in zip(fu, u)
-        apply!(cutoff!, g_les, (fu, u, g_les, g_dns))
-        apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
+        apply!(cutoff!, g_les, (fu, u))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
     end
     u_models = map(m -> map(copy, fu), models)
     t = zero(tstop)
@@ -535,7 +602,7 @@ function inference_post(; ustart, setup, models, cfl = 0.35, tstop = 1e-1, Δ)
         for (u, model) in zip(u_models, models)
             wray3!(les!, u, Δt, g_les, c_les; model, visc)
         end
-        if i % 50 == 0
+        if i % 5 == 0
             energy = Seneca.energy(u)
             @info join(
                 [
@@ -548,10 +615,11 @@ function inference_post(; ustart, setup, models, cfl = 0.35, tstop = 1e-1, Δ)
                 ",\t",
             )
         end
+        i += 1
     end
     for (fu, u) in zip(fu, u)
-        apply!(cutoff!, g_les, (fu, u, g_les, g_dns))
-        apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
+        apply!(cutoff!, g_les, (fu, u))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
     end
     u_les = (; ref = fu, u_models...)
     for u in u_models
@@ -582,20 +650,40 @@ end
     # deviator(R * R),
 )
 
-@inline nbasis(::Grid{3}) = 10
-@inline getbasis(::Grid{3}, S, R) = (
-    # one(S),
-    S,
-    S * R - R * S,
-    deviator(S * S),
-    deviator(R * R),
-    R * S * S - S * S * R,
-    deviator(S * R * R + R * R * S),
-    R * S * R * R - R * R * S * R,
-    S * R * S * S - S * S * R * S,
-    deviator(R * R * S * S + S * S * R * R),
-    R * S * S * R * R - R * R * S * S * R,
-)
+# Second-order only basis:
+# https://arc.aiaa.org/doi/10.2514/6.2022-0595
+@inline nbasis(::Grid{3}) = 5
+@inline getbasis(::Grid{3}, S, R) = (one(S), S, S * S, R * R, S * R - R * S)
+
+# # New reduced basis:
+# # https://arc.aiaa.org/doi/10.2514/6.2022-0595
+# @inline nbasis(::Grid{3}) = 8
+# @inline getbasis(::Grid{3}, S, R) = (
+#     one(S),
+#     S,
+#     S * S,
+#     R * R,
+#     S * R - R * S,
+#     R * S * R,
+#     R * S * S - S * S * R,
+#     R * S * R * R - R * R * S * R,
+# )
+
+# # Pope's basis:
+# @inline nbasis(::Grid{3}) = 11
+# @inline getbasis(::Grid{3}, S, R) = (
+#     one(S),
+#     S,
+#     S * R - R * S,
+#     deviator(S * S),
+#     deviator(R * R),
+#     R * S * S - S * S * R,
+#     deviator(S * R * R + R * R * S),
+#     R * S * R * R - R * R * S * R,
+#     S * R * S * S - S * S * R * S,
+#     deviator(R * R * S * S + S * S * R * R),
+#     R * S * S * R * R - R * R * S * S * R,
+# )
 
 @inline ninvariant(::Grid{2}) = 2
 @inline getinvariants(::Grid{2}, S, R) = tr(S * S), tr(R * R)
@@ -725,12 +813,22 @@ function create_dataloader_tbnn(setup, data; batchsize, rng)
     end
     x = stack(first, snaps)
     y = stack(last, snaps)
+    if D == 3
+        # Put one of the spatial dimensions into the batch dimension,
+        # so that each snapshot is smaller. The models do not use
+        # neighboring information anyway.
+        x = permutedims(x, (1, 2, 4, 3, 5))
+        y = permutedims(y, (1, 2, 4, 3, 5))
+        nxx = nx[1]
+        x = reshape(x, nxx, nxx, 1, size(x, 3), :)
+        y = reshape(y, nxx, nxx, 1, size(y, 3), :)
+    end
     DataLoader((x, y); batchsize, shuffle = true, partial = false, rng)
 end
 
 create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
     D = dim(g)
-    nx = space_ndrange(g)
+    nx = size(x)[1:D]
     nt = tensordim(g)
     ni = ninvariant(g)
     nb = nbasis(g)
@@ -775,16 +873,7 @@ function getdissipation(g, u, m)
 end
 
 export test_equivariance_post
-function test_equivariance_post(;
-    ustart,
-    setup,
-    grid,
-    model,
-    groupindex,
-    rng,
-    tstop,
-    cfl,
-)
+function test_equivariance_post(; ustart, setup, grid, model, groupindex, rng, tstop, cfl)
     T, D = typeof(setup.l), setup.D
 
     # Group element
@@ -818,7 +907,7 @@ function test_equivariance_post(;
         t += Δt
         wray3!(les!, u, Δt, grid, cache; model, visc)
         wray3!(les!, ru, Δt, grid, cache; model, visc)
-        if i % 10 == 0
+        if i % 1 == 0
             e = energy(u)
             @info join(
                 [
@@ -859,82 +948,276 @@ function plot_densities(setup, u_dns, u_les, models, labels, plotdir)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
-        apply!(twothirds!, g_les, (τhat, g_les))
+        # apply!(twothirds!, g_les, (τhat, g_les))
         ldiv!(τ, plan, τhat)
         τ .*= g_les.n^dim(g_les)
     end
     G = getgradient(u_ref, g_les)
-    S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
+    if D == 2
+        S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
+    elseif D == 3
+        S = (;
+            G.xx,
+            G.yy,
+            G.zz,
+            xy = (G.xy .+ G.yx) ./ 2,
+            yz = (G.yz .+ G.zy) ./ 2,
+            zx = (G.zx .+ G.xz) ./ 2,
+        )
+    end
     τ_les = map(models) do m
         y = m(G)
         if D == 2
             xx, yy, xy = 1, 2, 3
             (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
         elseif D == 3
-            error()
+            xx, yy, zz = 1, 2, 3
+            xy, yz, zx = 4, 5, 6
+            (;
+                xx = view(y, :, :, :, xx),
+                yy = view(y, :, :, :, yy),
+                zz = view(y, :, :, :, zz),
+                xy = view(y, :, :, :, xy),
+                yz = view(y, :, :, :, yz),
+                zx = view(y, :, :, :, zx),
+            )
         end
     end
     τ_all = (; ref = τ, τ_les...)
     τxx = map(τ -> τ.xx, τ_all)
-    τyy = map(τ -> τ.yy, τ_all)
     τxy = map(τ -> τ.xy, τ_all)
+    temp = scalarfield(g_les)
+    # τxx = map(τ_all) do τ
+    #     d = @. τ.xx
+    #     mul!(temp, plan, d)
+    #     apply!(twothirds!, g_les, (temp, g_les))
+    #     ldiv!(d, plan, temp)
+    #     d
+    # end
+    # τxy = map(τ_all) do τ
+    #     d = @. τ.xy
+    #     mul!(temp, plan, d)
+    #     apply!(twothirds!, g_les, (temp, g_les))
+    #     ldiv!(d, plan, temp)
+    #     d
+    # end
     diss = map(τ_all) do τ
-        @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
+        d = if D == 2
+            @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
+        else
+            @. τ.xx * S.xx + τ.yy * S.yy + τ.zz * S.zz +
+                2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+        end
+        # mul!(temp, plan, d)
+        # apply!(twothirds!, g_les, (temp, g_les))
+        # ldiv!(d, plan, temp)
+        d
     end
-    # τ.xx |> x -> plan \ x |> display; error()
-    # τ.xx |> display; error()
-    # map(mean, τxx) |> pairs |> display; error()
-    # τ.xx |> Array |> heatmap |> display; error()
-    # τ.xx |> Array |> display
-    # error()
+
     fig = Figure(; size = (800, 300))
-    #
+
+    # XX-component
     ax_xx =
         Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density", yscale = log10)
     τxx = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), τxx)
     for (key, val) in pairs(τxx)
-        lines!(ax_xx, val.x / setup.Δ, val.density; label = labels[key])
+        lines!(ax_xx, val.x, val.density; label = labels[key])
     end
-    xlims!(ax_xx, -0.5, 5)
-    ylims!(ax_xx, 2e-1, 3e2)
-    #
+    if D == 2
+        xlims!(ax_xx, -0.5, 5)
+        ylims!(ax_xx, 2e-1, 3e2)
+    elseif D == 3
+        xlims!(ax_xx, -1, 3)
+        ylims!(ax_xx, 2e-4, 3e1)
+    end
+
+    # XY-component
     ax_xy = Makie.Axis(fig[1, 2]; xlabel = "xy-component", yscale = log10)
     τxy = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), τxy)
     for (key, val) in pairs(τxy)
-        lines!(ax_xy, val.x / setup.Δ, val.density)
+        lines!(ax_xy, val.x, val.density)
     end
-    xlims!(ax_xy, -3, 2)
-    ylims!(ax_xy, 2e-1, 5e2)
-    #
+    if D == 2
+        xlims!(ax_xy, -3, 2)
+        ylims!(ax_xy, 2e-1, 5e2)
+    elseif D == 3
+        xlims!(ax_xy, -1.1, 1.1)
+        ylims!(ax_xy, 4e-4, 5e1)
+    end
+
+    # Dissipation
     ax_diss = Makie.Axis(fig[1, 3]; xlabel = "Dissipation", yscale = log10)
     diss = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), diss)
     for (key, val) in pairs(diss)
-        lines!(
-            ax_diss,
-            # val.x,
-            val.x / setup.Δ,
-            val.density,
-        )
+        lines!(ax_diss, val.x, val.density)
     end
-    xlims!(ax_diss, -15, 16)
-    ylims!(ax_diss, 1e-1, 2e2)
+    if D == 2
+        xlims!(ax_diss, -15, 16)
+        ylims!(ax_diss, 1e-1, 2e2)
+    elseif D == 3
+        xlims!(ax_diss, -60, 20)
+        ylims!(ax_diss, 1e-4, 5e-1)
+    end
+
     Legend(fig[0, :], ax_xx; orientation = :horizontal)
-    save("$(plotdir)/tensor-distributions-$(setup.n_les).pdf", fig; backend = CairoMakie)
+    save("$(plotdir)/tensor-distributions-$(D)D-$(setup.n_les).pdf", fig; backend = CairoMakie)
     fig
 end
 
+@kernel function clark_kernel!(ττ, GG, Δ, g::Grid{2})
+    I = @index(Global, Cartesian)
+    G = @SMatrix [GG.xx[I] GG.xy[I]; GG.yx[I] GG.yy[I]]
+    τ = Δ^2 / 12 * G * G'
+    xx, yy, xy = 1, 2, 3
+    ττ[I, xx] = τ[1, 1]
+    ττ[I, yy] = τ[2, 2]
+    ττ[I, xy] = τ[1, 2]
+end
 
+@kernel function clark_kernel!(ττ, GG, Δ, g::Grid{3})
+    I = @index(Global, Cartesian)
+    G = @SMatrix [
+        GG.xx[I] GG.xy[I] GG.xz[I]
+        GG.yx[I] GG.yy[I] GG.yz[I]
+        GG.zx[I] GG.zy[I] GG.zz[I]
+    ]
+    τ = Δ^2 / 12 * G * G'
+    xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
+    ττ[I, xx] = τ[1, 1]
+    ττ[I, yy] = τ[2, 2]
+    ττ[I, zz] = τ[3, 3]
+    ττ[I, xy] = τ[1, 2]
+    ττ[I, yz] = τ[2, 3]
+    ττ[I, zx] = τ[3, 1]
+end
 
+export create_clark
+function create_clark(Δ, g)
+    function clark(G)
+        τ = stack(spacetensorfield(g))
+        apply!(clark_kernel!, g, (τ, G, Δ, g); ndrange = space_ndrange(g))
+        τ
+    end
+end
 
+@kernel function smagorinsky_kernel!(ττ, GG, CS, Δ, g::Grid{2})
+    I = @index(Global, Cartesian)
+    G = @SMatrix [GG.xx[I] GG.xy[I]; GG.yx[I] GG.yy[I]]
+    S = (G + G') / 2
+    nu = CS^2 * Δ^2 * sqrt(sum(abs2, S)) / 2
+    τ = -2 * nu * S
+    xx, yy, xy = 1, 2, 3
+    ττ[I, xx] = τ[1, 1]
+    ττ[I, yy] = τ[2, 2]
+    ττ[I, xy] = τ[1, 2]
+end
 
+@kernel function smagorinsky_kernel!(ττ, GG, CS, Δ, g::Grid{3})
+    I = @index(Global, Cartesian)
+    G = @SMatrix [
+        GG.xx[I] GG.xy[I] GG.xz[I]
+        GG.yx[I] GG.yy[I] GG.yz[I]
+        GG.zx[I] GG.zy[I] GG.zz[I]
+    ]
+    S = (G + G') / 2
+    nu = CS^2 * Δ^2 * sqrt(sum(abs2, S))
+    τ = -2 * nu * S
+    xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
+    ττ[I, xx] = τ[1, 1]
+    ττ[I, yy] = τ[2, 2]
+    ττ[I, zz] = τ[3, 3]
+    ττ[I, xy] = τ[1, 2]
+    ττ[I, yz] = τ[2, 3]
+    ττ[I, zx] = τ[3, 1]
+end
 
+export create_smagorinsky
+function create_smagorinsky(CS, Δ, g)
+    function smagorinsky(G)
+        τ = stack(spacetensorfield(g))
+        apply!(smagorinsky_kernel!, g, (τ, G, CS, Δ, g); ndrange = space_ndrange(g))
+        τ
+    end
+end
+
+export apriori_error
+function apriori_error(setup, u_dns, u_les, models, labels, plotdir)
+    (; visc, D) = setup
+    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    D = dim(g_dns)
+    u_ref = u_les.ref
+    τhat = sfs(u_dns, g_dns, g_les, setup.Δ)
+    τ = spacetensorfield(g_les)
+    plan = Seneca.getplan(g_les)
+    for (τ, τhat) in zip(τ, τhat)
+        # apply!(twothirds!, g_les, (τhat, g_les))
+        ldiv!(τ, plan, τhat)
+        τ .*= g_les.n^dim(g_les)
+    end
+    τ = stack(τ)
+    G = getgradient(u_ref, g_les)
+    if D == 2
+        S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
+    elseif D == 3
+        S = (;
+            G.xx,
+            G.yy,
+            G.zz,
+            xy = (G.xy .+ G.yx) ./ 2,
+            yz = (G.yz .+ G.zy) ./ 2,
+            zx = (G.zx .+ G.xz) ./ 2,
+        )
+    end
+    errors = map(models) do m
+        y = m(G)
+        norm(y - τ) / norm(τ)
+    end
+    errors
+end
+
+export apriori_equivariance_error
+function apriori_equivariance_error(; setup, u_les, models, labels, plotdir, groupindex)
+    (; visc, D) = setup
+    (; elements, permutations, signs) = group_stuff(setup.D)
+    ip, is = elements[groupindex]
+    p, s = permutations[ip], signs[is]
+    T = typeof(setup.l)
+    SM = SMatrix{D,D,T,D^2}
+    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    u = u_les.ref
+    G = getgradient(u, g)
+    rG = transform_tensor_nonsym(G, g, (p, s))
+    errors = map(models) do m
+        mG = m(G)
+        mrG = m(rG)
+        mG_split = if D == 2
+            xx, yy, xy = 1, 2, 3
+            (; xx = selectdim(mG, D + 1, xx), yy = selectdim(mG, D + 1, yy), xy = selectdim(mG, D + 1, xy))
+        else
+            xx, yy, zz = 1, 2, 3
+            xy, yz, zx = 4, 5, 6
+            (;
+                xx = selectdim(mG, D + 1, xx),
+                yy = selectdim(mG, D + 1, yy),
+                zz = selectdim(mG, D + 1, zz),
+                xy = selectdim(mG, D + 1, xy),
+                yz = selectdim(mG, D + 1, yz),
+                zx = selectdim(mG, D + 1, zx),
+            )
+        end
+        rmG_split = transform_tensor(mG_split, g, (p, s))
+        rmG = stack(rmG_split)
+        err = norm(rmG - mrG) / norm(mrG)
+    end
+    errors
+end
 
 export vectorfield_to_svector,
     svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield
 export transform_scalar, transform_vector, transform_tensor
 export getgradient
 export dns_aid, create_dns, create_data, create_dataloader, train, fullchain, inference_post
-export sfs!, gaussianfilter!
 export tbnn, ninvariant, nbasis, create_dataloader_tbnn, create_loss, create_loss_tbnn
 export get_errors
 
