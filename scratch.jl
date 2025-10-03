@@ -34,7 +34,7 @@ setup = let
     (; visc = 5e-5, D = 2, l = 1.0, n_dns = 1024, n_les, Δ, backend = CUDABackend())
 end
 
-dns = create_dns(setup; nstep = 100, nsubstep = 100, rng = Xoshiro(0));
+dns = create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0));
 
 let
     g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
@@ -42,7 +42,7 @@ let
     u = dns
     ubar = vectorfield(g_les)
     for (ubar, u) in zip(ubar, u)
-        apply!(cutoff!, g_les, (ubar, u, g_les, g_dns))
+        apply!(cutoff!, g_les, (ubar, u))
         apply!(gaussianfilter!, g_les, (ubar, setup.Δ, g_les))
     end
     D = dim(g_dns)

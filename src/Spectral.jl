@@ -2,6 +2,7 @@ module Spectral
 
 using Adapt
 using CairoMakie
+using CUDA
 using FFTW
 using KernelAbstractions
 using KernelDensity
@@ -114,16 +115,15 @@ function dns_aid()
     sum(i -> sum(abs2, v[i] - ubar[i]) / sum(abs2, ubar[i]), 1:D)
 end
 
-function create_dns(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 10, rng)
-    (; l, visc, D, n_dns, backend) = setup
+export create_dns
+function create_dns(setup; t_warmup, cfl, rng)
+    (; l, visc, D, n_dns, backend, ou_radius, ou_time, ou_energy) = setup
     g = Grid{D}(; l, n = n_dns, backend)
     u = randomfield(g; rng, kpeak = 5)
     cache = getcache(g)
 
     # OU stuff
-    ou = ouforcer(g, 2.3)
-    t_ou, estar = 0.005, 0.01
-    var = sqrt(estar / t_ou)
+    ou = ouforcer(g, ou_radius)
 
     t = 0.0
     k = 0
@@ -138,8 +138,8 @@ function create_dns(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 1
 
         # Evolve OU process and inject energy
         randn!(ou.b)
-        @. ou.b *= sqrt(2 * var^2 * Δt / t_ou)
-        @. ou.b += (1 - Δt / t_ou) * ou.bold
+        @. ou.b *= sqrt(2 * Δt * ou_energy / ou_time^2)
+        @. ou.b += (1 - Δt / ou_time) * ou.bold
         copyto!(ou.bold, ou.b)
         for (i, u) in enumerate(u)
             @. u[ou.iuse] += Δt * ou.b[:, i]
@@ -163,11 +163,10 @@ function create_dns(setup; t_warmup = 0.5, cfl = 0.35, nstep = 200, nsubstep = 1
     u
 end
 
-function create_data(setup; t_warmup, cfl, nstep, nsubstep, kpeak, Δ, rng)
-    (; visc, D, n_dns, n_les, backend) = setup
+function create_data(u, setup; cfl, nstep, nsubstep, kpeak, Δ, rng)
+    (; visc, D, n_dns, n_les, backend, ou_radius, ou_energy, ou_time) = setup
     g_dns = Grid{D}(; setup.l, n = n_dns, backend)
     g_les = Grid{D}(; setup.l, n = n_les, backend)
-    u = randomfield(g_dns; rng, kpeak)
     c_dns = getcache(g_dns)
     c_les = getcache(g_les)
     fu = vectorfield(g_les)
@@ -177,47 +176,10 @@ function create_data(setup; t_warmup, cfl, nstep, nsubstep, kpeak, Δ, rng)
     outputs = fill(map(Array, fσu), 0)
 
     # OU stuff
-    ou = ouforcer(g_dns, 2.3)
-    t_ou, estar = 0.005, 0.01
-    var = sqrt(estar / t_ou)
+    ou = ouforcer(g_dns, ou_radius)
 
-    # Warwm up
+    # Time stepping
     t = 0.0
-    k = 0
-    while t < t_warmup
-        Δt = cfl * propose_timestep(u, g_dns, visc, c_dns)
-        Δt = min(Δt, t_warmup - t)
-        t += Δt
-        k += 1
-
-        # Step
-        wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
-
-        # Evolve OU process and inject energy
-        randn!(ou.b)
-        @. ou.b *= sqrt(2 * var^2 * Δt / t_ou)
-        @. ou.b += (1 - Δt / t_ou) * ou.bold
-        copyto!(ou.bold, ou.b)
-        for (i, u) in enumerate(u)
-            @. u[ou.iuse] += Δt * ou.b[:, i]
-        end
-        apply!(project!, g_dns, (u, g_dns))
-
-        if k % 10 == 0
-            e = energy(u)
-            @info join(
-                [
-                    "k = $k",
-                    "t = $(round(t; sigdigits = 4))",
-                    "Δt = $(round(Δt; sigdigits = 4))",
-                    # "umax = $(round(maximum(u -> maximum(abs, u), u); sigdigits = 4))",
-                    "energy = $(round(e; sigdigits = 4))",
-                ],
-                ",\t",
-            )
-        end
-    end
-
     for i = 1:nstep
         for j = 1:nsubstep
             Δt = cfl * propose_timestep(u, g_dns, visc, c_dns)
@@ -226,13 +188,15 @@ function create_data(setup; t_warmup, cfl, nstep, nsubstep, kpeak, Δ, rng)
 
             # Evolve OU process and inject energy
             randn!(ou.b)
-            @. ou.b *= sqrt(2 * var^2 * Δt / t_ou)
-            @. ou.b += (1 - Δt / t_ou) * ou.bold
+            @. ou.b *= sqrt(2 * Δt * ou_energy / ou_time^2)
+            @. ou.b += (1 - Δt / ou_time) * ou.bold
             copyto!(ou.bold, ou.b)
             for (i, u) in enumerate(u)
                 @. u[ou.iuse] += Δt * ou.b[:, i]
             end
             apply!(project!, g_dns, (u, g_dns))
+
+            # Log
             if j == nsubstep && i % 1 == 0
                 e = energy(u)
                 @info join(
@@ -1006,8 +970,10 @@ function plot_densities(setup, u_dns, u_les, models, labels, plotdir)
         d = if D == 2
             @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
         else
-            @. τ.xx * S.xx + τ.yy * S.yy + τ.zz * S.zz +
-                2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+            @. τ.xx * S.xx +
+               τ.yy * S.yy +
+               τ.zz * S.zz +
+               2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
         end
         # mul!(temp, plan, d)
         # apply!(twothirds!, g_les, (temp, g_les))
@@ -1025,8 +991,8 @@ function plot_densities(setup, u_dns, u_les, models, labels, plotdir)
         lines!(ax_xx, val.x, val.density; label = labels[key])
     end
     if D == 2
-        xlims!(ax_xx, -0.5, 5)
-        ylims!(ax_xx, 2e-1, 3e2)
+        xlims!(ax_xx, -0.1, 0.3)
+        ylims!(ax_xx, 2e-2, 3e2)
     elseif D == 3
         xlims!(ax_xx, -1, 3)
         ylims!(ax_xx, 2e-4, 3e1)
@@ -1039,8 +1005,8 @@ function plot_densities(setup, u_dns, u_les, models, labels, plotdir)
         lines!(ax_xy, val.x, val.density)
     end
     if D == 2
-        xlims!(ax_xy, -3, 2)
-        ylims!(ax_xy, 2e-1, 5e2)
+        xlims!(ax_xy, -0.1, 0.1)
+        ylims!(ax_xy, 1e-1, 5e2)
     elseif D == 3
         xlims!(ax_xy, -1.1, 1.1)
         ylims!(ax_xy, 4e-4, 5e1)
@@ -1053,15 +1019,19 @@ function plot_densities(setup, u_dns, u_les, models, labels, plotdir)
         lines!(ax_diss, val.x, val.density)
     end
     if D == 2
-        xlims!(ax_diss, -15, 16)
-        ylims!(ax_diss, 1e-1, 2e2)
+        xlims!(ax_diss, -0.3, 0.3)
+        ylims!(ax_diss, 1e-1, 1e2)
     elseif D == 3
         xlims!(ax_diss, -60, 20)
         ylims!(ax_diss, 1e-4, 5e-1)
     end
 
     Legend(fig[0, :], ax_xx; orientation = :horizontal)
-    save("$(plotdir)/tensor-distributions-$(D)D-$(setup.n_les).pdf", fig; backend = CairoMakie)
+    save(
+        "$(plotdir)/tensor-distributions-$(D)D-$(setup.n_les).pdf",
+        fig;
+        backend = CairoMakie,
+    )
     fig
 end
 
@@ -1093,13 +1063,11 @@ end
 end
 
 export create_clark
-function create_clark(Δ, g)
-    function clark(G)
+create_clark(Δ, g) = function clark(G)
         τ = stack(spacetensorfield(g))
         apply!(clark_kernel!, g, (τ, G, Δ, g); ndrange = space_ndrange(g))
         τ
     end
-end
 
 @kernel function smagorinsky_kernel!(ττ, GG, CS, Δ, g::Grid{2})
     I = @index(Global, Cartesian)
@@ -1194,7 +1162,11 @@ function apriori_equivariance_error(; setup, u_les, models, labels, plotdir, gro
         mrG = m(rG)
         mG_split = if D == 2
             xx, yy, xy = 1, 2, 3
-            (; xx = selectdim(mG, D + 1, xx), yy = selectdim(mG, D + 1, yy), xy = selectdim(mG, D + 1, xy))
+            (;
+                xx = selectdim(mG, D + 1, xx),
+                yy = selectdim(mG, D + 1, yy),
+                xy = selectdim(mG, D + 1, xy),
+            )
         else
             xx, yy, zz = 1, 2, 3
             xy, yz, zx = 4, 5, 6
@@ -1213,7 +1185,6 @@ function apriori_equivariance_error(; setup, u_les, models, labels, plotdir, gro
     end
     errors
 end
-
 
 export plot_velocities
 function plot_velocities(setup, u_dns, u_les, comp)
@@ -1331,8 +1302,10 @@ function get_dissipation_errors(; setup, u, models)
         d = if D == 2
             @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
         else
-            @. τ.xx * S.xx + τ.yy * S.yy + τ.zz * S.zz +
-                2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+            @. τ.xx * S.xx +
+               τ.yy * S.yy +
+               τ.zz * S.zz +
+               2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
         end
         # mul!(temp, plan, d)
         # apply!(twothirds!, g_les, (temp, g_les))
@@ -1356,11 +1329,53 @@ function get_dissipation_errors(; setup, u, models)
     # NamedTuple(e)
 end
 
+export setup_laptop
+function setup_laptop()
+    l = 1.0
+    n_les = 128
+    Δ = 2 * l / n_les
+    (;
+        name = "laptop",
+        visc = 1e-5,
+        D = 2,
+        l = 1.0,
+        n_dns = 2048,
+        n_les,
+        kpeak = 5,
+        Δ,
+        ou_radius = 2.3,
+        ou_time = 0.005,
+        ou_energy = 0.01,
+        backend = CUDABackend(),
+    )
+end
+
+export setup_turbulator
+function setup_turbulator()
+    l = 1.0
+    n_les = 64
+    Δ = 2 * l / n_les
+    (;
+        name = "turbulator",
+        visc = 1e-4,
+        D = 3,
+        l = 1.0,
+        n_dns = 256,
+        n_les,
+        kpeak = 5,
+        Δ,
+        ou_radius = 2.3,
+        ou_time = 0.005,
+        ou_energy = 0.01,
+        backend = CUDABackend(),
+    )
+end
+
 export vectorfield_to_svector,
     svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield
 export transform_scalar, transform_vector, transform_tensor
 export getgradient
-export dns_aid, create_dns, create_data, create_dataloader, train, fullchain, inference_post
+export dns_aid, create_data, create_dataloader, train, fullchain, inference_post
 export tbnn, ninvariant, nbasis, create_dataloader_tbnn, create_loss, create_loss_tbnn
 export get_errors
 

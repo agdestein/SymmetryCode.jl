@@ -43,11 +43,7 @@ let
     fig
 end
 
-outdir = joinpath(@__DIR__, "output") |> mkpath
-# plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
-plotdir = outdir
-
-dns_aid()
+# dns_aid()
 
 # setup = let
 #     l = 1.0
@@ -72,31 +68,86 @@ let
     fig
 end
 
-setup = let
-    l = 1.0
-    n_les = 64
-    Δ = 2 * l / n_les
-    (;
-        visc = 1e-4,
-        D = 3,
-        l = 1.0,
-        n_dns = 256,
-        n_les,
-        kpeak = 5,
-        Δ,
-        backend = CUDABackend(),
+# setup = setup_laptop()
+setup = setup_turbulator()
+outdir = joinpath(@__DIR__, "output", setup.name) |> mkpath
+# plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
+plotdir = outdir
+
+dnsfile = joinpath(outdir, "dns.jld2")
+let
+    dns = create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0))
+    jldsave(dnsfile; u = cpu_device()(dns))
+end
+
+let
+    u = load(dnsfile, "u") |> adapt(setup.backend)
+    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    ubar = vectorfield(g_les)
+    for (ubar, u) in zip(ubar, u)
+        apply!(cutoff!, g_les, (ubar, u))
+        apply!(gaussianfilter!, g_les, (ubar, setup.Δ, g_les))
+    end
+    D = dim(g_dns)
+    stat = turbulence_statistics(u, setup.visc, g_dns)
+    s_dns = spectrum(u, g_dns)
+    s_les = spectrum(ubar, g_les)
+    fig = Figure(; size = (400, 340))
+    ax = Axis(
+        fig[1, 1];
+        xscale = log10,
+        yscale = log10,
+        xlabel = "Normalized wavenumber",
+        ylabel = "Normalized spectrum",
     )
+    if D == 2
+        k = [3, g_dns.n / 10]
+        kolmo = @. stat.diss^(-1 / 3) * k^(-3)
+        escale = stat.diss^(-1 / 3) * stat.l_kol^(-3)
+    elseif D == 3
+        k = [3, g_dns.n / 4]
+        kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
+        # escale = 5e-1 * stat.diss^(-2 / 3) # * stat.l_kol^(+5 / 3)
+        escale = 1
+    end
+    kscale = stat.l_kol / setup.l
+    span = [1, setup.ou_radius] * kscale
+    oucolor = Makie.wong_colors()[4]
+    vspan!(ax, span...; alpha = 0.3, color = oucolor)
+    b = sqrt(prod(extrema(escale * s_dns.s)))
+    a = 1.1 * kscale * setup.ou_radius
+    c = sqrt(prod(span))
+    w = D == 2 ? 1 : 1.5
+    text!(ax, a, b / w; color = oucolor, text = "Force")
+    arr = D == 2 ? 100 : 5
+    arrows2d!(ax, Point2(c, b / arr), Point2(c, b * arr) - Point2(c, b / arr); color = oucolor)
+    lines!(ax, kscale * s_dns.k, escale * s_dns.s; label = "DNS")
+    lines!(ax, kscale * s_les.k, escale * s_les.s; label = "Filtered DNS")
+    lines!(kscale * k, escale * kolmo; label = "Kolmogorov")
+    Legend(
+        fig[0, 1],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 4,
+    )
+    rowgap!(fig.layout, 5)
+    save("$(plotdir)/spectrum-dns.pdf", fig; backend = CairoMakie)
+    fig
 end
 
 data = let
-    # filename = joinpath(outdir, "data-$(setup.n_les).jld2")
-    filename = joinpath(outdir, "data-$(setup.D)D-gaussian-$(setup.n_les).jld2")
+    filename = joinpath(outdir, "data.jld2")
     if false
+        u = load(dnsfile, "u") |> adapt(setup.backend)
         d = create_data(
+            u,
             setup;
-            t_warmup = 0.5,
             cfl = 0.35,
-            nstep = 30,
+            nstep = setup.D == 2 ? 1000 : 30,
             nsubstep = 20,
             setup.kpeak,
             rng = Xoshiro(0),
@@ -113,8 +164,7 @@ m_nomo = let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     nx = space_ndrange(g)
     nt = tensordim(g)
-    τ = fill!(stack(spacetensorfield(g)), 0)
-    m_nomo(G) = τ
+    m_nomo(G) = fill!(stack(spacetensorfield(g)), 0)
 end
 
 m_tbnn, train_tbnn = let
@@ -131,7 +181,7 @@ m_tbnn, train_tbnn = let
     for l in ps
         l.weight .*= 0.1
     end
-    file = joinpath(outdir, "ps-tbnn-$(setup.n_les).jld2")
+    file = joinpath(outdir, "ps-tbnn.jld2")
     if false
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss_tbnn(g),
@@ -161,8 +211,8 @@ m_equi, train_equi = let
         [12, 16, 16, 24], # 40_328 actual params
     )
     st = net_stuff.st
-    file = joinpath(outdir, "ps_equi.jld2")
-    if false
+    file = joinpath(outdir, "ps-equi.jld2")
+    if true
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
             setup,
@@ -194,8 +244,8 @@ m_conv, train_conv = let
         hasfield(typeof(ps), :weight) && (ps.weight .*= 0.1)
     end
     st = net_stuff.st
-    file = joinpath(outdir, "ps_conv.jld2")
-    if false
+    file = joinpath(outdir, "ps-conv.jld2")
+    if true
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
             setup,
@@ -225,9 +275,9 @@ let
         xlabel = "Iteration",
         ylabel = "Loss",
     )
-    t = train_tbnn
+    # t = train_tbnn
     # t = train_conv
-    # t = train_equi
+    t = train_equi
     lines!(ax, t.losses_train; label = "Train")
     lines!(ax, t.losses_valid; label = "Valid")
     axislegend(ax; position = :rt)
@@ -275,9 +325,13 @@ equi_errors_post = let
     end |> NamedTuple
 end
 
+let
+filename = joinpath(outdir, "equi-errors-post.jld2")
+jldsave(filename; equi_errors_post)
+end
+
 equi_errors_post = let
-    filename = joinpath(outdir, "equi-errors-post-$(setup.D)D-$(setup.n_les).jld2")
-    # jldsave(filename; equi_errors_post)
+    filename = joinpath(outdir, "equi-errors-post.jld2")
     load(filename, "equi_errors_post")
 end
 
@@ -303,7 +357,7 @@ u_dns, u_les = let
 end;
 
 u_dns, u_les = let
-    filename = joinpath(outdir, "u-post-$(setup.D)D-$(setup.n_les).jld2")
+    filename = joinpath(outdir, "u-post.jld2")
     # jldsave(filename; u_dns = u_dns |> cpu_device(), u_les = u_les |> cpu_device())
     load(filename, "u_dns", "u_les") |> adapt(setup.backend)
 end;
@@ -360,7 +414,7 @@ let
     # axislegend(ax; position = :lb)
     Legend(fig[1, 2], ax)
     # ylims!(1e-7, 1)
-    save("$(plotdir)/spectrum-$(D)D-$(setup.n_les).pdf", fig; backend = CairoMakie)
+    save("$(plotdir)/spectrum-les.pdf", fig; backend = CairoMakie)
     fig
 end
 
@@ -415,7 +469,14 @@ apriori_equi_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
 dissipation_errors = let
     u = u_dns
-    models = (; nomo = m_nomo, smag = m_smag, clar = m_clar, tbnn = m_tbnn, conv = m_conv, equi = m_equi)
+    models = (;
+        nomo = m_nomo,
+        smag = m_smag,
+        clar = m_clar,
+        tbnn = m_tbnn,
+        conv = m_conv,
+        equi = m_equi,
+    )
     labels = (;
         nomo = "No-model",
         tbnn = "TBNN",
@@ -445,6 +506,10 @@ end
 let
     comp = :x
     fig = plot_velocities(setup, u_dns, u_les, comp)
-    save("$(plotdir)/velocities-$(comp)-$(setup.D)D-$(setup.n_les).pdf", fig; backend = CairoMakie)
+    save(
+        "$(plotdir)/velocities-$(comp).pdf",
+        fig;
+        backend = CairoMakie,
+    )
     fig
 end
