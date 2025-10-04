@@ -127,6 +127,8 @@ function create_dns(setup; t_warmup, cfl, rng)
 
     t = 0.0
     k = 0
+    times = [t]
+    energies = [energy(u)]
     while t < t_warmup
         Δt = cfl * propose_timestep(u, g, visc, cache)
         Δt = min(Δt, t_warmup - t)
@@ -148,6 +150,8 @@ function create_dns(setup; t_warmup, cfl, rng)
 
         if k % 10 == 0
             e = energy(u)
+            push!(times, t)
+            push!(energies, e)
             @info join(
                 [
                     "k = $k",
@@ -160,7 +164,7 @@ function create_dns(setup; t_warmup, cfl, rng)
             )
         end
     end
-    u
+    u, times, energies
 end
 
 function create_data(u, setup; cfl, nstep, nsubstep, kpeak, Δ, rng)
@@ -520,6 +524,20 @@ function fullchain(setup, net, project, ps, st)
     end
 end
 
+export fullchain_split
+function fullchain_split(setup, net, project, ps, st)
+    (; D) = setup
+    ps = project(ps)
+    function model(x)
+        x = stack(x)
+        s = size(x)
+        x = reshape(x, s..., 1) # Add sample dimension
+        GC.gc(); CUDA.reclaim()
+        y = net(x, ps, st) |> first
+        reshape(y, s[1:D]..., :)
+    end
+end
+
 function les!(du, u, grid, cache; model, visc)
     D = dim(grid)
     (; plan, σ, vi_vj, v, G) = cache
@@ -615,24 +633,24 @@ end
     # deviator(R * R),
 )
 
-# Second-order only basis:
-# https://arc.aiaa.org/doi/10.2514/6.2022-0595
-@inline nbasis(::Grid{3}) = 5
-@inline getbasis(::Grid{3}, S, R) = (one(S), S, S * S, R * R, S * R - R * S)
-
-# # New reduced basis:
+# # Second-order only basis:
 # # https://arc.aiaa.org/doi/10.2514/6.2022-0595
-# @inline nbasis(::Grid{3}) = 8
-# @inline getbasis(::Grid{3}, S, R) = (
-#     one(S),
-#     S,
-#     S * S,
-#     R * R,
-#     S * R - R * S,
-#     R * S * R,
-#     R * S * S - S * S * R,
-#     R * S * R * R - R * R * S * R,
-# )
+# @inline nbasis(::Grid{3}) = 5
+# @inline getbasis(::Grid{3}, S, R) = (one(S), S, S * S, R * R, S * R - R * S)
+
+# New reduced basis:
+# https://arc.aiaa.org/doi/10.2514/6.2022-0595
+@inline nbasis(::Grid{3}) = 8
+@inline getbasis(::Grid{3}, S, R) = (
+    one(S),
+    S,
+    S * S,
+    R * R,
+    S * R - R * S,
+    R * S * R,
+    R * S * S - S * S * R,
+    R * S * R * R - R * R * S * R,
+)
 
 # # Pope's basis:
 # @inline nbasis(::Grid{3}) = 11
@@ -1335,7 +1353,7 @@ function setup_laptop()
     n_les = 128
     Δ = 2 * l / n_les
     (;
-        name = "laptop",
+        outdir = joinpath(@__DIR__, "..", "output", "laptop") |> mkpath,
         visc = 1e-5,
         D = 2,
         l = 1.0,
@@ -1356,11 +1374,32 @@ function setup_turbulator()
     n_les = 64
     Δ = 2 * l / n_les
     (;
-        name = "turbulator",
+        outdir = joinpath(@__DIR__, "..", "output", "turbulator") |> mkpath,
         visc = 1e-4,
         D = 3,
         l = 1.0,
         n_dns = 256,
+        n_les,
+        kpeak = 5,
+        Δ,
+        ou_radius = 2.3,
+        ou_time = 0.005,
+        ou_energy = 0.01,
+        backend = CUDABackend(),
+    )
+end
+
+export setup_snellius
+function setup_snellius()
+    l = 1.0
+    n_les = 128
+    Δ = 2 * l / n_les
+    (;
+        outdir = mkpath("/projects/prjs1757/SymmetryOutput"),
+        visc = 4e-5,
+        D = 3,
+        l = 1.0,
+        n_dns = 810,
         n_les,
         kpeak = 5,
         Δ,

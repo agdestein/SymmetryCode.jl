@@ -20,8 +20,14 @@ using StaticArrays
 using Statistics
 using SymmetryCode
 using SymmetryCode.Spectral
-using WGLMakie
-lines([1, 2, 3])
+# using WGLMakie
+# lines([1, 2, 3])
+
+# setup = setup_laptop()
+# setup = setup_turbulator()
+setup = setup_snellius()
+# plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
+plotdir = setup.outdir
 
 let
     l = 10.0
@@ -40,17 +46,9 @@ let
     vlines!(ax, 2 * pi / Δ)
     vlines!(ax, 2 * pi / l)
     ylims!(1e-10, 1e2)
+    save("$(plotdir)/filterkernel.pdf", fig; backend = CairoMakie)
     fig
 end
-
-# dns_aid()
-
-# setup = let
-#     l = 1.0
-#     n_les = 128
-#     Δ = 2 * l / n_les
-#     (; visc = 5e-5, D = 2, l = 1.0, n_dns = 1024, n_les, kpeak = 5, Δ, backend = CUDABackend())
-# end
 
 let
     l = 1.0
@@ -68,16 +66,17 @@ let
     fig
 end
 
-# setup = setup_laptop()
-setup = setup_turbulator()
-outdir = joinpath(@__DIR__, "output", setup.name) |> mkpath
-# plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
-plotdir = outdir
-
-dnsfile = joinpath(outdir, "dns.jld2")
+dnsfile = joinpath(setup.outdir, "dns.jld2")
 let
-    dns = create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0))
-    jldsave(dnsfile; u = cpu_device()(dns))
+    dns, times, energies = create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0))
+    jldsave(dnsfile; u = cpu_device()(dns), times, energies)
+end
+
+let
+    times, energies = load(dnsfile, "times", "energies")
+    fig, ax, l = lines(times, energies)
+    save(joinpath(plotdir, "energy.pdf"), fig)
+    fig
 end
 
 let
@@ -106,10 +105,10 @@ let
         kolmo = @. stat.diss^(-1 / 3) * k^(-3)
         escale = stat.diss^(-1 / 3) * stat.l_kol^(-3)
     elseif D == 3
-        k = [3, g_dns.n / 4]
+        k = [3, g_dns.n / 8]
         kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
-        # escale = 5e-1 * stat.diss^(-2 / 3) # * stat.l_kol^(+5 / 3)
-        escale = 1
+        escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
+        # escale = 1
     end
     kscale = stat.l_kol / setup.l
     span = [1, setup.ou_radius] * kscale
@@ -139,26 +138,30 @@ let
     fig
 end
 
-data = let
-    filename = joinpath(outdir, "data.jld2")
-    if false
+data, datatiming = let
+    filename = joinpath(setup.outdir, "data.jld2")
+    if true
+        t = time()
         u = load(dnsfile, "u") |> adapt(setup.backend)
         d = create_data(
             u,
             setup;
             cfl = 0.35,
             nstep = setup.D == 2 ? 1000 : 30,
-            nsubstep = 20,
+            nsubstep = 10,
             setup.kpeak,
             rng = Xoshiro(0),
             setup.Δ,
         )
-        jldsave(filename; data = d)
+        t = time() - t
+        jldsave(filename; data = d, timing = t)
     end
-    load(filename, "data")
+    load(filename, "data", "timing")
 end;
 
 data[2][end] |> typeof
+
+Base.summarysize(data) * 1e-9
 
 m_nomo = let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
@@ -181,8 +184,9 @@ m_tbnn, train_tbnn = let
     for l in ps
         l.weight .*= 0.1
     end
-    file = joinpath(outdir, "ps-tbnn.jld2")
-    if false
+    file = joinpath(setup.outdir, "ps-tbnn.jld2")
+    if true
+        t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss_tbnn(g),
             setup,
@@ -196,13 +200,14 @@ m_tbnn, train_tbnn = let
             learning_rate = 1e-3,
             net_stuff = (; net, ps, st),
         )
+        t = time() - t
         ps = ps |> cpu_device()
-        jldsave(file; ps, losses_train, losses_valid)
+        jldsave(file; ps, losses_train, losses_valid, timing = t)
     end
-    ps, losses_train, losses_valid = load(file, "ps", "losses_train", "losses_valid")
+    ps, losses_train, losses_valid, timing = load(file, "ps", "losses_train", "losses_valid", "timing")
     ps = ps |> adapt(setup.backend)
     chain = tbnn(net, ps, st, g)
-    chain, (; losses_train, losses_valid)
+    chain, (; losses_train, losses_valid, timing)
 end;
 
 m_equi, train_equi = let
@@ -211,8 +216,9 @@ m_equi, train_equi = let
         [12, 16, 16, 24], # 40_328 actual params
     )
     st = net_stuff.st
-    file = joinpath(outdir, "ps-equi.jld2")
-    if true
+    file = joinpath(setup.outdir, "ps-equi.jld2")
+    if false
+        t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
             setup,
@@ -221,16 +227,19 @@ m_equi, train_equi = let
             learning_rate = 1e-3,
             net_stuff,
         )
+        t = time() - t
         ps = ps |> cpu_device()
-        jldsave(file; ps, losses_train, losses_valid)
+        jldsave(file; ps, losses_train, losses_valid, timing = t)
     end
-    ps, losses_train, losses_valid = load(file, "ps", "losses_train", "losses_valid")
+    ps, losses_train, losses_valid, timing = load(file, "ps", "losses_train", "losses_valid", "timing")
     # ps = net_stuff.ps
     ps = ps |> adapt(setup.backend)
     # ps |> cpu_device() |> ComponentArray |> length |> display; error()
     (; net, project) = net_stuff
-    chain = fullchain(setup, net, project, ps, st)
-    chain, (; losses_train, losses_valid)
+    chain = fullchain_split(setup, net, project, ps, st)
+    project = nothing
+    GC.gc(); CUDA.reclaim()
+    chain, (; losses_train, losses_valid, timing)
 end;
 
 m_conv, train_conv = let
@@ -244,26 +253,28 @@ m_conv, train_conv = let
         hasfield(typeof(ps), :weight) && (ps.weight .*= 0.1)
     end
     st = net_stuff.st
-    file = joinpath(outdir, "ps-conv.jld2")
+    file = joinpath(setup.outdir, "ps-conv.jld2")
     if true
+        t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
             setup,
             dataloader = create_dataloader(setup, data; batchsize = 10),
-            nepoch = 10,
+            nepoch = 5,
             learning_rate = 1e-3,
             net_stuff,
         )
         ps = ps |> cpu_device()
-        jldsave(file; ps, losses_train, losses_valid)
+        t = time() - t
+        jldsave(file; ps, losses_train, losses_valid, timing = t)
     end
     # ps = net_stuff.ps
-    ps, losses_train, losses_valid = load(file, "ps", "losses_train", "losses_valid")
+    ps, losses_train, losses_valid, timing = load(file, "ps", "losses_train", "losses_valid", "timing")
     ps = ps |> adapt(setup.backend)
     # ps |> cpu_device() |> ComponentArray |> length |> display; error()
     (; net, project) = net_stuff
     chain = fullchain(setup, net, project, ps, st)
-    chain, (; losses_train, losses_valid)
+    chain, (; losses_train, losses_valid, timing)
 end;
 
 let
@@ -295,12 +306,12 @@ m_clar = create_clark(setup.Δ, Grid{setup.D}(; setup.l, n = setup.n_les, setup.
 equi_errors_post = let
     grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     models = (;
-        nomo = m_nomo,
-        tbnn = m_tbnn,
-        conv = m_conv,
+        # nomo = m_nomo,
+        # smag = m_smag,
+        # clar = m_clar,
+        # tbnn = m_tbnn,
         equi = m_equi,
-        smag = m_smag,
-        clar = m_clar,
+        # conv = m_conv,
     )
     ustart = data[1][end] |> adapt(setup.backend)
     groupindex = 6
@@ -309,6 +320,7 @@ equi_errors_post = let
     d = dets[groupindex]
     @info "Roto-reflection matrix $(m) (with determinant $(d))"
     map(keys(models)) do key
+        GC.gc(); CUDA.reclaim()
         model = models[key]
         @info "Computing equivariance error for $(key)"
         e = test_equivariance_post(;
@@ -326,12 +338,12 @@ equi_errors_post = let
 end
 
 let
-filename = joinpath(outdir, "equi-errors-post.jld2")
+filename = joinpath(setup.outdir, "equi-errors-post.jld2")
 jldsave(filename; equi_errors_post)
 end
 
 equi_errors_post = let
-    filename = joinpath(outdir, "equi-errors-post.jld2")
+    filename = joinpath(setup.outdir, "equi-errors-post.jld2")
     load(filename, "equi_errors_post")
 end
 
@@ -357,7 +369,7 @@ u_dns, u_les = let
 end;
 
 u_dns, u_les = let
-    filename = joinpath(outdir, "u-post.jld2")
+    filename = joinpath(setup.outdir, "u-post.jld2")
     # jldsave(filename; u_dns = u_dns |> cpu_device(), u_les = u_les |> cpu_device())
     load(filename, "u_dns", "u_les") |> adapt(setup.backend)
 end;
