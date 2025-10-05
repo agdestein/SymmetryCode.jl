@@ -4,6 +4,7 @@ using Adapt
 using CairoMakie
 using CUDA
 using FFTW
+using JLD2
 using KernelAbstractions
 using KernelDensity
 using LinearAlgebra
@@ -524,20 +525,6 @@ function fullchain(setup, net, project, ps, st)
     end
 end
 
-export fullchain_split
-function fullchain_split(setup, net, project, ps, st)
-    (; D) = setup
-    ps = project(ps)
-    function model(x)
-        x = stack(x)
-        s = size(x)
-        x = reshape(x, s..., 1) # Add sample dimension
-        GC.gc(); CUDA.reclaim()
-        y = net(x, ps, st) |> first
-        reshape(y, s[1:D]..., :)
-    end
-end
-
 function les!(du, u, grid, cache; model, visc)
     D = dim(grid)
     (; plan, σ, vi_vj, v, G) = cache
@@ -561,29 +548,73 @@ function les!(du, u, grid, cache; model, visc)
     apply!(tensordivergence!, grid, (du, σ, grid))
 end
 
-function inference_post(; ustart, setup, models, cfl, tstop, Δ)
-    (; visc, D, n_dns, n_les, backend) = setup
-    t = 0.0
-    g_dns = Grid{D}(; setup.l, n = n_dns, backend)
-    g_les = Grid{D}(; setup.l, n = n_les, backend)
-    u = map(copy, ustart)
-    c_dns = getcache(g_dns)
-    c_les = (; getcache(g_les)..., G = tensorfield_nonsym(g_les))
-    fu = vectorfield(g_les)
-    for (fu, u) in zip(fu, u)
-        apply!(cutoff!, g_les, (fu, u))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
+function inference_post(; u_dns, setup, models, files, cfl, tstop, Δ)
+    (; D, l, n_dns, n_les, backend, visc) = setup
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
+
+    # Initial ubar
+    @info "Filtering initial DNS"
+    u_les = vectorfield(g_les)
+    for (u_les, u_dns) in zip(u_les, u_dns)
+        apply!(cutoff!, g_les, (u_les, u_dns))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_les, Δ, g_les))
     end
-    u_models = map(m -> map(copy, fu), models)
+
+    # Solve DNS
+    @info "Solving DNS"
+    t = time()
+    solve_les!(u_dns; grid = g_dns, visc, model = nothing, tstop, cfl)
+    t = time() - t
+
+    # Compute final filtered DNS
+    @info "Filtering final DNS"
+    u_ref = vectorfield(g_les)
+    for (u_ref, u_dns) in zip(u_ref, u_dns)
+        apply!(cutoff!, g_les, (u_ref, u_dns))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, g_les))
+    end
+
+    # Save DNS results and free up memory
+    jldsave(files.dns; u = u_dns |> cpu_device(), timing = t)
+    jldsave(files.ref; u = u_ref |> cpu_device(), timing = t)
+    u_dns = nothing
+    u_ref = nothing 
+
+    # Solve LES for each model
+    for key in keys(models)
+        @info "Solving LES with $(key)"
+        model = models[key]
+        u_model = map(copy, u_les)
+        t = time()
+        solve_les!(u_model; grid = g_les, visc, model, tstop, cfl)
+        t = time() - t
+        jldsave(files[key]; u = u_model |> cpu_device(), timing = t)
+    end
+end
+
+export solve_les!
+function solve_les!(u; grid, visc, model, cfl, tstop)
+    t = 0.0
+    if isnothing(model)
+        # No closure
+        cache = getcache(grid)
+    else
+        # Allocate velocity gradient for closure
+        cache = (; getcache(grid)..., G = tensorfield_nonsym(grid))
+    end
     t = zero(tstop)
     i = 0
     while t < tstop
-        Δt = cfl * propose_timestep(u, g_dns, visc, c_dns)
+        Δt = cfl * propose_timestep(u, grid, visc, cache)
         Δt = min(Δt, tstop - t)
         t += Δt
-        wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
-        for (u, model) in zip(u_models, models)
-            wray3!(les!, u, Δt, g_les, c_les; model, visc)
+        if isnothing(model)
+            # Without closure
+            wray3!(convectiondiffusion!, u, Δt, grid, cache; visc)
+        else
+            # With closure
+            wray3!(les!, u, Δt, grid, cache; model, visc)
         end
         if i % 5 == 0
             energy = Seneca.energy(u)
@@ -600,24 +631,18 @@ function inference_post(; ustart, setup, models, cfl, tstop, Δ)
         end
         i += 1
     end
-    for (fu, u) in zip(fu, u)
-        apply!(cutoff!, g_les, (fu, u))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
-    end
-    u_les = (; ref = fu, u_models...)
-    for u in u_models
-        foreach(u -> apply!(twothirds!, g_les, (u, g_les)), u)
-    end
-    u, u_les
+    foreach(u -> apply!(twothirds!, grid, (u, grid)), u)
+    u
 end
 
 function get_errors(setup, u_les)
     u_les = map(stack, u_les)
     k = keys(u_les)
-    k_les = filter(!=(:ref), k)
-    u_ref = u_les.ref
+    k_les = filter(!=(:dns), k)
+    k_les = filter(!=(:ref), k_les)
+    u_ref = u_les.ref |> adapt(setup.backend)
     errs = map(k_les) do key
-        u = u_les[key]
+        u = u_les[key] |> adapt(setup.backend)
         err = norm(u - u_ref) / norm(u_ref)
         println(key => round(err; sigdigits = 4))
         key => err
@@ -921,13 +946,13 @@ function test_equivariance_post(; ustart, setup, grid, model, groupindex, rng, t
 end
 
 export plot_densities
-function plot_densities(setup, u_dns, u_les, models, labels, plotdir)
-    (; visc, D) = setup
-    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    D = dim(g_dns)
-    u_ref = u_les.ref
-    τhat = sfs(u_dns, g_dns, g_les, setup.Δ)
+function plot_densities(; u, setup, models, labels, plotdir)
+    (; name, D, l, n_dns, n_les, backend, visc, Δ) = setup
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
+    u_dns = u.dns |> adapt(backend)
+    u_ref = u.ref |> adapt(backend)
+    τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
@@ -1008,12 +1033,15 @@ function plot_densities(setup, u_dns, u_les, models, labels, plotdir)
     for (key, val) in pairs(τxx)
         lines!(ax_xx, val.x, val.density; label = labels[key])
     end
-    if D == 2
+    if name == "laptop"
         xlims!(ax_xx, -0.1, 0.3)
         ylims!(ax_xx, 2e-2, 3e2)
-    elseif D == 3
+    elseif name == "turbulator"
         xlims!(ax_xx, -1, 3)
         ylims!(ax_xx, 2e-4, 3e1)
+    elseif name == "snellius"
+        xlims!(ax_xx, -0.15, 0.35)
+        ylims!(ax_xx, 2e-3, 3e2)
     end
 
     # XY-component
@@ -1022,12 +1050,15 @@ function plot_densities(setup, u_dns, u_les, models, labels, plotdir)
     for (key, val) in pairs(τxy)
         lines!(ax_xy, val.x, val.density)
     end
-    if D == 2
+    if name == "laptop"
         xlims!(ax_xy, -0.1, 0.1)
         ylims!(ax_xy, 1e-1, 5e2)
-    elseif D == 3
+    elseif name == "turbulator"
         xlims!(ax_xy, -1.1, 1.1)
         ylims!(ax_xy, 4e-4, 5e1)
+    elseif name == "snellius"
+        xlims!(ax_xy, -0.15, 0.15)
+        ylims!(ax_xy, 4e-3, 3e2)
     end
 
     # Dissipation
@@ -1036,20 +1067,23 @@ function plot_densities(setup, u_dns, u_les, models, labels, plotdir)
     for (key, val) in pairs(diss)
         lines!(ax_diss, val.x, val.density)
     end
-    if D == 2
+    if name == "laptop"
         xlims!(ax_diss, -0.3, 0.3)
         ylims!(ax_diss, 1e-1, 1e2)
-    elseif D == 3
+    elseif name == "turbulator"
         xlims!(ax_diss, -60, 20)
         ylims!(ax_diss, 1e-4, 5e-1)
+    elseif name == "snellius"
+        xlims!(ax_diss, -10, 5)
+        ylims!(ax_diss, 2e-4, 1e1)
     end
 
     Legend(fig[0, :], ax_xx; orientation = :horizontal)
-    save(
-        "$(plotdir)/tensor-distributions-$(D)D-$(setup.n_les).pdf",
-        fig;
-        backend = CairoMakie,
-    )
+
+    # Save plot
+    file = "$(plotdir)/tensor-distributions.pdf"
+    @info "Saving density plot to $(file)"
+    save(file, fig; backend = CairoMakie)
     fig
 end
 
@@ -1128,13 +1162,13 @@ function create_smagorinsky(CS, Δ, g)
 end
 
 export apriori_error
-function apriori_error(setup, u_dns, u_les, models, labels, plotdir)
-    (; visc, D) = setup
-    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    D = dim(g_dns)
-    u_ref = u_les.ref
-    τhat = sfs(u_dns, g_dns, g_les, setup.Δ)
+function apriori_error(; u, setup, models, labels, plotdir)
+    (; D, l, n_dns, n_les, backend, visc, Δ) = setup
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
+    u_dns = u.dns |> adapt(backend)
+    u_ref = u.ref |> adapt(backend)
+    τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
@@ -1164,16 +1198,16 @@ function apriori_error(setup, u_dns, u_les, models, labels, plotdir)
 end
 
 export apriori_equivariance_error
-function apriori_equivariance_error(; setup, u_les, models, labels, plotdir, groupindex)
-    (; visc, D) = setup
-    (; elements, permutations, signs) = group_stuff(setup.D)
+function apriori_equivariance_error(; u, setup, models, labels, plotdir, groupindex)
+    (; D, l, n_les, backend, visc) = setup
+    (; elements, permutations, signs) = group_stuff(D)
     ip, is = elements[groupindex]
     p, s = permutations[ip], signs[is]
     T = typeof(setup.l)
     SM = SMatrix{D,D,T,D^2}
-    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    u = u_les.ref
-    G = getgradient(u, g)
+    g = Grid{D}(; l, n = n_les, backend)
+    u_ref = u.ref |> adapt(backend)
+    G = getgradient(u_ref, g)
     rG = transform_tensor_nonsym(G, g, (p, s))
     errors = map(models) do m
         mG = m(G)
@@ -1265,17 +1299,16 @@ function plot_velocities(setup, u_dns, u_les, comp)
 end
 
 export get_dissipation_errors
-function get_dissipation_errors(; setup, u, models)
-    (; visc, D, Δ) = setup
-    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    D = dim(g_dns)
+function get_dissipation_errors(; setup, u_dns, models)
+    (; D, l, n_dns, n_les, backend, visc, Δ) = setup
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
     ubar = vectorfield(g_les)
-    for (ubar, u) in zip(ubar, u)
-        apply!(cutoff!, g_les, (ubar, u))
+    for (ubar, u_dns) in zip(ubar, u_dns)
+        apply!(cutoff!, g_les, (ubar, u_dns))
         isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
     end
-    τhat = sfs(u, g_dns, g_les, Δ)
+    τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
@@ -1353,6 +1386,7 @@ function setup_laptop()
     n_les = 128
     Δ = 2 * l / n_les
     (;
+        name = "laptop",
         outdir = joinpath(@__DIR__, "..", "output", "laptop") |> mkpath,
         visc = 1e-5,
         D = 2,
@@ -1374,6 +1408,7 @@ function setup_turbulator()
     n_les = 64
     Δ = 2 * l / n_les
     (;
+        name = "turbulator",
         outdir = joinpath(@__DIR__, "..", "output", "turbulator") |> mkpath,
         visc = 1e-4,
         D = 3,
@@ -1395,6 +1430,7 @@ function setup_snellius()
     n_les = 128
     Δ = 2 * l / n_les
     (;
+        name = "snellius",
         outdir = mkpath("/projects/prjs1757/SymmetryOutput"),
         visc = 4e-5,
         D = 3,

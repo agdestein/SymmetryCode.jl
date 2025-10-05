@@ -27,7 +27,7 @@ using SymmetryCode.Spectral
 # setup = setup_turbulator()
 setup = setup_snellius()
 # plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
-plotdir = setup.outdir
+plotdir = joinpath(setup.outdir, "snelliusplots") |> mkpath
 
 let
     l = 10.0
@@ -67,6 +67,7 @@ let
 end
 
 dnsfile = joinpath(setup.outdir, "dns.jld2")
+
 let
     dns, times, energies = create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0))
     jldsave(dnsfile; u = cpu_device()(dns), times, energies)
@@ -140,7 +141,7 @@ end
 
 data, datatiming = let
     filename = joinpath(setup.outdir, "data.jld2")
-    if true
+    if false
         t = time()
         u = load(dnsfile, "u") |> adapt(setup.backend)
         d = create_data(
@@ -170,6 +171,14 @@ m_nomo = let
     m_nomo(G) = fill!(stack(spacetensorfield(g)), 0)
 end
 
+m_smag = create_smagorinsky(
+    0.17,
+    setup.Δ,
+    Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
+)
+
+m_clar = create_clark(setup.Δ, Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
+
 m_tbnn, train_tbnn = let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     kern = ntuple(Returns(1), setup.D)
@@ -185,7 +194,7 @@ m_tbnn, train_tbnn = let
         l.weight .*= 0.1
     end
     file = joinpath(setup.outdir, "ps-tbnn.jld2")
-    if true
+    if false
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss_tbnn(g),
@@ -213,7 +222,8 @@ end;
 m_equi, train_equi = let
     net_stuff = equivariant_net(
         setup,
-        [12, 16, 16, 24], # 40_328 actual params
+        # [12, 16, 16, 24], # 40_328 actual params
+        [8, 8, 8, 16], # 12_544 actual params
     )
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-equi.jld2")
@@ -234,18 +244,17 @@ m_equi, train_equi = let
     ps, losses_train, losses_valid, timing = load(file, "ps", "losses_train", "losses_valid", "timing")
     # ps = net_stuff.ps
     ps = ps |> adapt(setup.backend)
-    # ps |> cpu_device() |> ComponentArray |> length |> display; error()
+    ps |> cpu_device() |> ComponentArray |> length |> display
     (; net, project) = net_stuff
-    chain = fullchain_split(setup, net, project, ps, st)
-    project = nothing
-    GC.gc(); CUDA.reclaim()
+    chain = fullchain(setup, net, project, ps, st)
     chain, (; losses_train, losses_valid, timing)
 end;
 
 m_conv, train_conv = let
     net_stuff = cnn(
         setup,
-        [48, 128, 128, 128]; # 40_550 parameters
+        # [48, 128, 128, 128]; # 40_550 parameters
+        [48, 64, 64, 64]; # 12_326 parameters
         same_as_equi = false,
     )
     for ps in net_stuff.ps
@@ -254,7 +263,7 @@ m_conv, train_conv = let
     end
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-conv.jld2")
-    if true
+    if false
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
@@ -295,23 +304,15 @@ let
     fig
 end
 
-m_smag = create_smagorinsky(
-    0.17,
-    setup.Δ,
-    Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
-)
-
-m_clar = create_clark(setup.Δ, Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
-
 equi_errors_post = let
     grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     models = (;
-        # nomo = m_nomo,
-        # smag = m_smag,
-        # clar = m_clar,
-        # tbnn = m_tbnn,
+        nomo = m_nomo,
+        smag = m_smag,
+        clar = m_clar,
+        tbnn = m_tbnn,
         equi = m_equi,
-        # conv = m_conv,
+        conv = m_conv,
     )
     ustart = data[1][end] |> adapt(setup.backend)
     groupindex = 6
@@ -320,7 +321,6 @@ equi_errors_post = let
     d = dets[groupindex]
     @info "Roto-reflection matrix $(m) (with determinant $(d))"
     map(keys(models)) do key
-        GC.gc(); CUDA.reclaim()
         model = models[key]
         @info "Computing equivariance error for $(key)"
         e = test_equivariance_post(;
@@ -349,57 +349,74 @@ end
 
 equi_errors_post |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
-# :nomo => 9.999e-16
-# :tbnn => 9.382e-16
-# :conv => 0.0165
-# :equi => 9.01e-16
+# :nomo => 1.418e-15
+# :smag => 9.936e-16
+# :clar => 1.451e-15
+# :tbnn => 1.132e-15
+# :equi => 1.162e-15
+# :conv => 0.01899
 
-u_dns, u_les = let
-    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    ustart = randomfield(g_dns; rng = Xoshiro(123), setup.kpeak)
+upostfiles = map(
+    name -> joinpath(setup.outdir, "u-post-$(name).jld2"),
+    (; 
+        dns = "dns",
+        ref = "ref",
+        nomo = "nomo",
+        smag = "smag",
+        clar = "clar",
+        tbnn = "tbnn",
+        equi = "equi",
+        conv = "conv",
+    ),
+)
+let
     models = (;
         nomo = m_nomo,
-        tbnn = m_tbnn,
-        conv = m_conv,
-        equi = m_equi,
         smag = m_smag,
         clar = m_clar,
+        tbnn = m_tbnn,
+        equi = m_equi,
+        conv = m_conv,
     )
-    inference_post(; ustart, setup, models, setup.Δ, tstop = 1e-1, cfl = 0.35)
-end;
+    u_dns = load(dnsfile, "u") |> adapt(setup.backend)
+    inference_post(; u_dns, setup, models, files = upostfiles, cfl = 0.35, tstop = 1e-1, setup.Δ)
+end
 
-u_dns, u_les = let
-    filename = joinpath(setup.outdir, "u-post.jld2")
-    # jldsave(filename; u_dns = u_dns |> cpu_device(), u_les = u_les |> cpu_device())
-    load(filename, "u_dns", "u_les") |> adapt(setup.backend)
-end;
+map(f -> load(f, "timing"), upostfiles) |> pairs
 
-get_errors(setup, u_les);
+u = map(f -> load(f, "u"), upostfiles);
 
-# :nomo => 0.4443
-# :tbnn => 0.3037
-# :conv => 0.2488
-# :equi => 0.259
-# :smag => 0.3598
-# :clar => 0.272
+get_errors(setup, u);
+
+# :nomo => 0.1752
+# :smag => 0.1223
+# :clar => 0.157
+# :tbnn => 0.1222
+# :equi => 0.1171
+# :conv => 0.1175
 
 let
-    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    (; D, l, n_dns, n_les, backend, visc) = setup
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
     labels = (;
+        dns = "DNS",
         ref = "Filtered DNS",
         nomo = "No-model",
-        tbnn = "TBNN",
-        conv = "Conv",
-        equi = "G-Conv",
         smag = "Smagorinsky",
         clar = "Clark",
+        tbnn = "TBNN",
+        equi = "G-Conv",
+        conv = "Conv",
     )
+    u_dns = u.dns
+    keys_les = filter(!=(:dns), keys(u))
+    u_les = (; map(k -> k => u[k], keys_les)...)
     D = dim(g_dns)
-    stat = turbulence_statistics(u_dns, setup.visc, g_dns)
+    stat = turbulence_statistics(u_dns |> adapt(backend), visc, g_dns)
     stat |> pairs |> display
-    s = spectrum(u_dns, g_dns)
-    s_les = map(u -> spectrum(u, g_les), u_les)
+    s = spectrum(u_dns |> adapt(backend), g_dns)
+    s_les = map(u -> spectrum(u |> adapt(backend), g_les), u_les)
     fig = Figure(; size = (500, 300))
     ax = Axis(
         fig[1, 1];
@@ -430,27 +447,45 @@ let
     fig
 end
 
+# :uavg   => 1.05459
+# :diss   => 0.499842
+# :l_int  => 2.3465
+# :l_tay  => 0.00943405
+# :l_kol  => 0.000598187
+# :t_int  => 2.22503
+# :t_tay  => 0.00894569
+# :t_kol  => 0.00894569
+# :Re_int => 61865.1
+# :Re_tay => 248.727
+# :Re_kol => 15.7711
+
 let
-    models = (; tbnn = m_tbnn, conv = m_conv, equi = m_equi, smag = m_smag, clar = m_clar)
+    models = (;
+              smag = m_smag,
+              clar = m_clar,
+              tbnn = m_tbnn,
+              equi = m_equi,
+              conv = m_conv,
+             )
     labels = (;
         ref = "Reference",
-        tbnn = "TBNN",
-        conv = "Conv",
-        equi = "G-Conv",
         smag = "Smagorinsky",
         clar = "Clark",
+        tbnn = "TBNN",
+        equi = "G-Conv",
+        conv = "Conv",
     )
-    plot_densities(setup, u_dns, u_les, models, labels, plotdir)
+    plot_densities(; u, setup, models, labels, plotdir)
 end
 
 apriori_errors = let
     models = (;
         nomo = m_nomo,
-        tbnn = m_tbnn,
-        conv = m_conv,
-        equi = m_equi,
         smag = m_smag,
         clar = m_clar,
+        tbnn = m_tbnn,
+        equi = m_equi,
+        conv = m_conv,
     )
     labels = (;
         nomo = "No-model",
@@ -460,13 +495,20 @@ apriori_errors = let
         smag = "Smagorinsky",
         clar = "Clark",
     )
-    apriori_error(setup, u_dns, u_les, models, labels, plotdir)
+    apriori_error(; u, setup, models, labels, plotdir)
 end
 
 apriori_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
+# :nomo => 1.0
+# :smag => 0.9922
+# :clar => 0.7288
+# :tbnn => 0.6543
+# :equi => 0.6319
+# :conv => 0.6319
+
 apriori_equi_errors = let
-    models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, conv = m_conv, equi = m_equi)
+    models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
     labels = (;
         tbnn = "TBNN",
         conv = "Conv",
@@ -474,13 +516,19 @@ apriori_equi_errors = let
         smag = "Smagorinsky",
         clar = "Clark",
     )
-    apriori_equivariance_error(; setup, u_les, models, labels, plotdir, groupindex = 6)
+    apriori_equivariance_error(; u, setup, models, labels, plotdir, groupindex = 6)
 end
 
 apriori_equi_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
+# :smag => 8.572e-17
+# :clar => 9.765e-17
+# :tbnn => 3.155e-16
+# :equi => 6.905e-16
+# :conv => 0.06333
+
 dissipation_errors = let
-    u = u_dns
+    u_dns = u.dns |> adapt(setup.backend)
     models = (;
         nomo = m_nomo,
         smag = m_smag,
@@ -497,16 +545,17 @@ dissipation_errors = let
         smag = "Smagorinsky",
         clar = "Clark",
     )
-    get_dissipation_errors(; setup, u, models)
+    get_dissipation_errors(; setup, u_dns, models)
 end;
 dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
-# :nomo => 1.0
-# :smag => 0.9132
-# :clar => 0.5875
-# :tbnn => 0.7187
-# :conv => 0.5612
-# :equi => 0.5805
+# :ref  => -0.1498
+# :nomo => 0.0
+# :smag => -0.1959
+# :clar => -0.05622
+# :tbnn => -0.2081
+# :conv => -0.1714
+# :equi => -0.1765
 
 let
     g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
