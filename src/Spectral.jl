@@ -1198,20 +1198,19 @@ function apriori_error(; u, setup, models, labels, plotdir)
 end
 
 export apriori_equivariance_error
-function apriori_equivariance_error(; u, setup, models, labels, plotdir, groupindex)
+function apriori_equivariance_error(; u, setup, models, plotdir, groupindex)
     (; D, l, n_les, backend, visc) = setup
     (; elements, permutations, signs) = group_stuff(D)
-    ip, is = elements[groupindex]
-    p, s = permutations[ip], signs[is]
+    nelement = length(elements)
     T = typeof(setup.l)
     SM = SMatrix{D,D,T,D^2}
     g = Grid{D}(; l, n = n_les, backend)
     u_ref = u.ref |> adapt(backend)
     G = getgradient(u_ref, g)
-    rG = transform_tensor_nonsym(G, g, (p, s))
-    errors = map(models) do m
+    errors = map(keys(models)) do key
+        @info "Computing a-priori equi errors for $(key)"
+        m = models[key]
         mG = m(G)
-        mrG = m(rG)
         mG_split = if D == 2
             xx, yy, xy = 1, 2, 3
             (;
@@ -1231,20 +1230,28 @@ function apriori_equivariance_error(; u, setup, models, labels, plotdir, groupin
                 zx = selectdim(mG, D + 1, zx),
             )
         end
-        rmG_split = transform_tensor(mG_split, g, (p, s))
-        rmG = stack(rmG_split)
-        err = norm(rmG - mrG) / norm(mrG)
+        err = map(elements) do e
+            ip, is = e
+            p, s = permutations[ip], signs[is]
+            rG = transform_tensor_nonsym(G, g, (p, s))
+            mrG = m(rG)
+            rmG_split = transform_tensor(mG_split, g, (p, s))
+            rmG = stack(rmG_split)
+            norm(rmG - mrG) / norm(mrG)
+        end
+        key => err
     end
-    errors
+    errors |> NamedTuple
 end
 
 export plot_velocities
-function plot_velocities(setup, u_dns, u_les, comp)
+function plot_velocities(setup, u, comp)
+    (; D, l, n_dns, n_les, backend) = setup
     fig = Figure(; size = (800, 440))
-    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    g_dns = Grid{D}(; l, n = n_dns, backend)
     ui = spacescalarfield(g_dns)
     plan = plan_rfft(ui)
-    ldiv!(ui, plan, copy(u_dns[comp])) # Make copy, ldiv! overwrites...
+    ldiv!(ui, plan, adapt(backend, u.dns[comp])) # Make copy, ldiv! overwrites...
     ui .*= g_dns.n^3 # FFT factor
     data = ui[:, :, end] |> Array
     ax = Axis(
@@ -1269,9 +1276,10 @@ function plot_velocities(setup, u_dns, u_les, comp)
         smag = "Smagorinsky",
         clar = "Clark",
     )
-    for (k, key) in enumerate(keys(u_les))
+    keys_les = filter(!=(:dns), keys(u))
+    for (k, key) in enumerate(keys_les)
         k += 1 # First for DNS
-        u = u_les[key]
+        umodel = u[key]
         title = labels[key]
         j, i = CartesianIndices((4, 2))[k].I
         ax = Axis(
@@ -1285,10 +1293,10 @@ function plot_velocities(setup, u_dns, u_les, comp)
             aspect = DataAspect(),
             title,
         )
-        g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+        g = Grid{D}(; l, n = n_les, backend)
         ui = spacescalarfield(g)
         plan = plan_rfft(ui)
-        ldiv!(ui, plan, copy(u[comp])) # Make copy, ldiv! overwrites...
+        ldiv!(ui, plan, adapt(backend, umodel[comp])) # Make copy, ldiv! overwrites...
         ui .*= g.n^3 # FFT factor
         range = (:, :)
         # range = (40:60, 40:60)

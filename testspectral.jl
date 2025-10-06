@@ -81,16 +81,17 @@ let
 end
 
 let
-    u = load(dnsfile, "u") |> adapt(setup.backend)
-    g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    g_les = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    (; D, l, n_dns, n_les, backend, visc, ou_radius) = setup
+    u = load(dnsfile, "u") |> adapt(backend)
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
     ubar = vectorfield(g_les)
     for (ubar, u) in zip(ubar, u)
         apply!(cutoff!, g_les, (ubar, u))
         apply!(gaussianfilter!, g_les, (ubar, setup.Δ, g_les))
     end
     D = dim(g_dns)
-    stat = turbulence_statistics(u, setup.visc, g_dns)
+    stat = turbulence_statistics(u, visc, g_dns)
     s_dns = spectrum(u, g_dns)
     s_les = spectrum(ubar, g_les)
     fig = Figure(; size = (400, 340))
@@ -111,12 +112,12 @@ let
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
         # escale = 1
     end
-    kscale = stat.l_kol / setup.l
-    span = [1, setup.ou_radius] * kscale
+    kscale = stat.l_kol / l
+    span = [1, ou_radius] * kscale
     oucolor = Makie.wong_colors()[4]
     vspan!(ax, span...; alpha = 0.3, color = oucolor)
     b = sqrt(prod(extrema(escale * s_dns.s)))
-    a = 1.1 * kscale * setup.ou_radius
+    a = 1.1 * kscale * ou_radius
     c = sqrt(prod(span))
     w = D == 2 ? 1 : 1.5
     text!(ax, a, b / w; color = oucolor, text = "Force")
@@ -384,6 +385,15 @@ end
 
 map(f -> load(f, "timing"), upostfiles) |> pairs
 
+# :dns  => 1025.77
+# :ref  => 1025.77
+# :nomo => 1.62064
+# :smag => 0.904956
+# :clar => 0.980243
+# :tbnn => 6.24895
+# :equi => 40.2744
+# :conv => 5.49185
+
 u = map(f -> load(f, "u"), upostfiles);
 
 get_errors(setup, u);
@@ -509,23 +519,73 @@ apriori_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
 apriori_equi_errors = let
     models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
-    labels = (;
-        tbnn = "TBNN",
-        conv = "Conv",
-        equi = "G-Conv",
-        smag = "Smagorinsky",
-        clar = "Clark",
-    )
     apriori_equivariance_error(; u, setup, models, labels, plotdir, groupindex = 6)
 end
 
-apriori_equi_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
+let
+    (; dets) = group_stuff(setup.D)
+    fig = Figure(; size = (500, 400))
+    ax = Axis(
+        fig[1, 1],
+        yscale = log10,
+        xlabel = "Group element",
+        ylabel = "Error",
+        xticks = [1, 8, 16, 24, 32, 40, 48],
+    )
+    ylims!(ax, 1e-17, 1)
+    i = 1:48
+    colors = (;
+        smag = Cycled(2),
+        clar = Cycled(3),
+        tbnn = Cycled(4),
+        equi = Cycled(5),
+        conv = Cycled(6),
+    )
+    labels = (;
+        smag = "Smagorinsky",
+        clar = "Clark",
+        tbnn = "TBNN",
+        equi = "G-Conv",
+        conv = "Conv",
+    )
+    markers = (;
+        smag = :circle,
+        clar = :rect,
+        tbnn = :diamond,
+        equi = :rtriangle,
+        conv = :x,
+    )
+    for key in keys(apriori_equi_errors)
+        e = apriori_equi_errors[key]
+        e = max.(e, 1e-30) # Encode true zeros as 1e-30
+        scatterlines!(ax, i, e; label = labels[key], marker = markers[key], color = colors[key])
+    end
+    Legend(fig[0, 1], ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 5,
+    )
+    rowgap!(fig.layout, 5)
+    save("$(plotdir)/apriori-equi-errors.pdf", fig; backend = CairoMakie)
+    fig
+end
 
-# :smag => 8.572e-17
-# :clar => 9.765e-17
-# :tbnn => 3.155e-16
-# :equi => 6.905e-16
-# :conv => 0.06333
+let
+    s = group_stuff(3)
+    s.mats[43]
+end
+
+apriori_equi_errors.conv[43]
+
+apriori_equi_errors |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
+
+# :smag => 7.244e-17
+# :clar => 7.201e-17
+# :tbnn => 2.557e-16
+# :equi => 6.712e-16
+# :conv => 0.05898
 
 dissipation_errors = let
     u_dns = u.dns |> adapt(setup.backend)
@@ -566,9 +626,9 @@ end
 
 let
     comp = :x
-    fig = plot_velocities(setup, u_dns, u_les, comp)
+    fig = plot_velocities(setup, u, comp)
     save(
-        "$(plotdir)/velocities-$(comp).pdf",
+        "$(plotdir)/velocities-$(comp).png",
         fig;
         backend = CairoMakie,
     )
