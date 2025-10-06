@@ -177,6 +177,7 @@ function create_data(u, setup; cfl, nstep, nsubstep, Δ)
     fu = vectorfield(g_les)
     σfu = tensorfield(g_les)
     fσu = tensorfield(g_les)
+    trace = scalarfield(g_les)
     τ = tensorfield(g_les)
     inputs = fill(map(Array, fu), 0)
     outputs = fill(map(Array, fσu), 0)
@@ -229,11 +230,23 @@ function create_data(u, setup; cfl, nstep, nsubstep, Δ)
             isnothing(Δ) || apply!(gaussianfilter!, g_les, (fσu, Δ, g_les))
         end
         nonlinearity!(σfu, c_les.vi_vj, c_les.v, fu, c_les.plan, g_les)
-        foreach(i -> (fσu[i] .-= σfu[i]), 1:tensordim(g_dns))
+        foreach(i -> (τ[i] .= fσu[i] .- σfu[i]), 1:tensordim(g_dns))
+
+        # Make tensor trace-free
+        if D == 2
+            @. trace = (τ[1] + τ[2]) / 2
+            τ[1] .-= trace
+            τ[2] .-= trace
+        elseif D == 3
+            @. trace = (τ[1] + τ[2] + τ[3]) / 3
+            τ[1] .-= trace
+            τ[2] .-= trace
+            τ[3] .-= trace
+        end
 
         # Save current (ubar,tau)-pair
         push!(inputs, map(Array, fu))
-        push!(outputs, map(Array, fσu))
+        push!(outputs, map(Array, τ))
     end
     inputs, outputs
 end
@@ -245,13 +258,14 @@ function sfs(u, g_dns, g_les, Δ)
     ubar = vectorfield(g_les)
     σbar1 = tensorfield(g_les)
     σbar2 = tensorfield(g_les)
+    trace = scalarfield(g_les)
     τ = tensorfield(g_les)
-    sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
+    sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     τ
 end
 
 export sfs!
-function sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
+function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     D = dim(g_dns)
     nonlinearity!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, g_dns)
     for (ubar, u) in zip(ubar, u)
@@ -265,6 +279,18 @@ function sfs!(τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     nonlinearity!(σbar2, c_les.vi_vj, c_les.v, ubar, c_les.plan, g_les)
     foreach(i -> (τ[i] .= σbar1[i] .- σbar2[i]), 1:tensordim(g_dns))
     # foreach(τ -> apply!(twothirds!, g_les, (τ, g_les)), τ)
+
+    # Make tensor trace-free
+    if D == 2
+        @. trace = (τ[1] + τ[2]) / 2
+        τ[1] .-= trace
+        τ[2] .-= trace
+    elseif D == 3
+        @. trace = (τ[1] + τ[2] + τ[3]) / 3
+        τ[1] .-= trace
+        τ[2] .-= trace
+        τ[3] .-= trace
+    end
 end
 
 function create_dataloader(setup, data; batchsize)
@@ -947,12 +973,15 @@ function test_equivariance_post(; ustart, setup, grid, model, groupindex, rng, t
 end
 
 export plot_densities
-function plot_densities(; u, setup, models, labels, plotdir)
+function plot_densities(; u_dns, setup, models, labels, plotdir, dolog)
     (; name, D, l, n_dns, n_les, backend, visc, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
-    u_dns = u.dns |> adapt(backend)
-    u_ref = u.ref |> adapt(backend)
+    u_ref = vectorfield(g_les)
+    for (u_ref, u_dns) in zip(u_ref, u_dns)
+        apply!(cutoff!, g_les, (u_ref, u_dns))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, g_les))
+    end
     τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
@@ -993,23 +1022,26 @@ function plot_densities(; u, setup, models, labels, plotdir)
         end
     end
     τ_all = (; ref = τ, τ_les...)
+    for τ in τ_all
+        for τ in τ
+            plan = plan_rfft(τ)
+            temp = plan * τ
+            apply!(twothirds!, g_les, (temp, g_les))
+            ldiv!(τ, plan, temp)
+        end
+        traces = @. (τ[1] + τ[2] + τ[3]) / 3
+        τ[1] .-= traces
+        τ[2] .-= traces
+        τ[3] .-= traces
+    end
+    for S in S
+        plan = plan_rfft(S)
+        temp = plan * S
+        apply!(twothirds!, g_les, (temp, g_les))
+        ldiv!(S, plan, temp)
+    end
     τxx = map(τ -> τ.xx, τ_all)
     τxy = map(τ -> τ.xy, τ_all)
-    temp = scalarfield(g_les)
-    # τxx = map(τ_all) do τ
-    #     d = @. τ.xx
-    #     mul!(temp, plan, d)
-    #     apply!(twothirds!, g_les, (temp, g_les))
-    #     ldiv!(d, plan, temp)
-    #     d
-    # end
-    # τxy = map(τ_all) do τ
-    #     d = @. τ.xy
-    #     mul!(temp, plan, d)
-    #     apply!(twothirds!, g_les, (temp, g_les))
-    #     ldiv!(d, plan, temp)
-    #     d
-    # end
     diss = map(τ_all) do τ
         d = if D == 2
             @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
@@ -1019,61 +1051,66 @@ function plot_densities(; u, setup, models, labels, plotdir)
                τ.zz * S.zz +
                2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
         end
-        # mul!(temp, plan, d)
-        # apply!(twothirds!, g_les, (temp, g_les))
-        # ldiv!(d, plan, temp)
         d
     end
+
+    yscale = dolog ? log10 : identity
 
     fig = Figure(; size = (800, 300))
 
     # XX-component
-    ax_xx =
-        Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density", yscale = log10)
-    τxx = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), τxx)
+    ax_xx = Makie.Axis(
+        fig[1, 1];
+        xlabel = "xx-component",
+        ylabel = "Density",
+        yscale,
+    )
     for (key, val) in pairs(τxx)
-        lines!(ax_xx, val.x, val.density; label = labels[key])
+        # val = key == :ref ? val : 1.4 * val .- 0.02
+        k = val |> vec |> Array |> kde
+        lines!(ax_xx, k.x, k.density; label = labels[key])
     end
     if name == "laptop"
         xlims!(ax_xx, -0.1, 0.3)
         ylims!(ax_xx, 2e-2, 3e2)
     elseif name == "turbulator"
-        xlims!(ax_xx, -0.2, 0.5)
-        ylims!(ax_xx, 2e-3, 5e1)
+        xlims!(ax_xx, -0.2, 0.2)
+        ylims!(ax_xx, 2e-3, 2e1)
     elseif name == "snellius"
         xlims!(ax_xx, -0.15, 0.35)
         ylims!(ax_xx, 2e-3, 3e2)
     end
+    # dx ux + dy ux
 
     # XY-component
-    ax_xy = Makie.Axis(fig[1, 2]; xlabel = "xy-component", yscale = log10)
-    τxy = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), τxy)
+    ax_xy = Makie.Axis(fig[1, 2]; xlabel = "xy-component", yscale)
     for (key, val) in pairs(τxy)
-        lines!(ax_xy, val.x, val.density)
+        k = val |> vec |> Array |> kde
+        lines!(ax_xy, k.x, k.density)
     end
     if name == "laptop"
         xlims!(ax_xy, -0.1, 0.1)
         ylims!(ax_xy, 1e-1, 5e2)
     elseif name == "turbulator"
-        xlims!(ax_xy, -1.1, 1.1)
-        ylims!(ax_xy, 4e-4, 5e1)
+        xlims!(ax_xy, -0.2, 0.2)
+        ylims!(ax_xy, 4e-3, 2.5e1)
     elseif name == "snellius"
         xlims!(ax_xy, -0.15, 0.15)
         ylims!(ax_xy, 4e-3, 3e2)
     end
 
     # Dissipation
-    ax_diss = Makie.Axis(fig[1, 3]; xlabel = "Dissipation", yscale = log10)
-    diss = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), diss)
+    ax_diss = Makie.Axis(fig[1, 3]; xlabel = "Dissipation", yscale)
     for (key, val) in pairs(diss)
-        lines!(ax_diss, val.x, val.density)
+        k = val |> vec |> Array |> kde
+        lines!(ax_diss, k.x, k.density)
     end
     if name == "laptop"
         xlims!(ax_diss, -0.3, 0.3)
         ylims!(ax_diss, 1e-1, 1e2)
     elseif name == "turbulator"
-        xlims!(ax_diss, -60, 20)
-        ylims!(ax_diss, 1e-4, 5e-1)
+        xlims!(ax_diss, -6, 2)
+        ylims!(ax_diss, 1e-3, 3e0)
     elseif name == "snellius"
         xlims!(ax_diss, -10, 5)
         ylims!(ax_diss, 2e-4, 1e1)
@@ -1126,7 +1163,7 @@ end
     I = @index(Global, Cartesian)
     G = @SMatrix [GG.xx[I] GG.xy[I]; GG.yx[I] GG.yy[I]]
     S = (G + G') / 2
-    nu = CS^2 * Δ^2 * sqrt(sum(abs2, S)) / 2
+    nu = CS^2 * Δ^2 * sqrt(sum(abs2, S))
     τ = -2 * nu * S
     xx, yy, xy = 1, 2, 3
     ττ[I, xx] = τ[1, 1]
@@ -1163,12 +1200,15 @@ function create_smagorinsky(CS, Δ, g)
 end
 
 export apriori_error
-function apriori_error(; u, setup, models, labels, plotdir)
+function apriori_error(; u_dns, setup, models, labels, plotdir)
     (; D, l, n_dns, n_les, backend, visc, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
-    u_dns = u.dns |> adapt(backend)
-    u_ref = u.ref |> adapt(backend)
+    u_ref = vectorfield(g_les)
+    for (u_ref, u_dns) in zip(u_ref, u_dns)
+        apply!(cutoff!, g_les, (u_ref, u_dns))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, g_les))
+    end
     τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
@@ -1192,7 +1232,15 @@ function apriori_error(; u, setup, models, labels, plotdir)
         )
     end
     errors = map(models) do m
+        # Predict stress
         y = m(G)
+
+        # Make trace free
+        ydiag = selectdim(y, D + 1, 1:D)
+        trace = sum(ydiag; dims = D + 1)
+        @. ydiag -= trace / D
+
+        # Relative error
         norm(y - τ) / norm(τ)
     end
     errors
@@ -1415,7 +1463,7 @@ export setup_turbulator
 function setup_turbulator()
     l = 1.0
     n_les = 64
-    Δ = 2 * l / n_les
+    Δ = 4 * l / n_les
     (;
         name = "turbulator",
         outdir = joinpath(@__DIR__, "..", "output", "turbulator") |> mkpath,

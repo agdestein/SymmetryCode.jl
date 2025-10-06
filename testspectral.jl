@@ -106,6 +106,7 @@ let
     fig
 end
 
+# Plot DNS spectrum
 let
     (; D, l, n_dns, n_les, backend, visc, ou_radius) = setup
     u = load(dnsfile, "u") |> adapt(backend)
@@ -173,7 +174,7 @@ let
 end
 
 data, datatiming = let
-    filename = joinpath(setup.outdir, "datatoto.jld2")
+    filename = joinpath(setup.outdir, "data.jld2")
     if true
         t = time()
         u = load(dnsfile, "u") |> adapt(setup.backend)
@@ -181,7 +182,7 @@ data, datatiming = let
             u,
             setup;
             cfl = 0.35,
-            nstep = setup.D == 2 ? 1000 : 5,
+            nstep = setup.D == 2 ? 1000 : 50,
             nsubstep = 10,
             setup.Δ,
         )
@@ -240,7 +241,7 @@ m_tbnn, train_tbnn = let
         l.weight .*= 0.1
     end
     file = joinpath(setup.outdir, "ps-tbnn.jld2")
-    if false
+    if true
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss_tbnn(g),
@@ -274,13 +275,13 @@ m_equi, train_equi = let
     )
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-equi.jld2")
-    if false
+    if true
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
             setup,
             dataloader = create_dataloader(setup, data; batchsize = 10),
-            nepoch = 1,
+            nepoch = 5,
             learning_rate = 1e-3,
             net_stuff,
         )
@@ -311,7 +312,7 @@ m_conv, train_conv = let
     end
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-conv.jld2")
-    if true
+    if false
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
@@ -329,7 +330,7 @@ m_conv, train_conv = let
     ps, losses_train, losses_valid, timing =
         load(file, "ps", "losses_train", "losses_valid", "timing")
     ps = ps |> adapt(setup.backend)
-    # ps |> cpu_device() |> ComponentArray |> length |> display; error()
+    ps |> cpu_device() |> ComponentArray |> length |> display
     (; net, project) = net_stuff
     chain = fullchain(setup, net, project, ps, st)
     chain, (; losses_train, losses_valid, timing)
@@ -410,22 +411,26 @@ upostfiles = map(
     (;
         dns = "dns",
         ref = "ref",
-        nomo = "nomo",
-        smag = "smag",
+        # nomo = "nomo",
+        # smag = "smag",
         clar = "clar",
-        tbnn = "tbnn",
-        equi = "equi",
-        conv = "conv",
+        clar2 = "clar2",
+        clar22 = "clar22",
+        # tbnn = "tbnn",
+        # equi = "equi",
+        # conv = "conv",
     ),
 )
 let
     models = (;
         # nomo = m_nomo,
         # smag = m_smag,
-        # clar = m_clar,
+        clar = m_clar,
+        clar2 = x -> sqrt(2) * m_clar(x),
+        clar22 = x -> 2 * m_clar(x),
         # tbnn = m_tbnn,
         # equi = m_equi,
-        conv = m_conv,
+        # conv = m_conv,
     )
     u_dns = load(dnsfile, "u") |> adapt(setup.backend)
     inference_post(;
@@ -527,31 +532,51 @@ end
 # :Re_kol => 15.7711
 
 let
+    # setup = (; Main.setup..., Δ = Main.setup.Δ * 2)
+    m = create_clark(setup.Δ, Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
+    a = sqrt(2)
+    # a = 1.0
+    # b = sqrt(2)
+    b = a
+    w = reshape([a, a, a, b, b, b], 1,1,1,:) |> CuArray
     models = (;
         # smag = m_smag,
-        # clar = m_clar,
+        clar = m_clar,
+        # clar2 = x -> 1.8 * m_clar(x) .+ 0.01 * o,
+        # clar2 = x -> sqrt(2) * m(x),
+        # clar2 = x -> w .* m(x),
         # tbnn = m_tbnn,
         # equi = m_equi,
         conv = m_conv,
+        # conv = x -> sqrt(2) * m_conv(x),
     )
     labels = (;
         ref = "Reference",
         smag = "Smagorinsky",
         clar = "Clark",
+        clar2 = "Clark2",
         tbnn = "TBNN",
         equi = "G-Conv",
         conv = "Conv",
     )
-    plot_densities(; u, setup, models, labels, plotdir)
+    u_dns = load(dnsfile, "u") |> adapt(setup.backend)
+    plot_densities(; u_dns, setup, models, labels, plotdir, dolog = true)
 end
+
+let
+    k = m_conv.ps.sink.weight[1,1,1,:,1] |> Array |> kde
+    lines(k.x, k.density)
+end
+
+m_conv.ps.sink.bias
 
 apriori_errors = let
     models = (;
         nomo = m_nomo,
         smag = m_smag,
         clar = m_clar,
-        tbnn = m_tbnn,
-        equi = m_equi,
+        # tbnn = m_tbnn,
+        # equi = m_equi,
         conv = m_conv,
     )
     labels = (;
@@ -562,7 +587,8 @@ apriori_errors = let
         smag = "Smagorinsky",
         clar = "Clark",
     )
-    apriori_error(; u, setup, models, labels, plotdir)
+    u_dns = load(dnsfile, "u") |> adapt(setup.backend)
+    apriori_error(; u_dns, setup, models, labels, plotdir)
 end
 
 apriori_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs

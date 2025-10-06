@@ -501,7 +501,7 @@ function equivariant_net(setup, nchan)
                     Conv(kern, nreg * nchan[i] => nreg * nchan[i+1], gelu),
             1:(length(nchan)-1),
         )...,
-        sink = Conv(kern, nreg * nchan[end] => nten),
+        sink = Conv(kern, nreg * nchan[end] => nten; use_bias = false),
         symm = WrappedFunction() do σ
             if D == 2
                 xx = selectdim(σ, 3, 1:1)
@@ -565,7 +565,7 @@ function cnn(setup, nchan; same_as_equi)
                     Conv(kern, nreg * nchan[i] => nreg * nchan[i+1], gelu),
             1:(length(nchan)-1),
         )...,
-        sink = Conv(kern, nreg * nchan[end] => nt),
+        sink = Conv(kern, nreg * nchan[end] => nt; use_bias = false),
         symm = WrappedFunction(identity),
     )
     net |> display
