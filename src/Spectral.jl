@@ -168,7 +168,7 @@ function create_dns(setup; t_warmup, cfl, rng)
     u, times, energies
 end
 
-function create_data(u, setup; cfl, nstep, nsubstep, kpeak, Δ, rng)
+function create_data(u, setup; cfl, nstep, nsubstep, Δ)
     (; visc, D, n_dns, n_les, backend, ou_radius, ou_energy, ou_time) = setup
     g_dns = Grid{D}(; setup.l, n = n_dns, backend)
     g_les = Grid{D}(; setup.l, n = n_les, backend)
@@ -177,6 +177,7 @@ function create_data(u, setup; cfl, nstep, nsubstep, kpeak, Δ, rng)
     fu = vectorfield(g_les)
     σfu = tensorfield(g_les)
     fσu = tensorfield(g_les)
+    τ = tensorfield(g_les)
     inputs = fill(map(Array, fu), 0)
     outputs = fill(map(Array, fσu), 0)
 
@@ -276,7 +277,7 @@ function create_dataloader(setup, data; batchsize)
     ττ = spacetensorfield(g)
     plan = plan_rfft(GG.xx)
     snaps = map(zip(data...)) do (ucpu, τcpu)
-        map(copyto!, u, ucpu)
+        foreach(copyto!, u, ucpu)
         apply!(vectorgradient!, g, (G, u, g))
         for (GG, G) in zip(GG, G)
             apply!(twothirds!, g, (G, g))
@@ -542,7 +543,7 @@ function les!(du, u, grid, cache; model, visc)
     y = model(x)
     for (i, σ) in enumerate(σ)
         copyto!(vi_vj, selectdim(y, D + 1, i))
-        mul!(du.x, plan, vi_vj) # Use du as temp storage
+        mul!(du.x, plan, vi_vj) # Use du.x as temp storage
         @. σ += du.x / grid.n^D # With FFT factor
     end
     apply!(tensordivergence!, grid, (du, σ, grid))
@@ -958,7 +959,7 @@ function plot_densities(; u, setup, models, labels, plotdir)
     for (τ, τhat) in zip(τ, τhat)
         # apply!(twothirds!, g_les, (τhat, g_les))
         ldiv!(τ, plan, τhat)
-        τ .*= g_les.n^dim(g_les)
+        τ .*= g_les.n^D
     end
     G = getgradient(u_ref, g_les)
     if D == 2
@@ -1028,7 +1029,9 @@ function plot_densities(; u, setup, models, labels, plotdir)
 
     # XX-component
     ax_xx =
-        Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density", yscale = log10)
+        Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density",
+                   yscale = log10,
+                   )
     τxx = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), τxx)
     for (key, val) in pairs(τxx)
         lines!(ax_xx, val.x, val.density; label = labels[key])
@@ -1037,8 +1040,8 @@ function plot_densities(; u, setup, models, labels, plotdir)
         xlims!(ax_xx, -0.1, 0.3)
         ylims!(ax_xx, 2e-2, 3e2)
     elseif name == "turbulator"
-        xlims!(ax_xx, -1, 3)
-        ylims!(ax_xx, 2e-4, 3e1)
+        xlims!(ax_xx, -0.2, 0.5)
+        ylims!(ax_xx, 2e-3, 5e1)
     elseif name == "snellius"
         xlims!(ax_xx, -0.15, 0.35)
         ylims!(ax_xx, 2e-3, 3e2)

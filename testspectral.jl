@@ -20,14 +20,40 @@ using StaticArrays
 using Statistics
 using SymmetryCode
 using SymmetryCode.Spectral
-# using WGLMakie
-# lines([1, 2, 3])
+using WGLMakie
+lines([1, 2, 3])
 
 # setup = setup_laptop()
-# setup = setup_turbulator()
-setup = setup_snellius()
+setup = setup_turbulator()
+# setup = setup_snellius()
 # plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
-plotdir = joinpath(setup.outdir, "snelliusplots") |> mkpath
+plotdir = setup.outdir
+# plotdir = joinpath(setup.outdir, "snelliusplots") |> mkpath
+
+let
+    s = group_stuff(3)
+    # map(display, s.mats)
+    m = @SMatrix [
+        -1  0   0
+        0  1   0
+        0  0  -1
+    ]
+    findfirst(isequal(m), s.mats)
+end
+
+let
+    m = @SMatrix [
+        -1  0   0
+        0  -1   0
+        0  0  -1
+    ]
+    x = @SMatrix [
+        11 12 13
+        21 22 23
+        31 32 33
+    ]
+    m * x * m'
+end
 
 let
     l = 10.0
@@ -92,6 +118,7 @@ let
     end
     D = dim(g_dns)
     stat = turbulence_statistics(u, visc, g_dns)
+    @show stat.Re_tay
     s_dns = spectrum(u, g_dns)
     s_les = spectrum(ubar, g_les)
     fig = Figure(; size = (400, 340))
@@ -108,7 +135,7 @@ let
         escale = stat.diss^(-1 / 3) * stat.l_kol^(-3)
     elseif D == 3
         k = [3, g_dns.n / 8]
-        kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
+        kolmo = @. 6.5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
         # escale = 1
     end
@@ -141,18 +168,16 @@ let
 end
 
 data, datatiming = let
-    filename = joinpath(setup.outdir, "data.jld2")
-    if false
+    filename = joinpath(setup.outdir, "datatoto.jld2")
+    if true
         t = time()
         u = load(dnsfile, "u") |> adapt(setup.backend)
         d = create_data(
             u,
             setup;
             cfl = 0.35,
-            nstep = setup.D == 2 ? 1000 : 30,
+            nstep = setup.D == 2 ? 1000 : 5,
             nsubstep = 10,
-            setup.kpeak,
-            rng = Xoshiro(0),
             setup.Δ,
         )
         t = time() - t
@@ -162,6 +187,23 @@ data, datatiming = let
 end;
 
 data[2][end] |> typeof
+
+let
+    n = setup.n_les
+    x = zeros(n, n, n)
+    plan = plan_rfft(x)
+    y = data[2][2].xx
+    ldiv!(x, plan, copy(y))
+    x .*= n^setup.D
+    @show sum(>(0), x) / length(x)
+    val = kde(x |> vec |> Array) |> x -> (; x.x, x.density)
+    fig, ax, l = lines(val.x, val.density;
+                       axis = (yscale = log10,),
+                       )
+    ylims!(ax, 1e-3, 16e1)
+    xlims!(ax, -0.1, 0.2)
+    fig
+end
 
 Base.summarysize(data) * 1e-9
 
@@ -264,7 +306,7 @@ m_conv, train_conv = let
     end
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-conv.jld2")
-    if false
+    if true
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
@@ -297,8 +339,8 @@ let
         ylabel = "Loss",
     )
     # t = train_tbnn
-    # t = train_conv
-    t = train_equi
+    t = train_conv
+    # t = train_equi
     lines!(ax, t.losses_train; label = "Train")
     lines!(ax, t.losses_valid; label = "Valid")
     axislegend(ax; position = :rt)
@@ -308,11 +350,11 @@ end
 equi_errors_post = let
     grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     models = (;
-        nomo = m_nomo,
-        smag = m_smag,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        equi = m_equi,
+        # nomo = m_nomo,
+        # smag = m_smag,
+        # clar = m_clar,
+        # tbnn = m_tbnn,
+        # equi = m_equi,
         conv = m_conv,
     )
     ustart = data[1][end] |> adapt(setup.backend)
@@ -372,11 +414,11 @@ upostfiles = map(
 )
 let
     models = (;
-        nomo = m_nomo,
-        smag = m_smag,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        equi = m_equi,
+        # nomo = m_nomo,
+        # smag = m_smag,
+        # clar = m_clar,
+        # tbnn = m_tbnn,
+        # equi = m_equi,
         conv = m_conv,
     )
     u_dns = load(dnsfile, "u") |> adapt(setup.backend)
@@ -395,6 +437,7 @@ map(f -> load(f, "timing"), upostfiles) |> pairs
 # :conv => 5.49185
 
 u = map(f -> load(f, "u"), upostfiles);
+u = map(f -> load(f, "u"), upostfiles[(:dns, :ref, :conv,)]);
 
 get_errors(setup, u);
 
@@ -471,10 +514,10 @@ end
 
 let
     models = (;
-              smag = m_smag,
-              clar = m_clar,
-              tbnn = m_tbnn,
-              equi = m_equi,
+              # smag = m_smag,
+              # clar = m_clar,
+              # tbnn = m_tbnn,
+              # equi = m_equi,
               conv = m_conv,
              )
     labels = (;
