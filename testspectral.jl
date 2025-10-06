@@ -354,6 +354,29 @@ let
     fig
 end
 
+let
+    fig = Figure(; size = (400, 340))
+    ax = Axis(
+        fig[1, 1];
+        # xscale = log10,
+        # yscale = log10,
+        xlabel = "Iteration",
+        ylabel = "Loss",
+    )
+    lines!(ax, train_tbnn.losses_valid; label = "TBNN")
+    lines!(ax, train_equi.losses_valid; label = "G-Conv")
+    lines!(ax, train_conv.losses_valid; label = "Conv")
+    Legend(fig[0, 1], ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 3,
+    )
+    rowgap!(fig.layout, 5)
+    fig
+end
+
 equi_errors_post = let
     grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     models = (;
