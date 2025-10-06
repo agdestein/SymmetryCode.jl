@@ -1247,7 +1247,7 @@ function apriori_error(; u_dns, setup, models, labels, plotdir)
 end
 
 export apriori_equivariance_error
-function apriori_equivariance_error(; u, setup, models, plotdir, groupindex)
+function apriori_equivariance_error(; u, setup, models, plotdir)
     (; D, l, n_les, backend, visc) = setup
     (; elements, permutations, signs) = group_stuff(D)
     nelement = length(elements)

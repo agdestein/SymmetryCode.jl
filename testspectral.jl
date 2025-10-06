@@ -312,7 +312,7 @@ m_conv, train_conv = let
     end
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-conv.jld2")
-    if false
+    if true
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
@@ -345,8 +345,8 @@ let
         xlabel = "Iteration",
         ylabel = "Loss",
     )
-    # t = train_tbnn
-    t = train_conv
+    t = train_tbnn
+    # t = train_conv
     # t = train_equi
     lines!(ax, t.losses_train; label = "Train")
     lines!(ax, t.losses_valid; label = "Valid")
@@ -365,27 +365,27 @@ equi_errors_post = let
         conv = m_conv,
     )
     ustart = data[1][end] |> adapt(setup.backend)
-    groupindex = 6
-    (; mats, dets) = group_stuff(setup.D)
-    m = mats[groupindex]
-    d = dets[groupindex]
-    @info "Roto-reflection matrix $(m) (with determinant $(d))"
+    (; elements) = group_stuff(setup.D)
     map(keys(models)) do key
         model = models[key]
         @info "Computing equivariance error for $(key)"
-        e = test_equivariance_post(;
-            ustart,
-            setup,
-            grid,
-            model,
-            groupindex = 6,
-            rng = Xoshiro(123),
-            tstop = 1e-1,
-            cfl = 0.35,
-        )
+        e = map(eachindex(elements)) do i
+            test_equivariance_post(;
+                ustart,
+                setup,
+                grid,
+                model,
+                groupindex = i,
+                rng = Xoshiro(123),
+                tstop = 1e-2,
+                cfl = 0.35,
+            )
+        end
         key => e
     end |> NamedTuple
 end
+
+lines(equi_errors_post.conv) |> display
 
 let
     filename = joinpath(setup.outdir, "equi-errors-post.jld2")
@@ -411,26 +411,22 @@ upostfiles = map(
     (;
         dns = "dns",
         ref = "ref",
-        # nomo = "nomo",
-        # smag = "smag",
+        nomo = "nomo",
+        smag = "smag",
         clar = "clar",
-        clar2 = "clar2",
-        clar22 = "clar22",
-        # tbnn = "tbnn",
-        # equi = "equi",
-        # conv = "conv",
+        tbnn = "tbnn",
+        equi = "equi",
+        conv = "conv",
     ),
 )
 let
     models = (;
-        # nomo = m_nomo,
-        # smag = m_smag,
+        nomo = m_nomo,
+        smag = m_smag,
         clar = m_clar,
-        clar2 = x -> sqrt(2) * m_clar(x),
-        clar22 = x -> 2 * m_clar(x),
-        # tbnn = m_tbnn,
-        # equi = m_equi,
-        # conv = m_conv,
+        tbnn = m_tbnn,
+        equi = m_equi,
+        conv = m_conv,
     )
     u_dns = load(dnsfile, "u") |> adapt(setup.backend)
     inference_post(;
@@ -456,7 +452,6 @@ map(f -> load(f, "timing"), upostfiles) |> pairs
 # :conv => 5.49185
 
 u = map(f -> load(f, "u"), upostfiles);
-u = map(f -> load(f, "u"), upostfiles[(:dns, :ref, :conv)]);
 
 get_errors(setup, u);
 
@@ -532,29 +527,17 @@ end
 # :Re_kol => 15.7711
 
 let
-    # setup = (; Main.setup..., Δ = Main.setup.Δ * 2)
-    m = create_clark(setup.Δ, Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
-    a = sqrt(2)
-    # a = 1.0
-    # b = sqrt(2)
-    b = a
-    w = reshape([a, a, a, b, b, b], 1,1,1,:) |> CuArray
     models = (;
-        # smag = m_smag,
+        smag = m_smag,
         clar = m_clar,
-        # clar2 = x -> 1.8 * m_clar(x) .+ 0.01 * o,
-        # clar2 = x -> sqrt(2) * m(x),
-        # clar2 = x -> w .* m(x),
-        # tbnn = m_tbnn,
-        # equi = m_equi,
+        tbnn = m_tbnn,
+        equi = m_equi,
         conv = m_conv,
-        # conv = x -> sqrt(2) * m_conv(x),
     )
     labels = (;
         ref = "Reference",
         smag = "Smagorinsky",
         clar = "Clark",
-        clar2 = "Clark2",
         tbnn = "TBNN",
         equi = "G-Conv",
         conv = "Conv",
@@ -575,8 +558,8 @@ apriori_errors = let
         nomo = m_nomo,
         smag = m_smag,
         clar = m_clar,
-        # tbnn = m_tbnn,
-        # equi = m_equi,
+        tbnn = m_tbnn,
+        equi = m_equi,
         conv = m_conv,
     )
     labels = (;
@@ -602,7 +585,7 @@ apriori_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
 apriori_equi_errors = let
     models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
-    apriori_equivariance_error(; u, setup, models, labels, plotdir, groupindex = 6)
+    apriori_equivariance_error(; u, setup, models, plotdir)
 end
 
 let
@@ -712,7 +695,7 @@ let
 end
 
 let
-    comp = :x
+    comp = :z
     fig = plot_velocities(setup, u, comp)
     save("$(plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
     fig
