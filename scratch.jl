@@ -116,20 +116,18 @@ let
     nGu = m_tbnn(Gu)
     nGru = m_tbnn(Gru)
     M = SMatrix{2,2,T,4}
-    nGu =
-        M.(
-            selectdim(nGu, 3, 1),
-            selectdim(nGu, 3, 3),
-            selectdim(nGu, 3, 3),
-            selectdim(nGu, 3, 2),
-        )
-    nGru =
-        M.(
-            selectdim(nGru, 3, 1),
-            selectdim(nGru, 3, 3),
-            selectdim(nGru, 3, 3),
-            selectdim(nGru, 3, 2),
-        )
+    nGu = M.(
+        selectdim(nGu, 3, 1),
+        selectdim(nGu, 3, 3),
+        selectdim(nGu, 3, 3),
+        selectdim(nGu, 3, 2),
+    )
+    nGru = M.(
+        selectdim(nGru, 3, 1),
+        selectdim(nGru, 3, 3),
+        selectdim(nGru, 3, 3),
+        selectdim(nGru, 3, 2),
+    )
     rnGu = transform_tensor(nGu, (p, s))
     rnGu = smatrix_to_tensorfield(rnGu) |> stack
     nGru = smatrix_to_tensorfield(nGru) |> stack
@@ -246,7 +244,7 @@ let
         dims = 3,
     ) # Desymmetrize
     nx = nx
-    nx = ntuple(i -> view(nx, :, :, i), 4)
+    nx = ntuple(i -> view(nx,:,:,i), 4)
     nx = tensorfield_to_smatrix(nx)
     rnx = transform_tensor(nx, (p, s))
     rnx = smatrix_to_tensorfield(rnx) |> stack
@@ -274,7 +272,7 @@ let
     Gru = getgradient(ruhat, g)
     Gu = stack(Gu)
     Gru = stack(Gru)
-    GGu = ntuple(i -> view(Gu, :, :, i), 4)
+    GGu = ntuple(i -> view(Gu,:,:,i), 4)
     GGu = tensorfield_to_smatrix(GGu)
     rGGu = transform_tensor(GGu, (p, s))
     rGu = smatrix_to_tensorfield(rGGu) |> stack
@@ -310,7 +308,7 @@ let
     nG = hcat(nG[:, 1, :], nG[:, 3, :], nG[:, 3, :], nG[:, 2, :]) # Desymmetrize
     nrG = hcat(nrG[:, 1, :], nrG[:, 3, :], nrG[:, 3, :], nrG[:, 2, :]) # Desymmetrize
     nGG = reshape(nG, g.n, g.n, 4)
-    nGG = ntuple(i -> view(nGG, :, :, i), 4)
+    nGG = ntuple(i -> view(nGG,:,:,i), 4)
     nGG = tensorfield_to_smatrix(nGG)
     rnGG = transform_tensor(nGG, (p, s))
     rnG = smatrix_to_tensorfield(rnGG) |> stack
@@ -397,13 +395,7 @@ let
     g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
     ustart = randomfield(g_dns; rng = Xoshiro(123), kpeak = 5)
     models = (; tbnn = m_tbnn, conv = m_conv, equi = m_equi)
-    u, u_les = inference_post(;
-        ustart,
-        setup,
-        models,
-        setup.Δ,
-        tstop = 1e-1,
-    )
+    u, u_les = inference_post(; ustart, setup, models, setup.Δ, tstop = 1e-1)
 end
 
 u_dns, u_les = let
@@ -469,7 +461,7 @@ let
         y = m(G)
         if D == 2
             xx, yy, xy = 1, 2, 3
-            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
+            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
         elseif D == 3
             error()
         end
@@ -509,10 +501,12 @@ let
     ax_diss = Makie.Axis(fig[1, 3]; xlabel = "Dissipation", yscale = log10)
     diss = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), diss)
     for (key, val) in pairs(diss)
-        lines!(ax_diss,
-               # val.x,
-               val.x / setup.Δ,
-               val.density)
+        lines!(
+            ax_diss,
+            # val.x,
+            val.x / setup.Δ,
+            val.density,
+        )
     end
     ylims!(ax_diss, 1e-1, 7e1)
     xlims!(ax_diss, -20, 20)

@@ -580,7 +580,7 @@ function inference_post(; u_dns, setup, models, files, cfl, tstop, Δ)
     jldsave(files.dns; u = u_dns |> cpu_device(), timing = t)
     jldsave(files.ref; u = u_ref |> cpu_device(), timing = t)
     u_dns = nothing
-    u_ref = nothing 
+    u_ref = nothing
 
     # Solve LES for each model
     for key in keys(models)
@@ -844,7 +844,7 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
 
     # Destructure invariants and basis
     i = selectdim(x, D + 1, 1:ni)
-    b = selectdim(x, D + 1, ni+1:size(x, D + 1))
+    b = selectdim(x, D + 1, (ni+1):size(x, D+1))
 
     # Compute coefficients
     w = net(i, ps, st) |> first
@@ -978,17 +978,17 @@ function plot_densities(; u, setup, models, labels, plotdir)
         y = m(G)
         if D == 2
             xx, yy, xy = 1, 2, 3
-            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
+            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
         elseif D == 3
             xx, yy, zz = 1, 2, 3
             xy, yz, zx = 4, 5, 6
             (;
-                xx = view(y, :, :, :, xx),
-                yy = view(y, :, :, :, yy),
-                zz = view(y, :, :, :, zz),
-                xy = view(y, :, :, :, xy),
-                yz = view(y, :, :, :, yz),
-                zx = view(y, :, :, :, zx),
+                xx = view(y,:,:,:,xx),
+                yy = view(y,:,:,:,yy),
+                zz = view(y,:,:,:,zz),
+                xy = view(y,:,:,:,xy),
+                yz = view(y,:,:,:,yz),
+                zx = view(y,:,:,:,zx),
             )
         end
     end
@@ -1029,9 +1029,7 @@ function plot_densities(; u, setup, models, labels, plotdir)
 
     # XX-component
     ax_xx =
-        Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density",
-                   yscale = log10,
-                   )
+        Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density", yscale = log10)
     τxx = map(d -> kde(d |> vec |> Array) |> x -> (; x.x, x.density), τxx)
     for (key, val) in pairs(τxx)
         lines!(ax_xx, val.x, val.density; label = labels[key])
@@ -1119,10 +1117,10 @@ end
 
 export create_clark
 create_clark(Δ, g) = function clark(G)
-        τ = stack(spacetensorfield(g))
-        apply!(clark_kernel!, g, (τ, G, Δ, g); ndrange = space_ndrange(g))
-        τ
-    end
+    τ = stack(spacetensorfield(g))
+    apply!(clark_kernel!, g, (τ, G, Δ, g); ndrange = space_ndrange(g))
+    τ
+end
 
 @kernel function smagorinsky_kernel!(ττ, GG, CS, Δ, g::Grid{2})
     I = @index(Global, Cartesian)
@@ -1344,17 +1342,17 @@ function get_dissipation_errors(; setup, u_dns, models)
         y = m(G)
         if D == 2
             xx, yy, xy = 1, 2, 3
-            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
+            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
         elseif D == 3
             xx, yy, zz = 1, 2, 3
             xy, yz, zx = 4, 5, 6
             (;
-                xx = view(y, :, :, :, xx),
-                yy = view(y, :, :, :, yy),
-                zz = view(y, :, :, :, zz),
-                xy = view(y, :, :, :, xy),
-                yz = view(y, :, :, :, yz),
-                zx = view(y, :, :, :, zx),
+                xx = view(y,:,:,:,xx),
+                yy = view(y,:,:,:,yy),
+                zz = view(y,:,:,:,zz),
+                xy = view(y,:,:,:,xy),
+                yz = view(y,:,:,:,yz),
+                zx = view(y,:,:,:,zx),
             )
         end
     end

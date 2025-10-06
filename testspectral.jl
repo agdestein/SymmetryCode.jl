@@ -34,18 +34,18 @@ let
     s = group_stuff(3)
     # map(display, s.mats)
     m = @SMatrix [
-        -1  0   0
-        0  1   0
-        0  0  -1
+        -1 0 0
+        0 1 0
+        0 0 -1
     ]
     findfirst(isequal(m), s.mats)
 end
 
 let
     m = @SMatrix [
-        -1  0   0
-        0  -1   0
-        0  0  -1
+        -1 0 0
+        0 -1 0
+        0 0 -1
     ]
     x = @SMatrix [
         11 12 13
@@ -59,7 +59,7 @@ let
     l = 10.0
     Δ = l / 20
     n = 512
-    x = range(-l / 2, l / 2, n + 1)[1:end-1]
+    x = range(-l / 2, l / 2, n + 1)[1:(end-1)]
     y = @. sqrt(6 / pi / Δ^2) * exp(-6 * x^2 / Δ^2)
     yhat = rfft(y) * l / n
     kmax = div(n, 2)
@@ -149,7 +149,12 @@ let
     w = D == 2 ? 1 : 1.5
     text!(ax, a, b / w; color = oucolor, text = "Force")
     arr = D == 2 ? 100 : 5
-    arrows2d!(ax, Point2(c, b / arr), Point2(c, b * arr) - Point2(c, b / arr); color = oucolor)
+    arrows2d!(
+        ax,
+        Point2(c, b / arr),
+        Point2(c, b * arr) - Point2(c, b / arr);
+        color = oucolor,
+    )
     lines!(ax, kscale * s_dns.k, escale * s_dns.s; label = "DNS")
     lines!(ax, kscale * s_les.k, escale * s_les.s; label = "Filtered DNS")
     lines!(kscale * k, escale * kolmo; label = "Kolmogorov")
@@ -197,9 +202,7 @@ let
     x .*= n^setup.D
     @show sum(>(0), x) / length(x)
     val = kde(x |> vec |> Array) |> x -> (; x.x, x.density)
-    fig, ax, l = lines(val.x, val.density;
-                       axis = (yscale = log10,),
-                       )
+    fig, ax, l = lines(val.x, val.density; axis = (yscale = log10,))
     ylims!(ax, 1e-3, 16e1)
     xlims!(ax, -0.1, 0.2)
     fig
@@ -256,7 +259,8 @@ m_tbnn, train_tbnn = let
         ps = ps |> cpu_device()
         jldsave(file; ps, losses_train, losses_valid, timing = t)
     end
-    ps, losses_train, losses_valid, timing = load(file, "ps", "losses_train", "losses_valid", "timing")
+    ps, losses_train, losses_valid, timing =
+        load(file, "ps", "losses_train", "losses_valid", "timing")
     ps = ps |> adapt(setup.backend)
     chain = tbnn(net, ps, st, g)
     chain, (; losses_train, losses_valid, timing)
@@ -284,7 +288,8 @@ m_equi, train_equi = let
         ps = ps |> cpu_device()
         jldsave(file; ps, losses_train, losses_valid, timing = t)
     end
-    ps, losses_train, losses_valid, timing = load(file, "ps", "losses_train", "losses_valid", "timing")
+    ps, losses_train, losses_valid, timing =
+        load(file, "ps", "losses_train", "losses_valid", "timing")
     # ps = net_stuff.ps
     ps = ps |> adapt(setup.backend)
     ps |> cpu_device() |> ComponentArray |> length |> display
@@ -321,7 +326,8 @@ m_conv, train_conv = let
         jldsave(file; ps, losses_train, losses_valid, timing = t)
     end
     # ps = net_stuff.ps
-    ps, losses_train, losses_valid, timing = load(file, "ps", "losses_train", "losses_valid", "timing")
+    ps, losses_train, losses_valid, timing =
+        load(file, "ps", "losses_train", "losses_valid", "timing")
     ps = ps |> adapt(setup.backend)
     # ps |> cpu_device() |> ComponentArray |> length |> display; error()
     (; net, project) = net_stuff
@@ -381,8 +387,8 @@ equi_errors_post = let
 end
 
 let
-filename = joinpath(setup.outdir, "equi-errors-post.jld2")
-jldsave(filename; equi_errors_post)
+    filename = joinpath(setup.outdir, "equi-errors-post.jld2")
+    jldsave(filename; equi_errors_post)
 end
 
 equi_errors_post = let
@@ -401,7 +407,7 @@ equi_errors_post |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
 upostfiles = map(
     name -> joinpath(setup.outdir, "u-post-$(name).jld2"),
-    (; 
+    (;
         dns = "dns",
         ref = "ref",
         nomo = "nomo",
@@ -422,7 +428,15 @@ let
         conv = m_conv,
     )
     u_dns = load(dnsfile, "u") |> adapt(setup.backend)
-    inference_post(; u_dns, setup, models, files = upostfiles, cfl = 0.35, tstop = 1e-1, setup.Δ)
+    inference_post(;
+        u_dns,
+        setup,
+        models,
+        files = upostfiles,
+        cfl = 0.35,
+        tstop = 1e-1,
+        setup.Δ,
+    )
 end
 
 map(f -> load(f, "timing"), upostfiles) |> pairs
@@ -437,7 +451,7 @@ map(f -> load(f, "timing"), upostfiles) |> pairs
 # :conv => 5.49185
 
 u = map(f -> load(f, "u"), upostfiles);
-u = map(f -> load(f, "u"), upostfiles[(:dns, :ref, :conv,)]);
+u = map(f -> load(f, "u"), upostfiles[(:dns, :ref, :conv)]);
 
 get_errors(setup, u);
 
@@ -514,12 +528,12 @@ end
 
 let
     models = (;
-              # smag = m_smag,
-              # clar = m_clar,
-              # tbnn = m_tbnn,
-              # equi = m_equi,
-              conv = m_conv,
-             )
+        # smag = m_smag,
+        # clar = m_clar,
+        # tbnn = m_tbnn,
+        # equi = m_equi,
+        conv = m_conv,
+    )
     labels = (;
         ref = "Reference",
         smag = "Smagorinsky",
@@ -569,7 +583,7 @@ let
     (; dets) = group_stuff(setup.D)
     fig = Figure(; size = (500, 400))
     ax = Axis(
-        fig[1, 1],
+        fig[1, 1];
         yscale = log10,
         xlabel = "Group element",
         ylabel = "Error",
@@ -591,19 +605,23 @@ let
         equi = "G-Conv",
         conv = "Conv",
     )
-    markers = (;
-        smag = :circle,
-        clar = :rect,
-        tbnn = :diamond,
-        equi = :rtriangle,
-        conv = :x,
-    )
+    markers =
+        (; smag = :circle, clar = :rect, tbnn = :diamond, equi = :rtriangle, conv = :x)
     for key in keys(apriori_equi_errors)
         e = apriori_equi_errors[key]
         e = max.(e, 1e-30) # Encode true zeros as 1e-30
-        scatterlines!(ax, i, e; label = labels[key], marker = markers[key], color = colors[key])
+        scatterlines!(
+            ax,
+            i,
+            e;
+            label = labels[key],
+            marker = markers[key],
+            color = colors[key],
+        )
     end
-    Legend(fig[0, 1], ax;
+    Legend(
+        fig[0, 1],
+        ax;
         tellwidth = false,
         tellheight = true,
         framevisible = false,
@@ -670,10 +688,6 @@ end
 let
     comp = :x
     fig = plot_velocities(setup, u, comp)
-    save(
-        "$(plotdir)/velocities-$(comp).png",
-        fig;
-        backend = CairoMakie,
-    )
+    save("$(plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
     fig
 end
