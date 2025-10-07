@@ -358,6 +358,15 @@ let
     fig
 end
 
+map(
+    t -> round(t; digits = 1),
+    (;
+        tbnn = train_tbnn.timing,
+        conv = train_conv.timing,
+        equi = train_equi.timing,
+    ),
+) |> pairs
+
 equi_errors_post = let
     grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     models = (;
@@ -423,6 +432,7 @@ upostfiles = map(
         conv = "conv",
     ),
 )
+
 let
     models = (;
         nomo = m_nomo,
@@ -444,7 +454,7 @@ let
     )
 end
 
-map(f -> load(f, "timing"), upostfiles) |> pairs
+map(f -> load(f, "timing"), upostfiles) |> t -> map(x -> round(x; digits = 1), t) |> pairs
 
 # :dns  => 1025.77
 # :ref  => 1025.77
@@ -488,7 +498,7 @@ let
     stat |> pairs |> display
     s = spectrum(u_dns |> adapt(backend), g_dns)
     s_les = map(u -> spectrum(u |> adapt(backend), g_les), u_les)
-    fig = Figure(; size = (500, 300))
+    fig = Figure(; size = (400, 360))
     ax = Axis(
         fig[1, 1];
         xscale = log10,
@@ -506,13 +516,22 @@ let
     end
     kscale = stat.l_kol
     # kscale = 1
-    lines!(ax, kscale * s.k, escale * s.s; label = "DNS")
+    # lines!(ax, kscale * s.k, escale * s.s; label = "DNS")
     # lines!(kscale * k, escale * kolmo)
     for (key, val) in pairs(s_les)
         lines!(ax, kscale * val.k, escale * val.s; label = labels[key])
     end
     # axislegend(ax; position = :lb)
-    Legend(fig[1, 2], ax)
+    Legend(
+        fig[0, :],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        orientation = :horizontal,
+        nbanks = 3,
+    )
+    rowgap!(fig.layout, 5)
     # ylims!(1e-7, 1)
     save("$(plotdir)/spectrum-les.pdf", fig; backend = CairoMakie)
     fig
@@ -550,13 +569,6 @@ let
     plot_densities(; u_dns, setup, models, labels, plotdir, dolog = true)
 end
 
-let
-    k = m_conv.ps.sink.weight[1,1,1,:,1] |> Array |> kde
-    lines(k.x, k.density)
-end
-
-m_conv.ps.sink.bias
-
 apriori_errors = let
     models = (;
         nomo = m_nomo,
@@ -593,57 +605,64 @@ apriori_equi_errors = let
 end
 
 let
-    (; dets) = group_stuff(setup.D)
-    fig = Figure(; size = (500, 400))
-    ax = Axis(
-        fig[1, 1];
-        yscale = log10,
-        xlabel = "Group element",
-        ylabel = "Error",
-        xticks = [1, 8, 16, 24, 32, 40, 48],
-    )
-    ylims!(ax, 1e-17, 1)
-    i = 1:48
-    colors = (;
-        smag = Cycled(2),
-        clar = Cycled(3),
-        tbnn = Cycled(4),
-        equi = Cycled(5),
-        conv = Cycled(6),
-    )
-    labels = (;
-        smag = "Smagorinsky",
-        clar = "Clark",
-        tbnn = "TBNN",
-        equi = "G-Conv",
-        conv = "Conv",
-    )
-    markers =
-        (; smag = :circle, clar = :rect, tbnn = :diamond, equi = :rtriangle, conv = :x)
-    for key in keys(apriori_equi_errors)
-        e = apriori_equi_errors[key]
-        e = max.(e, 1e-30) # Encode true zeros as 1e-30
-        scatterlines!(
-            ax,
-            i,
-            e;
-            label = labels[key],
-            marker = markers[key],
-            color = colors[key],
+    for (errs, name) in [
+        (apriori_equi_errors, "equi-errors-prior.pdf"),
+        (equi_errors_post, "equi-errors-post.pdf"),
+    ]
+        (; dets) = group_stuff(setup.D)
+        fig = Figure(; size = (500, 400))
+        ax = Axis(
+            fig[1, 1];
+            yscale = log10,
+            xlabel = "Group element",
+            ylabel = "Error",
+            xticks = [1, 8, 16, 24, 32, 40, 48],
         )
+        ylims!(ax, 1e-17, 1)
+        i = 1:48
+        colors = (;
+            nomo = Cycled(1),
+            smag = Cycled(2),
+            clar = Cycled(3),
+            tbnn = Cycled(4),
+            equi = Cycled(5),
+            conv = Cycled(6),
+        )
+        labels = (;
+            nomo = "No-model",
+            smag = "Smagorinsky",
+            clar = "Clark",
+            tbnn = "TBNN",
+            equi = "G-Conv",
+            conv = "Conv",
+        )
+        markers =
+            (; nomo = :utriangle, smag = :circle, clar = :rect, tbnn = :diamond, equi = :rtriangle, conv = :x)
+        for key in keys(errs)
+            e = errs[key]
+            e = max.(e, 1e-30) # Encode true zeros as 1e-30
+            scatterlines!(
+                ax,
+                i,
+                e;
+                label = labels[key],
+                marker = markers[key],
+                color = colors[key],
+            )
+        end
+        Legend(
+            fig[0, 1],
+            ax;
+            tellwidth = false,
+            tellheight = true,
+            framevisible = false,
+            horizontal = true,
+            nbanks = 5,
+        )
+        rowgap!(fig.layout, 5)
+        save("$(plotdir)/$(name)", fig; backend = CairoMakie)
+        display(fig)
     end
-    Legend(
-        fig[0, 1],
-        ax;
-        tellwidth = false,
-        tellheight = true,
-        framevisible = false,
-        horizontal = true,
-        nbanks = 5,
-    )
-    rowgap!(fig.layout, 5)
-    save("$(plotdir)/apriori-equi-errors.pdf", fig; backend = CairoMakie)
-    fig
 end
 
 let
@@ -699,6 +718,7 @@ let
 end
 
 let
+    # comp = :x
     comp = :z
     fig = plot_velocities(setup, u, comp)
     save("$(plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)

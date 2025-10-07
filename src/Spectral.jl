@@ -1077,8 +1077,8 @@ function plot_densities(; u_dns, setup, models, labels, plotdir, dolog)
         xlims!(ax_xx, -0.2, 0.2)
         ylims!(ax_xx, 2e-3, 2e1)
     elseif name == "snellius"
-        xlims!(ax_xx, -0.15, 0.35)
-        ylims!(ax_xx, 2e-3, 3e2)
+        xlims!(ax_xx, -0.2, 0.3)
+        ylims!(ax_xx, 1e-3, 2e2)
     end
     # dx ux + dy ux
 
@@ -1095,8 +1095,8 @@ function plot_densities(; u_dns, setup, models, labels, plotdir, dolog)
         xlims!(ax_xy, -0.2, 0.2)
         ylims!(ax_xy, 4e-3, 2.5e1)
     elseif name == "snellius"
-        xlims!(ax_xy, -0.15, 0.15)
-        ylims!(ax_xy, 4e-3, 3e2)
+        xlims!(ax_xy, -0.17, 0.2)
+        ylims!(ax_xy, 1e-3, 2e2)
     end
 
     # Dissipation
@@ -1112,11 +1112,20 @@ function plot_densities(; u_dns, setup, models, labels, plotdir, dolog)
         xlims!(ax_diss, -6, 2)
         ylims!(ax_diss, 1e-3, 3e0)
     elseif name == "snellius"
-        xlims!(ax_diss, -10, 5)
-        ylims!(ax_diss, 2e-4, 1e1)
+        xlims!(ax_diss, -5.6, 1.3)
+        ylims!(ax_diss, 1e-3, 7e0)
     end
 
-    Legend(fig[0, :], ax_xx; orientation = :horizontal)
+    Legend(
+        fig[0, :],
+        ax_xx;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        orientation = :horizontal,
+        # nbanks = 5,
+    )
+    # rowgap!(fig.layout, 5)
 
     # Save plot
     file = "$(plotdir)/tensor-distributions.pdf"
