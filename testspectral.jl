@@ -26,9 +26,7 @@ using SymmetryCode.Spectral
 # setup = setup_laptop()
 # setup = setup_turbulator()
 setup = setup_snellius()
-# plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
-# plotdir = setup.outdir
-plotdir = joinpath(setup.outdir, "snelliusplots") |> mkpath
+(; plotdir) = setup
 
 let
     s = group_stuff(3)
@@ -175,7 +173,7 @@ end
 
 data, datatiming = let
     filename = joinpath(setup.outdir, "data.jld2")
-    if true
+    if false
         t = time()
         u = load(dnsfile, "u") |> adapt(setup.backend)
         d = create_data(
@@ -241,7 +239,7 @@ m_tbnn, train_tbnn = let
         l.weight .*= 0.1
     end
     file = joinpath(setup.outdir, "ps-tbnn.jld2")
-    if true
+    if false
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss_tbnn(g),
@@ -275,7 +273,7 @@ m_equi, train_equi = let
     )
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-equi.jld2")
-    if true
+    if false
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
@@ -312,7 +310,7 @@ m_conv, train_conv = let
     end
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-conv.jld2")
-    if true
+    if false
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
@@ -335,24 +333,6 @@ m_conv, train_conv = let
     chain = fullchain(setup, net, project, ps, st)
     chain, (; losses_train, losses_valid, timing)
 end;
-
-let
-    fig = Figure()
-    ax = Axis(
-        fig[1, 1];
-        # xscale = log10,
-        # yscale = log10,
-        xlabel = "Iteration",
-        ylabel = "Loss",
-    )
-    t = train_tbnn
-    # t = train_conv
-    # t = train_equi
-    lines!(ax, t.losses_train; label = "Train")
-    lines!(ax, t.losses_valid; label = "Valid")
-    axislegend(ax; position = :rt)
-    fig
-end
 
 let
     fig = Figure(; size = (400, 340))

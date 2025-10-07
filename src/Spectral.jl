@@ -1464,9 +1464,13 @@ function setup_turbulator()
     l = 1.0
     n_les = 64
     Δ = 4 * l / n_les
+    outdir = joinpath(@__DIR__, "..", "output", "turbulator") |> mkpath
+    # plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
+    plotdir = joinpath(outdir, "plots")
     (;
         name = "turbulator",
-        outdir = joinpath(@__DIR__, "..", "output", "turbulator") |> mkpath,
+        outdir,
+        plotdir,
         visc = 1e-4,
         D = 3,
         l = 1.0,
@@ -1489,6 +1493,7 @@ function setup_snellius()
     (;
         name = "snellius",
         outdir = mkpath("/projects/prjs1757/SymmetryOutput"),
+        plotdir = joinpath(@__DIR__, "..", "output", "snellius") |> mkpath,
         visc = 4e-5,
         D = 3,
         l = 1.0,
