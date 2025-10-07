@@ -1485,7 +1485,7 @@ export setup_snellius
 function setup_snellius()
     l = 1.0
     n_les = 128
-    Δ = 2 * l / n_les
+    Δ = 4 * l / n_les
     (;
         name = "snellius",
         outdir = mkpath("/projects/prjs1757/SymmetryOutput"),

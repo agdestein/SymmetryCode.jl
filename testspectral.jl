@@ -20,15 +20,15 @@ using StaticArrays
 using Statistics
 using SymmetryCode
 using SymmetryCode.Spectral
-using WGLMakie
-lines([1, 2, 3])
+# using WGLMakie
+# lines([1, 2, 3])
 
 # setup = setup_laptop()
-setup = setup_turbulator()
-# setup = setup_snellius()
+# setup = setup_turbulator()
+setup = setup_snellius()
 # plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
-plotdir = setup.outdir
-# plotdir = joinpath(setup.outdir, "snelliusplots") |> mkpath
+# plotdir = setup.outdir
+plotdir = joinpath(setup.outdir, "snelliusplots") |> mkpath
 
 let
     s = group_stuff(3)
@@ -182,7 +182,7 @@ data, datatiming = let
             u,
             setup;
             cfl = 0.35,
-            nstep = setup.D == 2 ? 1000 : 50,
+            nstep = setup.D == 2 ? 1000 : 30,
             nsubstep = 10,
             setup.Δ,
         )
@@ -234,7 +234,7 @@ m_tbnn, train_tbnn = let
         Conv(kern, 64 => 64, gelu),
         Conv(kern, 64 => 128, gelu),
         Conv(kern, 128 => Spectral.nbasis(g); use_bias = false),
-    ) # 13_056 parameters
+    ) # 13_888 parameters
     net |> display
     ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
     for l in ps
@@ -252,7 +252,7 @@ m_tbnn, train_tbnn = let
                 batchsize = 10,
                 rng = Xoshiro(0),
             ),
-            nepoch = 10,
+            nepoch = 5,
             learning_rate = 1e-3,
             net_stuff = (; net, ps, st),
         )
@@ -374,17 +374,18 @@ let
         nbanks = 3,
     )
     rowgap!(fig.layout, 5)
+    save("$(plotdir)/training.pdf", fig; backend = CairoMakie)
     fig
 end
 
 equi_errors_post = let
     grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     models = (;
-        # nomo = m_nomo,
-        # smag = m_smag,
-        # clar = m_clar,
-        # tbnn = m_tbnn,
-        # equi = m_equi,
+        nomo = m_nomo,
+        smag = m_smag,
+        clar = m_clar,
+        tbnn = m_tbnn,
+        equi = m_equi,
         conv = m_conv,
     )
     ustart = data[1][end] |> adapt(setup.backend)
@@ -400,7 +401,7 @@ equi_errors_post = let
                 model,
                 groupindex = i,
                 rng = Xoshiro(123),
-                tstop = 1e-2,
+                tstop = 1e-1,
                 cfl = 0.35,
             )
         end
@@ -420,14 +421,14 @@ equi_errors_post = let
     load(filename, "equi_errors_post")
 end
 
-equi_errors_post |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
+equi_errors_post |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
 
-# :nomo => 1.418e-15
-# :smag => 9.936e-16
-# :clar => 1.451e-15
-# :tbnn => 1.132e-15
-# :equi => 1.162e-15
-# :conv => 0.01899
+# :nomo => 1.469e-15
+# :smag => 1.043e-15
+# :clar => 7.060e-15
+# :tbnn => 2.059e-15
+# :equi => 2.584e-15
+# :conv => 0.05097
 
 upostfiles = map(
     name -> joinpath(setup.outdir, "u-post-$(name).jld2"),
