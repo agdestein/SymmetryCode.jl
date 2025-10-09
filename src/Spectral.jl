@@ -1536,7 +1536,7 @@ function compute_qr(velocities, setup)
     (; D, l, n_dns, n_les, backend, visc) = setup
     g = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
-    Ghat = tensorfield_nonsym(g)
+    Ghat = scalarfield(g)
     G = spacetensorfield_nonsym(g)
     q = spacescalarfield(g)
     r = spacescalarfield(g)
@@ -1544,16 +1544,8 @@ function compute_qr(velocities, setup)
     ubar = vectorfield(g_les)
     plan = plan_rfft(G.xx)
 
-    # # Compute Kolmogorov time scale
-    # foreach(copyto!, u, velocities.dns)
-    # apply!(vectorgradient!, g, (Ghat, u, g))
-    # for (G, Ghat) in zip(G, Ghat)
-    #     ldiv!(G, plan, Ghat) # Inverse RFFT
-    #     G .*= g.n^D # FFT factor
-    # end
-    # t_kol = 1 / sum(G -> sum(abs2, G) * (g.l / g.n)^3, G) |> sqrt
-
     dens = map(keys(velocities)) do k
+        @info "Computing Q-R for $(k)"
         if k == :dns
             foreach(copyto!, u, velocities[k])
         else
@@ -1563,10 +1555,13 @@ function compute_qr(velocities, setup)
                 apply!(inverse_cutoff!, g_les, (u[i], ubar[i]))
             end
         end
-        apply!(vectorgradient!, g, (Ghat, u, g))
-        for (G, Ghat) in zip(G, Ghat)
-            ldiv!(G, plan, Ghat) # Inverse RFFT
-            G .*= g.n^D # FFT factor
+        for j = 1:D, i = 1:D
+            s = [:x, :y, :z]
+            ij = Symbol(s[i], s[j])
+            apply!(derivative!, g, (Ghat, u[i], j, g))
+            apply!(twothirds!, g, (Ghat, g))
+            ldiv!(G[ij], plan, Ghat) # Inverse RFFT
+            G[ij] .*= g.n^D # FFT factor
         end
         t_kol = 1 / sum(G -> sum(abs2, G) * (g.l / g.n)^3, G) |> sqrt
         apply!(qr_kernel!, g, (q, r, G, g); ndrange = space_ndrange(g))
@@ -1574,14 +1569,14 @@ function compute_qr(velocities, setup)
         rvec = r |> cpu_device() |> vec
         qvec .*= t_kol^2
         rvec .*= t_kol^3
-        k => kde((rvec, qvec))
+        k => kde((rvec, qvec); npoints = (1000, 1000))
     end
     NamedTuple(dens)
 end
 
 export plot_qr
 function plot_qr(setup, qr)
-    (; D, l, n_dns, n_les, backend) = setup
+    (; D, l, n_dns, n_les, backend, name) = setup
     fig = Figure(; size = (800, 440))
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
@@ -1624,8 +1619,8 @@ function plot_qr(setup, qr)
             ylabel = "Q",
             title,
         )
-        ncat = 6
-        ran = 1e-4, 1e1
+        ncat = 7
+        ran = 1e-5, 1e1
         isref = key == :dns || key == :ref
         isref || contour!(
             ax,
@@ -1654,19 +1649,13 @@ function plot_qr(setup, qr)
         rtest2 = @. -2 / 3 / sqrt(3) * (-qtest)^(3 / 2)
         lines!(ax, rtest1, qtest; color = colors.line)
         lines!(ax, rtest2, qtest; color = colors.line)
-        # if key == :dns
-        xlims!(ax, -2.5, 2.5)
-        ylims!(ax, -4, 4)
-        # else
-        #     xlims!(ax, -0.1, 0.1)
-        #     ylims!(ax, -0.3, 0.4)
-        # end
-        # key == :dns && Colorbar(fig[1:2, 5], c) #; scale = log10)
-        # key == :dns && Colorbar(fig[1:2, 5];
-        #                         scale = log10,
-        #                         colorrange = ran,
-        #                         colormap = cgrad(:viridis, ncat, categorical = true))
-
+        if name == "turbulator"
+            xlims!(ax, -2.5, 2.5)
+            ylims!(ax, -4, 4)
+        elseif name == "snellius"
+            xlims!(ax, -3.5, 3.5)
+            ylims!(ax, -4, 6)
+        end
     end
     fig
 end

@@ -676,10 +676,17 @@ let
     stat = turbulence_statistics(u |> adapt(backend), visc, g_dns)
 end |> pairs
 
-qr = compute_qr(u, setup)
+qr_file = joinpath(setup.outdir, "qr.jld2")
 
 let
-    fig = plot_qr(setup, qr)
+    qr = compute_qr(u, setup)
+    save_object(qr_file, qr)
+end
+
+qr = load_object(qr_file)
+
+let
+    fig = plot_qr(setup, (; qr..., dns = qrdns.dns))
     save("$(plotdir)/qr.pdf", fig; backend = CairoMakie)
     fig
 end
