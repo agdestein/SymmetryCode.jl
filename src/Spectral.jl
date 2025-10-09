@@ -870,7 +870,7 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
 
     # Destructure invariants and basis
     i = selectdim(x, D + 1, 1:ni)
-    b = selectdim(x, D + 1, (ni+1):size(x, D+1))
+    b = selectdim(x, D + 1, (ni+1):size(x, D + 1))
 
     # Compute coefficients
     w = net(i, ps, st) |> first
@@ -908,7 +908,7 @@ function getdissipation(g, u, m)
 end
 
 export test_equivariance_post
-function test_equivariance_post(; ustart, setup, grid, model, groupindex, rng, tstop, cfl)
+function test_equivariance_post(; ustart, setup, grid, model, groupindex, rng, tstop, cfl, dolog)
     T, D = typeof(setup.l), setup.D
 
     # Group element
@@ -942,7 +942,7 @@ function test_equivariance_post(; ustart, setup, grid, model, groupindex, rng, t
         t += Δt
         wray3!(les!, u, Δt, grid, cache; model, visc)
         wray3!(les!, ru, Δt, grid, cache; model, visc)
-        if i % 1 == 0
+        dolog && if i % 1 == 0
             e = energy(u)
             @info join(
                 [
@@ -1007,17 +1007,17 @@ function plot_densities(; u_dns, setup, models, labels, plotdir, dolog)
         y = m(G)
         if D == 2
             xx, yy, xy = 1, 2, 3
-            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
+            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
         elseif D == 3
             xx, yy, zz = 1, 2, 3
             xy, yz, zx = 4, 5, 6
             (;
-                xx = view(y,:,:,:,xx),
-                yy = view(y,:,:,:,yy),
-                zz = view(y,:,:,:,zz),
-                xy = view(y,:,:,:,xy),
-                yz = view(y,:,:,:,yz),
-                zx = view(y,:,:,:,zx),
+                xx = view(y, :, :, :, xx),
+                yy = view(y, :, :, :, yy),
+                zz = view(y, :, :, :, zz),
+                xy = view(y, :, :, :, xy),
+                yz = view(y, :, :, :, yz),
+                zx = view(y, :, :, :, zx),
             )
         end
     end
@@ -1059,12 +1059,7 @@ function plot_densities(; u_dns, setup, models, labels, plotdir, dolog)
     fig = Figure(; size = (800, 300))
 
     # XX-component
-    ax_xx = Makie.Axis(
-        fig[1, 1];
-        xlabel = "xx-component",
-        ylabel = "Density",
-        yscale,
-    )
+    ax_xx = Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density", yscale)
     for (key, val) in pairs(τxx)
         # val = key == :ref ? val : 1.4 * val .- 0.02
         k = val |> vec |> Array |> kde
@@ -1307,25 +1302,12 @@ function plot_velocities(setup, u, comp)
     (; D, l, n_dns, n_les, backend) = setup
     fig = Figure(; size = (800, 440))
     g_dns = Grid{D}(; l, n = n_dns, backend)
-    ui = spacescalarfield(g_dns)
-    plan = plan_rfft(ui)
-    ldiv!(ui, plan, adapt(backend, u.dns[comp])) # Make copy, ldiv! overwrites...
-    ui .*= g_dns.n^3 # FFT factor
-    data = ui[:, :, end] |> Array
-    ax = Axis(
-        fig[1, 1];
-        xlabelvisible = false,
-        xticksvisible = false,
-        xticklabelsvisible = false,
-        ylabelvisible = false,
-        yticksvisible = false,
-        yticklabelsvisible = false,
-        aspect = DataAspect(),
-        title = "DNS",
-    )
-    colormap = :seaborn_icefire_gradient
-    image!(ax, data; colormap, interpolate = false)
+    g_les = Grid{D}(; l, n = n_les, backend)
+    ui = scalarfield(g_dns)
+    ui_space = spacescalarfield(g_dns)
+    plan = plan_rfft(ui_space)
     labels = (;
+        dns = "DNS",
         ref = "Filtered DNS",
         nomo = "No-model",
         tbnn = "TBNN",
@@ -1334,10 +1316,7 @@ function plot_velocities(setup, u, comp)
         smag = "Smagorinsky",
         clar = "Clark",
     )
-    keys_les = filter(!=(:dns), keys(u))
-    for (k, key) in enumerate(keys_les)
-        k += 1 # First for DNS
-        umodel = u[key]
+    for (k, key) in u |> keys |> enumerate
         title = labels[key]
         j, i = CartesianIndices((4, 2))[k].I
         ax = Axis(
@@ -1351,15 +1330,21 @@ function plot_velocities(setup, u, comp)
             aspect = DataAspect(),
             title,
         )
-        g = Grid{D}(; l, n = n_les, backend)
-        ui = spacescalarfield(g)
-        plan = plan_rfft(ui)
-        ldiv!(ui, plan, adapt(backend, umodel[comp])) # Make copy, ldiv! overwrites...
-        ui .*= g.n^3 # FFT factor
+        if key == :dns
+            copyto!(ui, u[key][comp])
+        else
+            ubar_i = u[key][comp] |> adapt(backend)
+            fill!(ui, 0)
+            apply!(inverse_cutoff!, g_les, (ui, ubar_i))
+        end
+        ldiv!(ui_space, plan, ui) # Make copy, ldiv! overwrites...
+        ui_space .*= g_dns.n^3 # FFT factor
+        data = ui_space[:, :, end] |> Array
         range = (:, :)
         # range = (40:60, 40:60)
-        data = ui[range..., end] |> Array
-        image!(ax, data; colormap, interpolate = false)
+        data = ui_space[range..., end] |> Array
+        # @show typeof(data); error()
+        image!(ax, data; colormap = :seaborn_icefire_gradient, interpolate = false)
     end
     fig
 end
@@ -1399,17 +1384,17 @@ function get_dissipation_errors(; setup, u_dns, models)
         y = m(G)
         if D == 2
             xx, yy, xy = 1, 2, 3
-            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
+            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
         elseif D == 3
             xx, yy, zz = 1, 2, 3
             xy, yz, zx = 4, 5, 6
             (;
-                xx = view(y,:,:,:,xx),
-                yy = view(y,:,:,:,yy),
-                zz = view(y,:,:,:,zz),
-                xy = view(y,:,:,:,xy),
-                yz = view(y,:,:,:,yz),
-                zx = view(y,:,:,:,zx),
+                xx = view(y, :, :, :, xx),
+                yy = view(y, :, :, :, yy),
+                zz = view(y, :, :, :, zz),
+                xy = view(y, :, :, :, xy),
+                yz = view(y, :, :, :, yz),
+                zx = view(y, :, :, :, zx),
             )
         end
     end
@@ -1475,7 +1460,7 @@ function setup_turbulator()
     Δ = 4 * l / n_les
     outdir = joinpath(@__DIR__, "..", "output", "turbulator") |> mkpath
     # plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
-    plotdir = joinpath(outdir, "plots")
+    plotdir = joinpath(outdir, "plots") |> mkpath
     (;
         name = "turbulator",
         outdir,
@@ -1515,6 +1500,228 @@ function setup_snellius()
         ou_energy = 0.01,
         backend = CUDABackend(),
     )
+end
+
+export qr_kernel!
+@kernel function qr_kernel!(q, r, GG, g::Grid{3})
+    T = eltype(q)
+    I = @index(Global, Cartesian)
+    G = SMatrix{3,3,T,9}(
+        GG.xx[I],
+        GG.yx[I],
+        GG.zx[I],
+        GG.xy[I],
+        GG.yy[I],
+        GG.zy[I],
+        GG.xz[I],
+        GG.yz[I],
+        GG.zz[I],
+    )
+    q[I] = -tr(G * G) / 2
+    r[I] = -tr(G * G * G) / 3
+end
+
+export compute_qr
+function compute_qr(velocities, setup)
+    (; D, l, n_dns, n_les, backend, visc) = setup
+    g = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
+    Ghat = tensorfield_nonsym(g)
+    G = spacetensorfield_nonsym(g)
+    q = spacescalarfield(g)
+    r = spacescalarfield(g)
+    u = vectorfield(g)
+    ubar = vectorfield(g_les)
+    plan = plan_rfft(G.xx)
+
+    # # Compute Kolmogorov time scale
+    # foreach(copyto!, u, velocities.dns)
+    # apply!(vectorgradient!, g, (Ghat, u, g))
+    # for (G, Ghat) in zip(G, Ghat)
+    #     ldiv!(G, plan, Ghat) # Inverse RFFT
+    #     G .*= g.n^D # FFT factor
+    # end
+    # t_kol = 1 / sum(G -> sum(abs2, G) * (g.l / g.n)^3, G) |> sqrt
+
+    dens = map(keys(velocities)) do k
+        if k == :dns
+            foreach(copyto!, u, velocities[k])
+        else
+            for i = 1:D
+                copyto!(ubar[i], velocities[k][i])
+                fill!(u[i], 0)
+                apply!(inverse_cutoff!, g_les, (u[i], ubar[i]))
+            end
+        end
+        apply!(vectorgradient!, g, (Ghat, u, g))
+        for (G, Ghat) in zip(G, Ghat)
+            ldiv!(G, plan, Ghat) # Inverse RFFT
+            G .*= g.n^D # FFT factor
+        end
+        t_kol = 1 / sum(G -> sum(abs2, G) * (g.l / g.n)^3, G) |> sqrt
+        apply!(qr_kernel!, g, (q, r, G, g); ndrange = space_ndrange(g))
+        qvec = q |> cpu_device() |> vec
+        rvec = r |> cpu_device() |> vec
+        qvec .*= t_kol^2
+        rvec .*= t_kol^3
+        k => kde((rvec, qvec))
+    end
+    NamedTuple(dens)
+end
+
+export plot_qr
+function plot_qr(setup, qr)
+    (; D, l, n_dns, n_les, backend) = setup
+    fig = Figure(; size = (800, 440))
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
+    labels = (;
+        dns = "DNS",
+        ref = "Filtered DNS",
+        nomo = "No-model",
+        tbnn = "TBNN",
+        conv = "Conv",
+        equi = "G-Conv",
+        smag = "Smagorinsky",
+        clar = "Clark",
+    )
+    colorvec = Makie.wong_colors()
+    lescolor = 2
+    colors = (;
+        # line = colorvec[4],
+        line = :red,
+        dns = colorvec[3],
+        ref = colorvec[1],
+        nomo = colorvec[lescolor],
+        tbnn = colorvec[lescolor],
+        conv = colorvec[lescolor],
+        equi = colorvec[lescolor],
+        smag = colorvec[lescolor],
+        clar = colorvec[lescolor],
+    )
+    for (k, key) in qr |> keys |> enumerate
+        title = labels[key]
+        j, i = CartesianIndices((4, 2))[k].I
+        ax = Axis(
+            fig[i, j];
+            xlabelvisible = i == 2,
+            xticksvisible = i == 2,
+            xticklabelsvisible = i == 2,
+            ylabelvisible = j == 1,
+            yticksvisible = j == 1,
+            yticklabelsvisible = j == 1,
+            xlabel = "R",
+            ylabel = "Q",
+            title,
+        )
+        ncat = 6
+        ran = 1e-4, 1e1
+        isref = key == :dns || key == :ref
+        isref || contour!(
+            ax,
+            qr.ref.x,
+            qr.ref.y,
+            max.(qr.ref.density, 1e-20);
+            levels = logrange(ran..., ncat),
+            # colorrange = ran,
+            # colorscale = log10,
+            # colormap = :watermelon,
+            color = colors.ref
+        )
+        c = contour!(
+            ax,
+            qr[key].x,
+            qr[key].y,
+            max.(qr[key].density, 1e-20);
+            levels = logrange(ran..., ncat),
+            # colorrange = ran,
+            # colorscale = log10,
+            # colormap = :watermelon,
+            color = colors[key],
+        )
+        qtest = range(-10, 0, 200)
+        rtest1 = @. 2 / 3 / sqrt(3) * (-qtest)^(3 / 2)
+        rtest2 = @. -2 / 3 / sqrt(3) * (-qtest)^(3 / 2)
+        lines!(ax, rtest1, qtest; color = colors.line)
+        lines!(ax, rtest2, qtest; color = colors.line)
+        # if key == :dns
+            xlims!(ax, -2.5, 2.5)
+            ylims!(ax, -4, 4)
+        # else
+        #     xlims!(ax, -0.1, 0.1)
+        #     ylims!(ax, -0.3, 0.4)
+        # end
+        # key == :dns && Colorbar(fig[1:2, 5], c) #; scale = log10)
+        # key == :dns && Colorbar(fig[1:2, 5];
+        #                         scale = log10,
+        #                         colorrange = ran,
+        #                         colormap = cgrad(:viridis, ncat, categorical = true))
+
+    end
+    fig
+end
+
+export plot_equivariance_errors
+function plot_equivariance_errors(errs, setup)
+    (; dets) = group_stuff(setup.D)
+    fig = Figure(; size = (400, 340))
+    ax = Axis(
+        fig[1, 1];
+        yscale = log10,
+        xlabel = "Group element",
+        ylabel = "Error",
+        xticks = [1, 8, 16, 24, 32, 40, 48],
+    )
+    ylims!(ax, 1e-17, 1)
+    i = 1:48
+    colors = (;
+        nomo = Cycled(1),
+        smag = Cycled(2),
+        clar = Cycled(3),
+        tbnn = Cycled(4),
+        equi = Cycled(5),
+        conv = Cycled(6),
+    )
+    labels = (;
+        nomo = "No-model",
+        smag = "Smagorinsky",
+        clar = "Clark",
+        tbnn = "TBNN",
+        equi = "G-Conv",
+        conv = "Conv",
+    )
+    markers = (;
+        nomo = :utriangle,
+        smag = :circle,
+        clar = :rect,
+        tbnn = :diamond,
+        equi = :rtriangle,
+        conv = :x,
+    )
+    for key in keys(errs)
+        e = errs[key]
+        e = max.(e, 1e-30) # Encode true zeros as 1e-30
+        scatterlines!(
+            ax,
+            i,
+            e;
+            label = labels[key],
+            marker = markers[key],
+            color = colors[key],
+        )
+    end
+    Legend(
+        fig[0, 1],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        # orientation = :horizontal,
+        nbanks = 3,
+    )
+    rowgap!(fig.layout, 5)
+    fig
 end
 
 export vectorfield_to_svector,

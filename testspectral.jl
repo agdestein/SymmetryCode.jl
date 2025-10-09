@@ -20,12 +20,12 @@ using StaticArrays
 using Statistics
 using SymmetryCode
 using SymmetryCode.Spectral
-# using WGLMakie
-# lines([1, 2, 3])
+using WGLMakie
+lines([1, 2, 3])
 
 # setup = setup_laptop()
-# setup = setup_turbulator()
-setup = setup_snellius()
+setup = setup_turbulator()
+# setup = setup_snellius()
 (; plotdir) = setup
 
 let
@@ -346,7 +346,9 @@ let
     lines!(ax, train_tbnn.losses_valid; label = "TBNN")
     lines!(ax, train_equi.losses_valid; label = "G-Conv")
     lines!(ax, train_conv.losses_valid; label = "Conv")
-    Legend(fig[0, 1], ax;
+    Legend(
+        fig[0, 1],
+        ax;
         tellwidth = false,
         tellheight = true,
         framevisible = false,
@@ -360,14 +362,13 @@ end
 
 map(
     t -> round(t; digits = 1),
-    (;
-        tbnn = train_tbnn.timing,
-        conv = train_conv.timing,
-        equi = train_equi.timing,
-    ),
+    (; tbnn = train_tbnn.timing, conv = train_conv.timing, equi = train_equi.timing),
 ) |> pairs
 
-equi_errors_post = let
+
+equi_errors_post_file = joinpath(setup.outdir, "equi-errors-post.jld2")
+
+let
     grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     models = (;
         nomo = m_nomo,
@@ -379,10 +380,11 @@ equi_errors_post = let
     )
     ustart = data[1][end] |> adapt(setup.backend)
     (; elements) = group_stuff(setup.D)
-    map(keys(models)) do key
+    errors = map(keys(models)) do key
         model = models[key]
         @info "Computing equivariance error for $(key)"
         e = map(eachindex(elements)) do i
+            @info "Element $(i) of $(length(elements))"
             test_equivariance_post(;
                 ustart,
                 setup,
@@ -392,23 +394,15 @@ equi_errors_post = let
                 rng = Xoshiro(123),
                 tstop = 1e-1,
                 cfl = 0.35,
+                dolog = false,
             )
         end
         key => e
     end |> NamedTuple
+    save_object(equi_errors_post_file, errors)
 end
 
-lines(equi_errors_post.conv) |> display
-
-let
-    filename = joinpath(setup.outdir, "equi-errors-post.jld2")
-    jldsave(filename; equi_errors_post)
-end
-
-equi_errors_post = let
-    filename = joinpath(setup.outdir, "equi-errors-post.jld2")
-    load(filename, "equi_errors_post")
-end
+equi_errors_post = load_object(equi_errors_post_file)
 
 equi_errors_post |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
 
@@ -476,6 +470,7 @@ get_errors(setup, u);
 # :equi => 0.1171
 # :conv => 0.1175
 
+# Plot LES spectrum
 let
     (; D, l, n_dns, n_les, backend, visc) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
@@ -528,7 +523,7 @@ let
         tellwidth = false,
         tellheight = true,
         framevisible = false,
-        orientation = :horizontal,
+        horizontal = true,
         nbanks = 3,
     )
     rowgap!(fig.layout, 5)
@@ -550,13 +545,7 @@ end
 # :Re_kol => 15.7711
 
 let
-    models = (;
-        smag = m_smag,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        equi = m_equi,
-        conv = m_conv,
-    )
+    models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
     labels = (;
         ref = "Reference",
         smag = "Smagorinsky",
@@ -599,67 +588,22 @@ apriori_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 # :equi => 0.6319
 # :conv => 0.6319
 
-apriori_equi_errors = let
+equi_errors_prior_file = joinpath(setup.outdir, "equi-errors-prior.jld2")
+
+let
     models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
-    apriori_equivariance_error(; u, setup, models, plotdir)
+    errors = apriori_equivariance_error(; u, setup, models, plotdir)
+    save_object(equi_errors_prior_file, errors)
 end
+
+equi_errors_prior = load_object(equi_errors_prior_file)
 
 let
     for (errs, name) in [
-        (apriori_equi_errors, "equi-errors-prior.pdf"),
+        (equi_errors_prior, "equi-errors-prior.pdf"),
         (equi_errors_post, "equi-errors-post.pdf"),
     ]
-        (; dets) = group_stuff(setup.D)
-        fig = Figure(; size = (500, 400))
-        ax = Axis(
-            fig[1, 1];
-            yscale = log10,
-            xlabel = "Group element",
-            ylabel = "Error",
-            xticks = [1, 8, 16, 24, 32, 40, 48],
-        )
-        ylims!(ax, 1e-17, 1)
-        i = 1:48
-        colors = (;
-            nomo = Cycled(1),
-            smag = Cycled(2),
-            clar = Cycled(3),
-            tbnn = Cycled(4),
-            equi = Cycled(5),
-            conv = Cycled(6),
-        )
-        labels = (;
-            nomo = "No-model",
-            smag = "Smagorinsky",
-            clar = "Clark",
-            tbnn = "TBNN",
-            equi = "G-Conv",
-            conv = "Conv",
-        )
-        markers =
-            (; nomo = :utriangle, smag = :circle, clar = :rect, tbnn = :diamond, equi = :rtriangle, conv = :x)
-        for key in keys(errs)
-            e = errs[key]
-            e = max.(e, 1e-30) # Encode true zeros as 1e-30
-            scatterlines!(
-                ax,
-                i,
-                e;
-                label = labels[key],
-                marker = markers[key],
-                color = colors[key],
-            )
-        end
-        Legend(
-            fig[0, 1],
-            ax;
-            tellwidth = false,
-            tellheight = true,
-            framevisible = false,
-            horizontal = true,
-            nbanks = 5,
-        )
-        rowgap!(fig.layout, 5)
+        fig = plot_equivariance_errors(errs, setup)
         save("$(plotdir)/$(name)", fig; backend = CairoMakie)
         display(fig)
     end
@@ -670,9 +614,9 @@ let
     s.mats[43]
 end
 
-apriori_equi_errors.conv[43]
+equi_errors_prior.conv[43]
 
-apriori_equi_errors |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
+equi_errors_prior |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
 
 # :smag => 7.244e-17
 # :clar => 7.201e-17
@@ -712,7 +656,7 @@ dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
 let
     g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    u = u_dns
+    u = u.dns
     s = turbulence_statistics(u, setup.visc, g)
     s |> pairs
 end
@@ -722,5 +666,68 @@ let
     comp = :z
     fig = plot_velocities(setup, u, comp)
     save("$(plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
+    fig
+end
+
+let
+    (; D, l, n_dns, visc, backend) = setup
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    u = load(dnsfile, "u") |> adapt(backend)
+    stat = turbulence_statistics(u |> adapt(backend), visc, g_dns)
+end |> pairs
+
+qr = compute_qr(u, setup)
+
+let
+    fig = plot_qr(setup, qr)
+    save("$(plotdir)/qr.pdf", fig; backend = CairoMakie)
+    fig
+end
+
+let
+    fig = Figure()
+end
+
+let
+    g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    u = load(dnsfile, "u") |> adapt(setup.backend)
+    G = getgradient(u, g)
+    q = spacescalarfield(g)
+    r = spacescalarfield(g)
+    apply!(qr_kernel!, g, (q, r, G, g); ndrange = space_ndrange(g))
+    q = q |> cpu_device() |> vec
+    r = r |> cpu_device() |> vec
+    t_kol = 1 / sum(G -> sum(abs2, G) * (g.l / g.n)^3, G) |> sqrt
+    q .*= t_kol^2
+    r .*= t_kol^3
+    k = kde((r, q)) #; npoints = (5000, 5000))
+    p = k.density
+    @show extrema(q) extrema(r) extrema(p)
+    p = max.(p, 1e-20)
+    # p |> extrema
+    # @. p = log(max(1e-20, p))
+    # @show maximum(p)
+    # heatmap(k.x, k.y, p; colorscale = log10, colorrange = (1e-5, maximum(p)))
+    # fig = Figure(; size = (400, 300))
+    fig = Figure()
+    ax = Axis(fig[1, 1]; xlabel = "R", ylabel = "Q")
+    ran = 1e-4, 1e1
+    contour!(
+        ax,
+        k.x,
+        k.y,
+        p;
+        # labels = true,
+        levels = logrange(ran..., 6),
+        colorrange = ran,
+        colorscale = log10,
+    )
+    qtest = range(-10, 0, 200)
+    rtest1 = @. 2 / 3 / sqrt(3) * (-qtest)^(3 / 2)
+    rtest2 = @. -2 / 3 / sqrt(3) * (-qtest)^(3 / 2)
+    lines!(ax, rtest1, qtest; color = :red)
+    lines!(ax, rtest2, qtest; color = :red)
+    xlims!(ax, -2.5, 2.5)
+    ylims!(ax, -4, 4)
     fig
 end
