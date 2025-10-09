@@ -365,7 +365,6 @@ map(
     (; tbnn = train_tbnn.timing, conv = train_conv.timing, equi = train_equi.timing),
 ) |> pairs
 
-
 equi_errors_post_file = joinpath(setup.outdir, "equi-errors-post.jld2")
 
 let
@@ -380,25 +379,26 @@ let
     )
     ustart = data[1][end] |> adapt(setup.backend)
     (; elements) = group_stuff(setup.D)
-    errors = map(keys(models)) do key
-        model = models[key]
-        @info "Computing equivariance error for $(key)"
-        e = map(eachindex(elements)) do i
-            @info "Element $(i) of $(length(elements))"
-            test_equivariance_post(;
-                ustart,
-                setup,
-                grid,
-                model,
-                groupindex = i,
-                rng = Xoshiro(123),
-                tstop = 1e-1,
-                cfl = 0.35,
-                dolog = false,
-            )
-        end
-        key => e
-    end |> NamedTuple
+    errors =
+        map(keys(models)) do key
+            model = models[key]
+            @info "Computing equivariance error for $(key)"
+            e = map(eachindex(elements)) do i
+                @info "Element $(i) of $(length(elements))"
+                test_equivariance_post(;
+                    ustart,
+                    setup,
+                    grid,
+                    model,
+                    groupindex = i,
+                    rng = Xoshiro(123),
+                    tstop = 1e-1,
+                    cfl = 0.35,
+                    dolog = false,
+                )
+            end
+            key => e
+        end |> NamedTuple
     save_object(equi_errors_post_file, errors)
 end
 

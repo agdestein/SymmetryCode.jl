@@ -870,7 +870,7 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
 
     # Destructure invariants and basis
     i = selectdim(x, D + 1, 1:ni)
-    b = selectdim(x, D + 1, (ni+1):size(x, D + 1))
+    b = selectdim(x, D + 1, (ni+1):size(x, D+1))
 
     # Compute coefficients
     w = net(i, ps, st) |> first
@@ -908,7 +908,17 @@ function getdissipation(g, u, m)
 end
 
 export test_equivariance_post
-function test_equivariance_post(; ustart, setup, grid, model, groupindex, rng, tstop, cfl, dolog)
+function test_equivariance_post(;
+    ustart,
+    setup,
+    grid,
+    model,
+    groupindex,
+    rng,
+    tstop,
+    cfl,
+    dolog,
+)
     T, D = typeof(setup.l), setup.D
 
     # Group element
@@ -1007,17 +1017,17 @@ function plot_densities(; u_dns, setup, models, labels, plotdir, dolog)
         y = m(G)
         if D == 2
             xx, yy, xy = 1, 2, 3
-            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
+            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
         elseif D == 3
             xx, yy, zz = 1, 2, 3
             xy, yz, zx = 4, 5, 6
             (;
-                xx = view(y, :, :, :, xx),
-                yy = view(y, :, :, :, yy),
-                zz = view(y, :, :, :, zz),
-                xy = view(y, :, :, :, xy),
-                yz = view(y, :, :, :, yz),
-                zx = view(y, :, :, :, zx),
+                xx = view(y,:,:,:,xx),
+                yy = view(y,:,:,:,yy),
+                zz = view(y,:,:,:,zz),
+                xy = view(y,:,:,:,xy),
+                yz = view(y,:,:,:,yz),
+                zx = view(y,:,:,:,zx),
             )
         end
     end
@@ -1384,17 +1394,17 @@ function get_dissipation_errors(; setup, u_dns, models)
         y = m(G)
         if D == 2
             xx, yy, xy = 1, 2, 3
-            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
+            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
         elseif D == 3
             xx, yy, zz = 1, 2, 3
             xy, yz, zx = 4, 5, 6
             (;
-                xx = view(y, :, :, :, xx),
-                yy = view(y, :, :, :, yy),
-                zz = view(y, :, :, :, zz),
-                xy = view(y, :, :, :, xy),
-                yz = view(y, :, :, :, yz),
-                zx = view(y, :, :, :, zx),
+                xx = view(y,:,:,:,xx),
+                yy = view(y,:,:,:,yy),
+                zz = view(y,:,:,:,zz),
+                xy = view(y,:,:,:,xy),
+                yz = view(y,:,:,:,yz),
+                zx = view(y,:,:,:,zx),
             )
         end
     end
@@ -1626,7 +1636,7 @@ function plot_qr(setup, qr)
             # colorrange = ran,
             # colorscale = log10,
             # colormap = :watermelon,
-            color = colors.ref
+            color = colors.ref,
         )
         c = contour!(
             ax,
@@ -1645,8 +1655,8 @@ function plot_qr(setup, qr)
         lines!(ax, rtest1, qtest; color = colors.line)
         lines!(ax, rtest2, qtest; color = colors.line)
         # if key == :dns
-            xlims!(ax, -2.5, 2.5)
-            ylims!(ax, -4, 4)
+        xlims!(ax, -2.5, 2.5)
+        ylims!(ax, -4, 4)
         # else
         #     xlims!(ax, -0.1, 0.1)
         #     ylims!(ax, -0.3, 0.4)
