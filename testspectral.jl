@@ -20,12 +20,12 @@ using StaticArrays
 using Statistics
 using SymmetryCode
 using SymmetryCode.Spectral
-using WGLMakie
-lines([1, 2, 3])
+# using WGLMakie
+# lines([1, 2, 3])
 
 # setup = setup_laptop()
-setup = setup_turbulator()
-# setup = setup_snellius()
+# setup = setup_turbulator()
+setup = setup_snellius()
 (; plotdir) = setup
 
 let
