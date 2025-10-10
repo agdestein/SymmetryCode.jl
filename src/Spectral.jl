@@ -1723,6 +1723,93 @@ function plot_equivariance_errors(errs, setup)
     fig
 end
 
+export plot_sfs
+function plot_sfs(setup, u_dns, models)
+    (; D, l, n_dns, n_les, backend, visc, Δ) = setup
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
+    ubar = vectorfield(g_les)
+    for (ubar, u_dns) in zip(ubar, u_dns)
+        apply!(cutoff!, g_les, (ubar, u_dns))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
+    end
+    τhat = sfs(u_dns, g_dns, g_les, Δ)
+    τ = spacetensorfield(g_les)
+    plan = Seneca.getplan(g_les)
+    for (τ, τhat) in zip(τ, τhat)
+        # apply!(twothirds!, g_les, (τhat, g_les))
+        ldiv!(τ, plan, τhat)
+        τ .*= g_les.n^dim(g_les)
+    end
+    τ = τ |> cpu_device()
+    G = getgradient(ubar, g_les)
+    τ_les = map(models) do m
+        # Predict SFS
+        y = m(G)
+
+        # Make tensor trace-free
+        ydiag = selectdim(y, D + 1, 1:D)
+        trace = sum(ydiag; dims = D + 1)
+        @. ydiag -= trace / D
+
+        # Extract components
+        if D == 2
+            xx, yy, xy = 1, 2, 3
+            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
+        elseif D == 3
+            xx, yy, zz = 1, 2, 3
+            xy, yz, zx = 4, 5, 6
+            (;
+                xx = view(y,:,:,:,xx),
+                yy = view(y,:,:,:,yy),
+                zz = view(y,:,:,:,zz),
+                xy = view(y,:,:,:,xy),
+                yz = view(y,:,:,:,yz),
+                zx = view(y,:,:,:,zx),
+            )
+        end |> cpu_device()
+    end
+    τ_all = (; ref = τ, τ_les...)
+    labels = (;
+        ref = "Reference",
+        nomo = "No-model",
+        tbnn = "TBNN",
+        conv = "Conv",
+        equi = "G-Conv",
+        smag = "Smagorinsky",
+        clar = "Clark",
+    )
+    nmodel = length(models) + 1
+    fig = Figure(; size = (800, 320))
+    for (i, comp) in enumerate([:xx, :xy])
+        for (j, key) in τ_all |> keys |> enumerate
+            title = labels[key]
+            ax = Axis(
+                fig[i, j];
+                xlabelvisible = false,
+                xticksvisible = false,
+                xticklabelsvisible = false,
+                ylabelvisible = j == 1,
+                yticksvisible = false,
+                yticklabelsvisible = false,
+                aspect = DataAspect(),
+                ylabel = "$(comp)",
+                title,
+            )
+            data = τ_all[key][comp]
+            data = data[:, :, end]
+            im = image!(
+                ax,
+                data;
+                colormap = :seaborn_icefire_gradient,
+                colorrange = extrema(τ_all.ref[comp][:, :, end]),
+                interpolate = false,
+            )
+        end
+    end
+    fig
+end
+
 export vectorfield_to_svector,
     svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield
 export transform_scalar, transform_vector, transform_tensor

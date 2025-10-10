@@ -670,6 +670,21 @@ let
 end
 
 let
+    models = (;
+        # nomo = m_nomo,
+        smag = m_smag,
+        clar = m_clar,
+        tbnn = m_tbnn,
+        equi = m_equi,
+        conv = m_conv,
+    )
+    u = load(dnsfile, "u") |> adapt(setup.backend)
+    fig = plot_sfs(setup, u, models)
+    save("$(plotdir)/sfs.png", fig; backend = CairoMakie)
+    fig
+end
+
+let
     (; D, l, n_dns, visc, backend) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     u = load(dnsfile, "u") |> adapt(backend)
