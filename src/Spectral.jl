@@ -1785,9 +1785,8 @@ function plot_sfs(setup, u_dns, models)
         smag = "Smagorinsky",
         clar = "Clark",
     )
-    nmodel = length(models) + 1
-    fig = Figure(; size = (800, 320))
-    for (i, comp) in enumerate([:xx, :xy])
+    fig = Figure(; size = (800, 550))
+    for (i, comp) in enumerate([:xx, :xy, :zx, :zz])
         for (j, key) in τ_all |> keys |> enumerate
             title = labels[key]
             ax = Axis(
@@ -1801,6 +1800,7 @@ function plot_sfs(setup, u_dns, models)
                 aspect = DataAspect(),
                 ylabel = "$(comp)",
                 title,
+                titlevisible = i == 1,
             )
             data = τ_all[key][comp]
             data = data[:, :, end]
@@ -1813,6 +1813,8 @@ function plot_sfs(setup, u_dns, models)
             )
         end
     end
+    rowgap!(fig.layout, 10)
+    colgap!(fig.layout, 10)
     fig
 end
 

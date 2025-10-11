@@ -24,8 +24,8 @@ using WGLMakie
 # lines([1, 2, 3])
 
 # setup = setup_laptop()
-setup = setup_turbulator()
-# setup = setup_snellius()
+# setup = setup_turbulator()
+setup = setup_snellius()
 
 create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0))
 
