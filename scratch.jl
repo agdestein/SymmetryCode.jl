@@ -4,28 +4,90 @@ if false
     using .SymmetryCode.Spectral
 end
 
-using Adapt
-using CUDA, cuDNN
-using FFTW
-using JLD2
-using KernelAbstractions
-using KernelDensity
-using LinearAlgebra
-using Lux
-using MLUtils
-using Random
-using Seneca
-using StaticArrays
-using Statistics
-using SymmetryCode
-using SymmetryCode.Spectral
-using WGLMakie
-using Zygote
-lines([1, 2, 3])
+let
+    s = group_stuff(3)
+    # map(display, s.mats)
+    m = @SMatrix [
+        -1 0 0
+        0 1 0
+        0 0 -1
+    ]
+    findfirst(isequal(m), s.mats)
+end
 
-outdir = joinpath(@__DIR__, "output") |> mkpath
+let
+    m = @SMatrix [
+        -1 0 0
+        0 -1 0
+        0 0 -1
+    ]
+    x = @SMatrix [
+        11 12 13
+        21 22 23
+        31 32 33
+    ]
+    m * x * m'
+end
 
-dns_aid()
+let
+    l = 10.0
+    Δ = l / 20
+    n = 512
+    x = range(-l / 2, l / 2, n + 1)[1:(end-1)]
+    y = @. sqrt(6 / pi / Δ^2) * exp(-6 * x^2 / Δ^2)
+    yhat = rfft(y) * l / n
+    kmax = div(n, 2)
+    k = 0:kmax
+    yref = @. exp(-Δ^2 * (2 * pi * k / l)^2 / 24)
+    fig = Figure()
+    ax = Axis(fig[1, 1]; xscale = log10, yscale = log10)
+    lines!(ax, 2 * pi / l * k[2:end], abs.(yhat[2:end]); label = "FFT")
+    lines!(ax, 2 * pi / l * k[2:end], abs.(yref[2:end]); label = "Theory")
+    vlines!(ax, 2 * pi / Δ)
+    vlines!(ax, 2 * pi / l)
+    ylims!(1e-10, 1e2)
+    save("$(plotdir)/filterkernel.pdf", fig; backend = CairoMakie)
+    fig
+end
+
+let
+    l = 1.0
+    n_les = 64
+    ncut = 2 * div(n_les, 3)
+    Δ = 2 * l / n_les
+    k = 2 * pi / l * (1:32)
+    w = @. exp(-Δ^2 * k^2 / 24)
+    fig = Figure()
+    ax = Axis(fig[1, 1]; xscale = log10, yscale = log10)
+    kol = k .^ (-5 / 3)
+    lines!(ax, k, kol)
+    lines!(ax, k, w .* kol)
+    vlines!(ax, 2 * pi / l * div(n_les, 3))
+    fig
+end
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 setup = let
     l = 1.0

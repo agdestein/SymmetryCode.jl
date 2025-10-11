@@ -118,7 +118,7 @@ end
 
 export create_dns
 function create_dns(setup; t_warmup, cfl, rng)
-    (; l, visc, D, n_dns, backend, ou_radius, ou_time, ou_energy) = setup
+    (; outdir, l, visc, D, n_dns, backend, ou_radius, ou_time, ou_energy) = setup
     g = Grid{D}(; l, n = n_dns, backend)
     u = randomfield(g; rng, kpeak = 5)
     cache = getcache(g)
@@ -165,7 +165,10 @@ function create_dns(setup; t_warmup, cfl, rng)
             )
         end
     end
-    u, times, energies
+
+    # Save results
+    file = joinpath(outdir, "dns.jld2")
+    jldsave(file; u = u |> cpu_device(), times, energies)
 end
 
 function create_data(u, setup; cfl, nstep, nsubstep, Δ)
@@ -983,8 +986,8 @@ function test_equivariance_post(;
 end
 
 export plot_densities
-function plot_densities(; u_dns, setup, models, labels, plotdir, dolog)
-    (; name, D, l, n_dns, n_les, backend, visc, Δ) = setup
+function plot_densities(; u_dns, setup, models, labels, dolog)
+    (; plotdir, name, D, l, n_dns, n_les, backend, visc, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     u_ref = vectorfield(g_les)
@@ -1254,8 +1257,11 @@ function apriori_error(; u_dns, setup, models, labels, plotdir)
         trace = sum(ydiag; dims = D + 1)
         @. ydiag -= trace / D
 
-        # Relative error
-        norm(y - τ) / norm(τ)
+        # Metrics
+        yy, ττ = y .- mean(y), τ .- mean(τ)
+        relerr = norm(y - τ) / norm(τ)
+        crosscor = dot(yy, ττ) / sqrt(dot(yy, yy) * dot(ττ, ττ))
+        (; relerr, crosscor)
     end
     errors
 end
@@ -1809,6 +1815,74 @@ function plot_sfs(setup, u_dns, models)
     end
     fig
 end
+
+export plot_spectrum_dns
+function plot_spectrum_dns(setup)
+    (; outdir, plotdir, D, l, n_dns, n_les, backend, visc, ou_radius) = setup
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
+    u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
+    ubar = vectorfield(g_les)
+    for (ubar, u) in zip(ubar, u)
+        apply!(cutoff!, g_les, (ubar, u))
+        apply!(gaussianfilter!, g_les, (ubar, setup.Δ, g_les))
+    end
+    D = dim(g_dns)
+    stat = turbulence_statistics(u, visc, g_dns)
+    @show stat.Re_tay
+    s_dns = spectrum(u, g_dns)
+    s_les = spectrum(ubar, g_les)
+    fig = Figure(; size = (400, 340))
+    ax = Axis(
+        fig[1, 1];
+        xscale = log10,
+        yscale = log10,
+        xlabel = "Normalized wavenumber",
+        ylabel = "Normalized spectrum",
+    )
+    if D == 2
+        k = [3, g_dns.n / 10]
+        kolmo = @. stat.diss^(-1 / 3) * k^(-3)
+        escale = stat.diss^(-1 / 3) * stat.l_kol^(-3)
+    elseif D == 3
+        k = [3, g_dns.n / 8]
+        kolmo = @. 6.5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
+        escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
+        # escale = 1
+    end
+    kscale = stat.l_kol / l
+    span = [1, ou_radius] * kscale
+    oucolor = Makie.wong_colors()[4]
+    vspan!(ax, span...; alpha = 0.3, color = oucolor)
+    b = sqrt(prod(extrema(escale * s_dns.s)))
+    a = 1.1 * kscale * ou_radius
+    c = sqrt(prod(span))
+    w = D == 2 ? 1 : 1.5
+    text!(ax, a, b / w; color = oucolor, text = "Force")
+    arr = D == 2 ? 100 : 5
+    arrows2d!(
+        ax,
+        Point2(c, b / arr),
+        Point2(c, b * arr) - Point2(c, b / arr);
+        color = oucolor,
+    )
+    lines!(ax, kscale * s_dns.k, escale * s_dns.s; label = "DNS")
+    lines!(ax, kscale * s_les.k, escale * s_les.s; label = "Filtered DNS")
+    lines!(kscale * k, escale * kolmo; label = "Kolmogorov")
+    Legend(
+        fig[0, 1],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 4,
+    )
+    rowgap!(fig.layout, 5)
+    save("$(plotdir)/spectrum-dns.pdf", fig; backend = CairoMakie)
+    fig
+end
+
 
 export vectorfield_to_svector,
     svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield

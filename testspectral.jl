@@ -21,155 +21,23 @@ using Statistics
 using SymmetryCode
 using SymmetryCode.Spectral
 using WGLMakie
-lines([1, 2, 3])
+# lines([1, 2, 3])
 
 # setup = setup_laptop()
 setup = setup_turbulator()
 # setup = setup_snellius()
-(; plotdir) = setup
 
-let
-    s = group_stuff(3)
-    # map(display, s.mats)
-    m = @SMatrix [
-        -1 0 0
-        0 1 0
-        0 0 -1
-    ]
-    findfirst(isequal(m), s.mats)
-end
-
-let
-    m = @SMatrix [
-        -1 0 0
-        0 -1 0
-        0 0 -1
-    ]
-    x = @SMatrix [
-        11 12 13
-        21 22 23
-        31 32 33
-    ]
-    m * x * m'
-end
-
-let
-    l = 10.0
-    Δ = l / 20
-    n = 512
-    x = range(-l / 2, l / 2, n + 1)[1:(end-1)]
-    y = @. sqrt(6 / pi / Δ^2) * exp(-6 * x^2 / Δ^2)
-    yhat = rfft(y) * l / n
-    kmax = div(n, 2)
-    k = 0:kmax
-    yref = @. exp(-Δ^2 * (2 * pi * k / l)^2 / 24)
-    fig = Figure()
-    ax = Axis(fig[1, 1]; xscale = log10, yscale = log10)
-    lines!(ax, 2 * pi / l * k[2:end], abs.(yhat[2:end]); label = "FFT")
-    lines!(ax, 2 * pi / l * k[2:end], abs.(yref[2:end]); label = "Theory")
-    vlines!(ax, 2 * pi / Δ)
-    vlines!(ax, 2 * pi / l)
-    ylims!(1e-10, 1e2)
-    save("$(plotdir)/filterkernel.pdf", fig; backend = CairoMakie)
-    fig
-end
-
-let
-    l = 1.0
-    n_les = 64
-    ncut = 2 * div(n_les, 3)
-    Δ = 2 * l / n_les
-    k = 2 * pi / l * (1:32)
-    w = @. exp(-Δ^2 * k^2 / 24)
-    fig = Figure()
-    ax = Axis(fig[1, 1]; xscale = log10, yscale = log10)
-    kol = k .^ (-5 / 3)
-    lines!(ax, k, kol)
-    lines!(ax, k, w .* kol)
-    vlines!(ax, 2 * pi / l * div(n_les, 3))
-    fig
-end
-
-dnsfile = joinpath(setup.outdir, "dns.jld2")
-
-let
-    dns, times, energies = create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0))
-    jldsave(dnsfile; u = cpu_device()(dns), times, energies)
-end
+create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0))
 
 let
     times, energies = load(dnsfile, "times", "energies")
     fig, ax, l = lines(times, energies)
-    save(joinpath(plotdir, "energy.pdf"), fig)
+    save(joinpath(setup.plotdir, "energy.pdf"), fig)
     fig
 end
 
 # Plot DNS spectrum
-let
-    (; D, l, n_dns, n_les, backend, visc, ou_radius) = setup
-    u = load(dnsfile, "u") |> adapt(backend)
-    g_dns = Grid{D}(; l, n = n_dns, backend)
-    g_les = Grid{D}(; l, n = n_les, backend)
-    ubar = vectorfield(g_les)
-    for (ubar, u) in zip(ubar, u)
-        apply!(cutoff!, g_les, (ubar, u))
-        apply!(gaussianfilter!, g_les, (ubar, setup.Δ, g_les))
-    end
-    D = dim(g_dns)
-    stat = turbulence_statistics(u, visc, g_dns)
-    @show stat.Re_tay
-    s_dns = spectrum(u, g_dns)
-    s_les = spectrum(ubar, g_les)
-    fig = Figure(; size = (400, 340))
-    ax = Axis(
-        fig[1, 1];
-        xscale = log10,
-        yscale = log10,
-        xlabel = "Normalized wavenumber",
-        ylabel = "Normalized spectrum",
-    )
-    if D == 2
-        k = [3, g_dns.n / 10]
-        kolmo = @. stat.diss^(-1 / 3) * k^(-3)
-        escale = stat.diss^(-1 / 3) * stat.l_kol^(-3)
-    elseif D == 3
-        k = [3, g_dns.n / 8]
-        kolmo = @. 6.5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
-        escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
-        # escale = 1
-    end
-    kscale = stat.l_kol / l
-    span = [1, ou_radius] * kscale
-    oucolor = Makie.wong_colors()[4]
-    vspan!(ax, span...; alpha = 0.3, color = oucolor)
-    b = sqrt(prod(extrema(escale * s_dns.s)))
-    a = 1.1 * kscale * ou_radius
-    c = sqrt(prod(span))
-    w = D == 2 ? 1 : 1.5
-    text!(ax, a, b / w; color = oucolor, text = "Force")
-    arr = D == 2 ? 100 : 5
-    arrows2d!(
-        ax,
-        Point2(c, b / arr),
-        Point2(c, b * arr) - Point2(c, b / arr);
-        color = oucolor,
-    )
-    lines!(ax, kscale * s_dns.k, escale * s_dns.s; label = "DNS")
-    lines!(ax, kscale * s_les.k, escale * s_les.s; label = "Filtered DNS")
-    lines!(kscale * k, escale * kolmo; label = "Kolmogorov")
-    Legend(
-        fig[0, 1],
-        ax;
-        tellwidth = false,
-        tellheight = true,
-        framevisible = false,
-        horizontal = true,
-        nbanks = 4,
-    )
-    rowgap!(fig.layout, 5)
-    save("$(plotdir)/spectrum-dns.pdf", fig; backend = CairoMakie)
-    fig
-end
+plot_spectrum_dns(setup)
 
 data, datatiming = let
     filename = joinpath(setup.outdir, "data.jld2")
@@ -189,23 +57,6 @@ data, datatiming = let
     end
     load(filename, "data", "timing")
 end;
-
-data[2][end] |> typeof
-
-let
-    n = setup.n_les
-    x = zeros(n, n, n)
-    plan = plan_rfft(x)
-    y = data[2][2].xx
-    ldiv!(x, plan, copy(y))
-    x .*= n^setup.D
-    @show sum(>(0), x) / length(x)
-    val = kde(x |> vec |> Array) |> x -> (; x.x, x.density)
-    fig, ax, l = lines(val.x, val.density; axis = (yscale = log10,))
-    ylims!(ax, 1e-3, 16e1)
-    xlims!(ax, -0.1, 0.2)
-    fig
-end
 
 Base.summarysize(data) * 1e-9
 
@@ -356,7 +207,7 @@ let
         nbanks = 3,
     )
     rowgap!(fig.layout, 5)
-    save("$(plotdir)/training.pdf", fig; backend = CairoMakie)
+    save("$(setup.plotdir)/training.pdf", fig; backend = CairoMakie)
     fig
 end
 
@@ -364,54 +215,6 @@ map(
     t -> round(t; digits = 1),
     (; tbnn = train_tbnn.timing, conv = train_conv.timing, equi = train_equi.timing),
 ) |> pairs
-
-equi_errors_post_file = joinpath(setup.outdir, "equi-errors-post.jld2")
-
-let
-    grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    models = (;
-        nomo = m_nomo,
-        smag = m_smag,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        equi = m_equi,
-        conv = m_conv,
-    )
-    ustart = data[1][end] |> adapt(setup.backend)
-    (; elements) = group_stuff(setup.D)
-    errors =
-        map(keys(models)) do key
-            model = models[key]
-            @info "Computing equivariance error for $(key)"
-            e = map(eachindex(elements)) do i
-                @info "Element $(i) of $(length(elements))"
-                test_equivariance_post(;
-                    ustart,
-                    setup,
-                    grid,
-                    model,
-                    groupindex = i,
-                    rng = Xoshiro(123),
-                    tstop = 1e-1,
-                    cfl = 0.35,
-                    dolog = false,
-                )
-            end
-            key => e
-        end |> NamedTuple
-    save_object(equi_errors_post_file, errors)
-end
-
-equi_errors_post = load_object(equi_errors_post_file)
-
-equi_errors_post |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
-
-# :nomo => 1.469e-15
-# :smag => 1.043e-15
-# :clar => 7.060e-15
-# :tbnn => 2.059e-15
-# :equi => 2.584e-15
-# :conv => 0.05097
 
 upostfiles = map(
     name -> joinpath(setup.outdir, "u-post-$(name).jld2"),
@@ -528,21 +331,9 @@ let
     )
     rowgap!(fig.layout, 5)
     # ylims!(1e-7, 1)
-    save("$(plotdir)/spectrum-les.pdf", fig; backend = CairoMakie)
+    save("$(setup.plotdir)/spectrum-les.pdf", fig; backend = CairoMakie)
     fig
 end
-
-# :uavg   => 1.05459
-# :diss   => 0.499842
-# :l_int  => 2.3465
-# :l_tay  => 0.00943405
-# :l_kol  => 0.000598187
-# :t_int  => 2.22503
-# :t_tay  => 0.00894569
-# :t_kol  => 0.00894569
-# :Re_int => 61865.1
-# :Re_tay => 248.727
-# :Re_kol => 15.7711
 
 let
     models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
@@ -555,10 +346,12 @@ let
         conv = "Conv",
     )
     u_dns = load(dnsfile, "u") |> adapt(setup.backend)
-    plot_densities(; u_dns, setup, models, labels, plotdir, dolog = true)
+    plot_densities(; u_dns, setup, models, labels, dolog = true)
 end
 
-apriori_errors = let
+prediction_error_prior_file = joinpath(setup.outdir, "prediction-error-prior.jld2")
+
+let
     models = (;
         nomo = m_nomo,
         smag = m_smag,
@@ -576,27 +369,75 @@ apriori_errors = let
         clar = "Clark",
     )
     u_dns = load(dnsfile, "u") |> adapt(setup.backend)
-    apriori_error(; u_dns, setup, models, labels, plotdir)
+    e = apriori_error(; u_dns, setup, models, labels, setup.plotdir)
+    save_object(prediction_error_prior_file, e)
 end
 
-apriori_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
+prediction_error_prior = load_object(prediction_error_prior_file)
 
-# :nomo => 1.0
-# :smag => 0.9922
-# :clar => 0.7288
-# :tbnn => 0.6543
-# :equi => 0.6319
-# :conv => 0.6319
+prediction_error_prior |> e -> map(x -> round(x.relerr; sigdigits = 4), e) |> pairs
+prediction_error_prior |> e -> map(x -> round(x.crosscor; sigdigits = 4), e) |> pairs
+
+##############################
+# A-priori equivariance errors
+##############################
 
 equi_errors_prior_file = joinpath(setup.outdir, "equi-errors-prior.jld2")
 
 let
     models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
-    errors = apriori_equivariance_error(; u, setup, models, plotdir)
+    errors = apriori_equivariance_error(; u, setup, models, setup.plotdir)
     save_object(equi_errors_prior_file, errors)
 end
 
 equi_errors_prior = load_object(equi_errors_prior_file)
+
+equi_errors_prior |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
+
+##################################
+# A-posteriori equivariance errors
+##################################
+
+equi_errors_post_file = joinpath(setup.outdir, "equi-errors-post.jld2")
+
+let
+    grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    models = (;
+        nomo = m_nomo,
+        smag = m_smag,
+        clar = m_clar,
+        tbnn = m_tbnn,
+        equi = m_equi,
+        conv = m_conv,
+    )
+    ustart = data[1][end] |> adapt(setup.backend)
+    (; elements) = group_stuff(setup.D)
+    errors =
+        map(keys(models)) do key
+            model = models[key]
+            @info "Computing equivariance error for $(key)"
+            e = map(eachindex(elements)) do i
+                @info "Element $(i) of $(length(elements))"
+                test_equivariance_post(;
+                    ustart,
+                    setup,
+                    grid,
+                    model,
+                    groupindex = i,
+                    rng = Xoshiro(123),
+                    tstop = 1e-1,
+                    cfl = 0.35,
+                    dolog = false,
+                )
+            end
+            key => e
+        end |> NamedTuple
+    save_object(equi_errors_post_file, errors)
+end
+
+equi_errors_post = load_object(equi_errors_post_file)
+
+equi_errors_post |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
 
 let
     for (errs, name) in [
@@ -604,7 +445,7 @@ let
         (equi_errors_post, "equi-errors-post.pdf"),
     ]
         fig = plot_equivariance_errors(errs, setup)
-        save("$(plotdir)/$(name)", fig; backend = CairoMakie)
+        save("$(setup.plotdir)/$(name)", fig; backend = CairoMakie)
         display(fig)
     end
 end
@@ -614,15 +455,9 @@ let
     s.mats[43]
 end
 
-equi_errors_prior.conv[43]
-
-equi_errors_prior |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
-
-# :smag => 7.244e-17
-# :clar => 7.201e-17
-# :tbnn => 2.557e-16
-# :equi => 6.712e-16
-# :conv => 0.05898
+##################################
+# Dissipation
+##################################
 
 dissipation_errors = let
     u_dns = u.dns |> adapt(setup.backend)
@@ -646,26 +481,11 @@ dissipation_errors = let
 end;
 dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
-# :ref  => -0.1498
-# :nomo => 0.0
-# :smag => -0.1959
-# :clar => -0.05622
-# :tbnn => -0.2081
-# :conv => -0.1714
-# :equi => -0.1765
-
-let
-    g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    u = u.dns
-    s = turbulence_statistics(u, setup.visc, g)
-    s |> pairs
-end
-
 let
     # comp = :x
     comp = :z
     fig = plot_velocities(setup, u, comp)
-    save("$(plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
+    save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
     fig
 end
 
@@ -680,7 +500,7 @@ let
     )
     u = load(dnsfile, "u") |> adapt(setup.backend)
     fig = plot_sfs(setup, u, models)
-    save("$(plotdir)/sfs.png", fig; backend = CairoMakie)
+    save("$(setup.plotdir)/sfs.png", fig; backend = CairoMakie)
     fig
 end
 
@@ -702,7 +522,7 @@ qr = load_object(qr_file)
 
 let
     fig = plot_qr(setup, (; qr..., dns = qrdns.dns))
-    save("$(plotdir)/qr.pdf", fig; backend = CairoMakie)
+    save("$(setup.plotdir)/qr.pdf", fig; backend = CairoMakie)
     fig
 end
 
