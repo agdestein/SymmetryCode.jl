@@ -171,7 +171,7 @@ function create_dns(setup; t_warmup, cfl, rng)
     jldsave(file; u = u |> cpu_device(), times, energies)
 end
 
-function create_data(u, setup; cfl, nstep, nsubstep, Δ)
+function create_data(setup; cfl, nstep, nsubstep, Δ)
     (; visc, D, n_dns, n_les, backend, ou_radius, ou_energy, ou_time) = setup
     g_dns = Grid{D}(; setup.l, n = n_dns, backend)
     g_les = Grid{D}(; setup.l, n = n_les, backend)
@@ -184,6 +184,8 @@ function create_data(u, setup; cfl, nstep, nsubstep, Δ)
     τ = tensorfield(g_les)
     inputs = fill(map(Array, fu), 0)
     outputs = fill(map(Array, fσu), 0)
+
+    u = load(joinpath(outdir, "dns.jld2"), "u")
 
     # OU stuff
     ou = ouforcer(g_dns, ou_radius)
@@ -578,8 +580,8 @@ function les!(du, u, grid, cache; model, visc)
     apply!(tensordivergence!, grid, (du, σ, grid))
 end
 
-function inference_post(; u_dns, setup, models, files, cfl, tstop, Δ)
-    (; D, l, n_dns, n_les, backend, visc) = setup
+function inference_post(; u_dns, setup, models, files, cfl, tstop)
+    (; D, l, n_dns, n_les, backend, visc, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
 
@@ -695,16 +697,28 @@ end
 
 # New reduced basis:
 # https://arc.aiaa.org/doi/10.2514/6.2022-0595
-@inline nbasis(::Grid{3}) = 8
+# @inline nbasis(::Grid{3}) = 8
+# @inline getbasis(::Grid{3}, S, R) = (
+#     one(S),
+#     S,
+#     S * S,
+#     R * R,
+#     S * R - R * S,
+#     R * S * R,
+#     R * S * S - S * S * R,
+#     R * S * R * R - R * R * S * R,
+# )
+
+@inline nbasis(::Grid{3}) = 7
 @inline getbasis(::Grid{3}, S, R) = (
-    one(S),
-    S,
-    S * S,
-    R * R,
-    S * R - R * S,
-    R * S * R,
-    R * S * S - S * S * R,
-    R * S * R * R - R * R * S * R,
+    # one(S),
+    deviator(S),
+    deviator(S * S),
+    deviator(R * R),
+    deviator(S * R - R * S),
+    deviator(R * S * R),
+    deviator(R * S * S - S * S * R),
+    deviator(R * S * R * R - R * R * S * R),
 )
 
 # # Pope's basis:
@@ -771,12 +785,12 @@ end
     end
     for ibas in Base.OneTo(nb)
         # Convert 3x3 tensor b to flattened symmetric tensor [xx, yy, zz, xy, yz, zx]
-        basis[I, 1, ibas] = b[ibas][1, 1] * sqrt(G2)
-        basis[I, 2, ibas] = b[ibas][2, 2] * sqrt(G2)
-        basis[I, 3, ibas] = b[ibas][3, 3] * sqrt(G2)
-        basis[I, 4, ibas] = b[ibas][1, 2] * sqrt(G2)
-        basis[I, 5, ibas] = b[ibas][2, 3] * sqrt(G2)
-        basis[I, 6, ibas] = b[ibas][3, 1] * sqrt(G2)
+        basis[I, 1, ibas] = b[ibas][1, 1] * G2
+        basis[I, 2, ibas] = b[ibas][2, 2] * G2
+        basis[I, 3, ibas] = b[ibas][3, 3] * G2
+        basis[I, 4, ibas] = b[ibas][1, 2] * G2
+        basis[I, 5, ibas] = b[ibas][2, 3] * G2
+        basis[I, 6, ibas] = b[ibas][3, 1] * G2
     end
 end
 
@@ -1207,6 +1221,27 @@ end
     ττ[I, zx] = τ[3, 1]
 end
 
+@kernel function verstappen_kernel!(ττ, GG, C, Δ, g::Grid{3})
+    I = @index(Global, Cartesian)
+    G = @SMatrix [
+        GG.xx[I] GG.xy[I] GG.xz[I]
+        GG.yx[I] GG.yy[I] GG.yz[I]
+        GG.zx[I] GG.zy[I] GG.zz[I]
+    ]
+    S = (G + G') / 2
+    q = tr(S * S) / 2
+    r = tr(S * S * S) / 3
+    nu = C^2 * Δ^2 * abs(r) / q
+    τ = -2 * nu * S
+    xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
+    ττ[I, xx] = τ[1, 1]
+    ττ[I, yy] = τ[2, 2]
+    ττ[I, zz] = τ[3, 3]
+    ττ[I, xy] = τ[1, 2]
+    ττ[I, yz] = τ[2, 3]
+    ττ[I, zx] = τ[3, 1]
+end
+
 export create_smagorinsky
 function create_smagorinsky(CS, Δ, g)
     function smagorinsky(G)
@@ -1216,8 +1251,19 @@ function create_smagorinsky(CS, Δ, g)
     end
 end
 
+export create_verstappen
+function create_verstappen(C, Δ, g)
+    D = dim(g)
+    @assert D == 3 "Q-R model is only defined in 3D"
+    function verstappen(G)
+        τ = stack(spacetensorfield(g))
+        apply!(verstappen_kernel!, g, (τ, G, C, Δ, g); ndrange = space_ndrange(g))
+        τ
+    end
+end
+
 export apriori_error
-function apriori_error(; u_dns, setup, models, labels, plotdir)
+function apriori_error(; u_dns, setup, models, plotdir)
     (; D, l, n_dns, n_les, backend, visc, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
@@ -1590,11 +1636,12 @@ function plot_qr(setup, qr)
         dns = "DNS",
         ref = "Filtered DNS",
         nomo = "No-model",
+        smag = "Smagorinsky",
+        vers = "Verstappen",
+        clar = "Clark",
         tbnn = "TBNN",
         conv = "Conv",
         equi = "G-Conv",
-        smag = "Smagorinsky",
-        clar = "Clark",
     )
     colorvec = Makie.wong_colors()
     lescolor = 2
@@ -1604,15 +1651,16 @@ function plot_qr(setup, qr)
         dns = colorvec[3],
         ref = colorvec[1],
         nomo = colorvec[lescolor],
+        smag = colorvec[lescolor],
+        vers = colorvec[lescolor],
+        clar = colorvec[lescolor],
         tbnn = colorvec[lescolor],
         conv = colorvec[lescolor],
         equi = colorvec[lescolor],
-        smag = colorvec[lescolor],
-        clar = colorvec[lescolor],
     )
     for (k, key) in qr |> keys |> enumerate
         title = labels[key]
-        j, i = CartesianIndices((4, 2))[k].I
+        j, i = CartesianIndices((5, 2))[k].I
         ax = Axis(
             fig[i, j];
             xlabelvisible = i == 2,
@@ -1625,8 +1673,13 @@ function plot_qr(setup, qr)
             ylabel = "Q",
             title,
         )
-        ncat = 7
-        ran = 1e-5, 1e1
+        if name == "turbulator"
+            ran = 1e-3, 1e2
+            ncat = 6
+        elseif name == "snellius"
+            ran = 1e-5, 1e1
+            ncat = 7
+        end
         isref = key == :dns || key == :ref
         isref || contour!(
             ax,
@@ -1656,8 +1709,8 @@ function plot_qr(setup, qr)
         lines!(ax, rtest1, qtest; color = colors.line)
         lines!(ax, rtest2, qtest; color = colors.line)
         if name == "turbulator"
-            xlims!(ax, -2.5, 2.5)
-            ylims!(ax, -4, 4)
+            xlims!(ax, -1.5, 1.5)
+            ylims!(ax, -3, 3)
         elseif name == "snellius"
             xlims!(ax, -3.5, 3.5)
             ylims!(ax, -4, 6)

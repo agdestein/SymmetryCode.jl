@@ -24,8 +24,8 @@ using WGLMakie
 # lines([1, 2, 3])
 
 # setup = setup_laptop()
-# setup = setup_turbulator()
-setup = setup_snellius()
+setup = setup_turbulator()
+# setup = setup_snellius()
 
 create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0))
 
@@ -43,9 +43,7 @@ data, datatiming = let
     filename = joinpath(setup.outdir, "data.jld2")
     if false
         t = time()
-        u = load(dnsfile, "u") |> adapt(setup.backend)
         d = create_data(
-            u,
             setup;
             cfl = 0.35,
             nstep = setup.D == 2 ? 1000 : 30,
@@ -73,24 +71,30 @@ m_smag = create_smagorinsky(
     Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
 )
 
+m_vers = create_verstappen(
+    sqrt(3 / 2) / π, # 0.3898, in original paper
+    # 0.527, # Higher value from Trias "building proper invariants" paper
+    setup.Δ,
+    Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
+)
+
 m_clar = create_clark(setup.Δ, Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
 
 m_tbnn, train_tbnn = let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     kern = ntuple(Returns(1), setup.D)
     net = Chain(
-        Conv(kern, Spectral.ninvariant(g) => 64, gelu),
-        Conv(kern, 64 => 64, gelu),
-        Conv(kern, 64 => 128, gelu),
-        Conv(kern, 128 => Spectral.nbasis(g); use_bias = false),
-    ) # 13_888 parameters
-    net |> display
+        Conv(kern, Spectral.ninvariant(g) => 16, gelu),
+        Conv(kern, 16 => 32, gelu),
+        Conv(kern, 32 => 64, gelu),
+        Conv(kern, 64 => Spectral.nbasis(g); use_bias = false),
+    ) # 3_200 parameters
     ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
     for l in ps
         l.weight .*= 0.1
     end
     file = joinpath(setup.outdir, "ps-tbnn.jld2")
-    if false
+    if true
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss_tbnn(g),
@@ -120,17 +124,18 @@ m_equi, train_equi = let
     net_stuff = equivariant_net(
         setup,
         # [12, 16, 16, 24], # 40_328 actual params
-        [8, 8, 8, 16], # 12_544 actual params
+        # [8, 8, 8, 16], # 12_544 actual params
+        [4, 4, 4, 8], # 3_200 actual params
     )
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-equi.jld2")
-    if false
+    if true
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
             setup,
             dataloader = create_dataloader(setup, data; batchsize = 10),
-            nepoch = 5,
+            nepoch = 10,
             learning_rate = 1e-3,
             net_stuff,
         )
@@ -152,7 +157,8 @@ m_conv, train_conv = let
     net_stuff = cnn(
         setup,
         # [48, 128, 128, 128]; # 40_550 parameters
-        [48, 64, 64, 64]; # 12_326 parameters
+        # [48, 64, 64, 64]; # 12_326 parameters
+        [16, 32, 64]; # 3_200 parameters
         same_as_equi = false,
     )
     for ps in net_stuff.ps
@@ -161,13 +167,13 @@ m_conv, train_conv = let
     end
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-conv.jld2")
-    if false
+    if true
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
             setup,
             dataloader = create_dataloader(setup, data; batchsize = 10),
-            nepoch = 5,
+            nepoch = 10,
             learning_rate = 1e-3,
             net_stuff,
         )
@@ -223,6 +229,7 @@ upostfiles = map(
         ref = "ref",
         nomo = "nomo",
         smag = "smag",
+        vers = "vers",
         clar = "clar",
         tbnn = "tbnn",
         equi = "equi",
@@ -234,12 +241,13 @@ let
     models = (;
         nomo = m_nomo,
         smag = m_smag,
+        vers = m_vers,
         clar = m_clar,
         tbnn = m_tbnn,
         equi = m_equi,
         conv = m_conv,
     )
-    u_dns = load(dnsfile, "u") |> adapt(setup.backend)
+    u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
     inference_post(;
         u_dns,
         setup,
@@ -247,31 +255,23 @@ let
         files = upostfiles,
         cfl = 0.35,
         tstop = 1e-1,
-        setup.Δ,
     )
 end
 
 map(f -> load(f, "timing"), upostfiles) |> t -> map(x -> round(x; digits = 1), t) |> pairs
 
-# :dns  => 1025.77
-# :ref  => 1025.77
-# :nomo => 1.62064
-# :smag => 0.904956
-# :clar => 0.980243
-# :tbnn => 6.24895
-# :equi => 40.2744
-# :conv => 5.49185
+# :dns  => 24.9 22.0 
+# :ref  => 24.9 22.0 
+# :nomo => 0.9  0.2  
+# :smag => 0.7  0.2  
+# :clar => 0.5  0.2  
+# :tbnn => 2.3  2.0  
+# :equi => 37.1 34.7 
+# :conv => 1.8  1.3  
 
 u = map(f -> load(f, "u"), upostfiles);
 
 get_errors(setup, u);
-
-# :nomo => 0.1752
-# :smag => 0.1223
-# :clar => 0.157
-# :tbnn => 0.1222
-# :equi => 0.1171
-# :conv => 0.1175
 
 # Plot LES spectrum
 let
@@ -283,6 +283,7 @@ let
         ref = "Filtered DNS",
         nomo = "No-model",
         smag = "Smagorinsky",
+        vers = "Verstappen",
         clar = "Clark",
         tbnn = "TBNN",
         equi = "G-Conv",
@@ -345,7 +346,7 @@ let
         equi = "G-Conv",
         conv = "Conv",
     )
-    u_dns = load(dnsfile, "u") |> adapt(setup.backend)
+    u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
     plot_densities(; u_dns, setup, models, labels, dolog = true)
 end
 
@@ -360,16 +361,8 @@ let
         equi = m_equi,
         conv = m_conv,
     )
-    labels = (;
-        nomo = "No-model",
-        tbnn = "TBNN",
-        conv = "Conv",
-        equi = "G-Conv",
-        smag = "Smagorinsky",
-        clar = "Clark",
-    )
-    u_dns = load(dnsfile, "u") |> adapt(setup.backend)
-    e = apriori_error(; u_dns, setup, models, labels, setup.plotdir)
+    u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
+    e = apriori_error(; u_dns, setup, models, setup.plotdir)
     save_object(prediction_error_prior_file, e)
 end
 
@@ -460,7 +453,7 @@ end
 ##################################
 
 dissipation_errors = let
-    u_dns = u.dns |> adapt(setup.backend)
+    u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
     models = (;
         nomo = m_nomo,
         smag = m_smag,
@@ -469,16 +462,9 @@ dissipation_errors = let
         conv = m_conv,
         equi = m_equi,
     )
-    labels = (;
-        nomo = "No-model",
-        tbnn = "TBNN",
-        conv = "Conv",
-        equi = "G-Conv",
-        smag = "Smagorinsky",
-        clar = "Clark",
-    )
     get_dissipation_errors(; setup, u_dns, models)
 end;
+
 dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
 let
@@ -498,7 +484,7 @@ let
         equi = m_equi,
         conv = m_conv,
     )
-    u = load(dnsfile, "u") |> adapt(setup.backend)
+    u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
     fig = plot_sfs(setup, u, models)
     save("$(setup.plotdir)/sfs.png", fig; backend = CairoMakie)
     fig
@@ -507,8 +493,8 @@ end
 let
     (; D, l, n_dns, visc, backend) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
-    u = load(dnsfile, "u") |> adapt(backend)
-    stat = turbulence_statistics(u |> adapt(backend), visc, g_dns)
+    u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
+    stat = turbulence_statistics(u, visc, g_dns)
 end |> pairs
 
 qr_file = joinpath(setup.outdir, "qr.jld2")
@@ -518,58 +504,10 @@ let
     save_object(qr_file, qr)
 end
 
-qr = load_object(qr_file)
+qr = load_object(qr_file);
 
 let
-    fig = plot_qr(setup, (; qr..., dns = qrdns.dns))
+    fig = plot_qr(setup, qr)
     save("$(setup.plotdir)/qr.pdf", fig; backend = CairoMakie)
-    fig
-end
-
-let
-    fig = Figure()
-end
-
-let
-    g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    u = load(dnsfile, "u") |> adapt(setup.backend)
-    G = getgradient(u, g)
-    q = spacescalarfield(g)
-    r = spacescalarfield(g)
-    apply!(qr_kernel!, g, (q, r, G, g); ndrange = space_ndrange(g))
-    q = q |> cpu_device() |> vec
-    r = r |> cpu_device() |> vec
-    t_kol = 1 / sum(G -> sum(abs2, G) * (g.l / g.n)^3, G) |> sqrt
-    q .*= t_kol^2
-    r .*= t_kol^3
-    k = kde((r, q)) #; npoints = (5000, 5000))
-    p = k.density
-    @show extrema(q) extrema(r) extrema(p)
-    p = max.(p, 1e-20)
-    # p |> extrema
-    # @. p = log(max(1e-20, p))
-    # @show maximum(p)
-    # heatmap(k.x, k.y, p; colorscale = log10, colorrange = (1e-5, maximum(p)))
-    # fig = Figure(; size = (400, 300))
-    fig = Figure()
-    ax = Axis(fig[1, 1]; xlabel = "R", ylabel = "Q")
-    ran = 1e-4, 1e1
-    contour!(
-        ax,
-        k.x,
-        k.y,
-        p;
-        # labels = true,
-        levels = logrange(ran..., 6),
-        colorrange = ran,
-        colorscale = log10,
-    )
-    qtest = range(-10, 0, 200)
-    rtest1 = @. 2 / 3 / sqrt(3) * (-qtest)^(3 / 2)
-    rtest2 = @. -2 / 3 / sqrt(3) * (-qtest)^(3 / 2)
-    lines!(ax, rtest1, qtest; color = :red)
-    lines!(ax, rtest2, qtest; color = :red)
-    xlims!(ax, -2.5, 2.5)
-    ylims!(ax, -4, 4)
     fig
 end
