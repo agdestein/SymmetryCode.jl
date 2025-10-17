@@ -21,7 +21,7 @@ using Statistics
 using SymmetryCode
 using SymmetryCode.Spectral
 using WGLMakie
-# lines([1, 2, 3])
+lines([1, 2, 3])
 
 # setup = setup_laptop()
 setup = setup_turbulator()
@@ -30,9 +30,9 @@ setup = setup_turbulator()
 create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0))
 
 let
-    times, energies = load(dnsfile, "times", "energies")
+    times, energies = load("$(setup.outdir)/dns.jld2", "times", "energies")
     fig, ax, l = lines(times, energies)
-    save(joinpath(setup.plotdir, "energy.pdf"), fig)
+    save(joinpath(setup.plotdir, "energy.pdf"), fig; backend = CairoMakie)
     fig
 end
 
@@ -41,7 +41,7 @@ plot_spectrum_dns(setup)
 
 data, datatiming = let
     filename = joinpath(setup.outdir, "data.jld2")
-    if false
+    if true
         t = time()
         d = create_data(
             setup;
@@ -254,7 +254,7 @@ let
         models,
         files = upostfiles,
         cfl = 0.35,
-        tstop = 1e-1,
+        tstop = 2e-1,
     )
 end
 

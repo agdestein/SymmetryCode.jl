@@ -172,7 +172,7 @@ function create_dns(setup; t_warmup, cfl, rng)
 end
 
 function create_data(setup; cfl, nstep, nsubstep, Δ)
-    (; visc, D, n_dns, n_les, backend, ou_radius, ou_energy, ou_time) = setup
+    (; visc, D, n_dns, n_les, backend, ou_radius, ou_energy, ou_time, outdir) = setup
     g_dns = Grid{D}(; setup.l, n = n_dns, backend)
     g_les = Grid{D}(; setup.l, n = n_les, backend)
     c_dns = getcache(g_dns)
@@ -185,7 +185,7 @@ function create_data(setup; cfl, nstep, nsubstep, Δ)
     inputs = fill(map(Array, fu), 0)
     outputs = fill(map(Array, fσu), 0)
 
-    u = load(joinpath(outdir, "dns.jld2"), "u")
+    u = load(joinpath(outdir, "dns.jld2"), "u") |> adapt(backend)
 
     # OU stuff
     ou = ouforcer(g_dns, ou_radius)
@@ -1520,7 +1520,7 @@ function setup_turbulator()
     l = 1.0
     n_les = 64
     Δ = 4 * l / n_les
-    outdir = joinpath(@__DIR__, "..", "output", "turbulator") |> mkpath
+    outdir = joinpath(@__DIR__, "..", "output", "turbulator512") |> mkpath
     # plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
     plotdir = joinpath(outdir, "plots") |> mkpath
     (;
@@ -1530,7 +1530,7 @@ function setup_turbulator()
         visc = 1e-4,
         D = 3,
         l = 1.0,
-        n_dns = 256,
+        n_dns = 512,
         n_les,
         kpeak = 5,
         Δ,
@@ -1901,7 +1901,9 @@ function plot_spectrum_dns(setup)
         escale = stat.diss^(-1 / 3) * stat.l_kol^(-3)
     elseif D == 3
         k = [3, g_dns.n / 8]
-        kolmo = @. 6.5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
+        # C = 0.65
+        C = 0.4
+        kolmo = @. C * stat.diss^(2 / 3) * k^(-5 / 3)
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
         # escale = 1
     end
