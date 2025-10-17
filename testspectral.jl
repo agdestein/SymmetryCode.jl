@@ -116,7 +116,7 @@ m_tbnn, train_tbnn = let
     ps, losses_train, losses_valid, timing =
         load(file, "ps", "losses_train", "losses_valid", "timing")
     ps = ps |> adapt(setup.backend)
-    chain = tbnn(net, ps, st, g)
+    chain = tbnn(net, ps, st, setup.Δ, g)
     chain, (; losses_train, losses_valid, timing)
 end;
 
@@ -149,7 +149,7 @@ m_equi, train_equi = let
     ps = ps |> adapt(setup.backend)
     ps |> cpu_device() |> ComponentArray |> length |> display
     (; net, project) = net_stuff
-    chain = fullchain(setup, net, project, ps, st)
+    chain = fullchain(setup, net, project, ps, st, setup.Δ)
     chain, (; losses_train, losses_valid, timing)
 end;
 
@@ -187,7 +187,7 @@ m_conv, train_conv = let
     ps = ps |> adapt(setup.backend)
     ps |> cpu_device() |> ComponentArray |> length |> display
     (; net, project) = net_stuff
-    chain = fullchain(setup, net, project, ps, st)
+    chain = fullchain(setup, net, project, ps, st, setup.Δ)
     chain, (; losses_train, losses_valid, timing)
 end;
 
@@ -255,6 +255,7 @@ let
         files = upostfiles,
         cfl = 0.35,
         tstop = 2e-1,
+        dodns = false,
     )
 end
 
@@ -356,6 +357,7 @@ let
     models = (;
         nomo = m_nomo,
         smag = m_smag,
+        vers = m_vers,
         clar = m_clar,
         tbnn = m_tbnn,
         equi = m_equi,
@@ -479,6 +481,7 @@ let
     models = (;
         # nomo = m_nomo,
         smag = m_smag,
+        vers = m_vers,
         clar = m_clar,
         tbnn = m_tbnn,
         equi = m_equi,

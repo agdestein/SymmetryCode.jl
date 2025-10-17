@@ -299,7 +299,7 @@ function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, 
 end
 
 function create_dataloader(setup, data; batchsize)
-    (; D) = setup
+    (; D, Δ) = setup
     g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
     G = tensorfield_nonsym(g)
     u = vectorfield(g)
@@ -307,6 +307,7 @@ function create_dataloader(setup, data; batchsize)
     GG = spacetensorfield_nonsym(g)
     ττ = spacetensorfield(g)
     plan = plan_rfft(GG.xx)
+    T = typeof(setup.l)
     snaps = map(zip(data...)) do (ucpu, τcpu)
         foreach(copyto!, u, ucpu)
         apply!(vectorgradient!, g, (G, u, g))
@@ -321,9 +322,12 @@ function create_dataloader(setup, data; batchsize)
             ldiv!(ττ, plan, τ) # Inverse RFFT
             ττ .*= g.n^D # FFT factor
         end
-        x = stack(GG) |> cpu_device()
-        y = stack(ττ) |> cpu_device()
-        x, y
+        x = stack(GG)
+        y = stack(ττ)
+        A2 = sum(abs2, x; dims = D + 1) # VGT squared norm
+        @. x ./= (sqrt(A2) + eps(T)) # Normalize input gradient
+        @. y ./= (Δ^2 * A2 + eps(T)) # Normalize output stress
+        (x, y) |> cpu_device()
     end
     x = stack(first, snaps)
     y = stack(last, snaps)
@@ -545,15 +549,19 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
     (; ps, st, losses_train, losses_valid)
 end
 
-function fullchain(setup, net, project, ps, st)
+function fullchain(setup, net, project, ps, st, Δ)
     (; D) = setup
     ps = project(ps)
     function model(x)
-        x = stack(x)
+        x = stack(x) # Convert named tuple to array
+        T = eltype(x)
         s = size(x)
         x = reshape(x, s..., 1) # Add sample dimension
-        y = net(x, ps, st) |> first
-        reshape(y, s[1:D]..., :)
+        A2 = sum(abs2, x; dims = D + 1) # VGT squared norm
+        @. x /= (sqrt(A2) + eps(T)) # Normalize input gradient
+        y = net(x, ps, st) |> first # Apply model
+        @. y *= Δ^2 * A2 # Scale output with dimensional stuff
+        reshape(y, s[1:D]..., :) # Remove sanple dimension
     end
 end
 
@@ -580,7 +588,7 @@ function les!(du, u, grid, cache; model, visc)
     apply!(tensordivergence!, grid, (du, σ, grid))
 end
 
-function inference_post(; u_dns, setup, models, files, cfl, tstop)
+function inference_post(; u_dns, setup, models, files, cfl, tstop, dodns)
     (; D, l, n_dns, n_les, backend, visc, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
@@ -593,25 +601,27 @@ function inference_post(; u_dns, setup, models, files, cfl, tstop)
         isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_les, Δ, g_les))
     end
 
-    # Solve DNS
-    @info "Solving DNS"
-    t = time()
-    solve_les!(u_dns; grid = g_dns, visc, model = nothing, tstop, cfl)
-    t = time() - t
+    if dodns
+        # Solve DNS
+        @info "Solving DNS"
+        t = time()
+        solve_les!(u_dns; grid = g_dns, visc, model = nothing, tstop, cfl)
+        t = time() - t
 
-    # Compute final filtered DNS
-    @info "Filtering final DNS"
-    u_ref = vectorfield(g_les)
-    for (u_ref, u_dns) in zip(u_ref, u_dns)
-        apply!(cutoff!, g_les, (u_ref, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, g_les))
+        # Compute final filtered DNS
+        @info "Filtering final DNS"
+        u_ref = vectorfield(g_les)
+        for (u_ref, u_dns) in zip(u_ref, u_dns)
+            apply!(cutoff!, g_les, (u_ref, u_dns))
+            isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, g_les))
+        end
+
+        # Save DNS results and free up memory
+        jldsave(files.dns; u = u_dns |> cpu_device(), timing = t)
+        jldsave(files.ref; u = u_ref |> cpu_device(), timing = t)
+        u_dns = nothing
+        u_ref = nothing
     end
-
-    # Save DNS results and free up memory
-    jldsave(files.dns; u = u_dns |> cpu_device(), timing = t)
-    jldsave(files.ref; u = u_ref |> cpu_device(), timing = t)
-    u_dns = nothing
-    u_ref = nothing
 
     # Solve LES for each model
     for key in keys(models)
@@ -747,7 +757,7 @@ end
 "Compute deviatoric part of a tensor."
 @inline deviator(σ) = σ - tr(σ) / 3 * one(σ)
 
-@kernel function tb_kernel!(invariants, basis, grads, g::Grid{2})
+@kernel function tb_kernel!(invariants, basis, grads, Δ, g::Grid{2})
     nb, ni = nbasis(g), ninvariant(g)
     I = @index(Global, Cartesian)
     Gxx, Gyx, Gxy, Gyy = grads.xx[I], grads.yx[I], grads.xy[I], grads.yy[I]
@@ -763,13 +773,13 @@ end
         # Convert 2x2 tensor b to symmetric tensor [xx, yy, xy]
         # Also premultiply by |G|^2, since the output tensor is
         # |G|^2 * coeffs * basis
-        basis[I, 1, ibas] = b[ibas][1, 1] * sqrt(G2)
-        basis[I, 2, ibas] = b[ibas][2, 2] * sqrt(G2)
-        basis[I, 3, ibas] = b[ibas][1, 2] * sqrt(G2)
+        basis[I, 1, ibas] = b[ibas][1, 1] * G2 * Δ^2
+        basis[I, 2, ibas] = b[ibas][2, 2] * G2 * Δ^2
+        basis[I, 3, ibas] = b[ibas][1, 2] * G2 * Δ^2
     end
 end
 
-@kernel function tb_kernel!(invariants, basis, grads, g::Grid{3})
+@kernel function tb_kernel!(invariants, basis, grads, Δ, g::Grid{3})
     ni, nb = ninvariant(g), nbasis(g)
     I = @index(Global, Cartesian)
     Gxx, Gxy, Gxz = grads.xx[I], grads.xy[I], grads.xz[I]
@@ -785,16 +795,16 @@ end
     end
     for ibas in Base.OneTo(nb)
         # Convert 3x3 tensor b to flattened symmetric tensor [xx, yy, zz, xy, yz, zx]
-        basis[I, 1, ibas] = b[ibas][1, 1] * G2
-        basis[I, 2, ibas] = b[ibas][2, 2] * G2
-        basis[I, 3, ibas] = b[ibas][3, 3] * G2
-        basis[I, 4, ibas] = b[ibas][1, 2] * G2
-        basis[I, 5, ibas] = b[ibas][2, 3] * G2
-        basis[I, 6, ibas] = b[ibas][3, 1] * G2
+        basis[I, 1, ibas] = b[ibas][1, 1] * G2 * Δ^2
+        basis[I, 2, ibas] = b[ibas][2, 2] * G2 * Δ^2
+        basis[I, 3, ibas] = b[ibas][3, 3] * G2 * Δ^2
+        basis[I, 4, ibas] = b[ibas][1, 2] * G2 * Δ^2
+        basis[I, 5, ibas] = b[ibas][2, 3] * G2 * Δ^2
+        basis[I, 6, ibas] = b[ibas][3, 1] * G2 * Δ^2
     end
 end
 
-function build_tensorbasis(grad, g)
+function build_tensorbasis(grad, g, Δ)
     T = typeof(g.l)
     nx, nb, ni, nt = space_ndrange(g), nbasis(g), ninvariant(g), tensordim(g)
     basis = KernelAbstractions.zeros(g.backend, T, nx..., nt, nb)
@@ -817,14 +827,14 @@ function getgradient(u, g)
     GG
 end
 
-tbnn(net, ps, st, g) = function model(G)
+tbnn(net, ps, st, Δ, g) = function model(G)
     D = dim(g)
     nx = space_ndrange(g)
     nt = tensordim(g)
     nb = nbasis(g)
 
     # Compute invariants and basis tensors
-    invariants, basis = build_tensorbasis(G, g)
+    invariants, basis = build_tensorbasis(G, g, Δ)
 
     # Compute coefficients
     invariants = reshape(invariants, size(invariants)..., 1) # One sample
@@ -839,7 +849,7 @@ tbnn(net, ps, st, g) = function model(G)
 end
 
 function create_dataloader_tbnn(setup, data; batchsize, rng)
-    (; D) = setup
+    (; D, Δ) = setup
     g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
     T = typeof(g.l)
     nx = space_ndrange(g)
@@ -856,7 +866,7 @@ function create_dataloader_tbnn(setup, data; batchsize, rng)
             ldiv!(ττ, plan, τ) # Inverse RFFT
             ττ .*= g.n^D # FFT factor
         end
-        i, b = build_tensorbasis(G, g)
+        i, b = build_tensorbasis(G, g, Δ)
         i = i |> cpu_device()
         b = reshape(b, nx..., :) |> cpu_device()
         x = cat(i, b; dims = D + 1)
@@ -1372,11 +1382,12 @@ function plot_velocities(setup, u, comp)
         dns = "DNS",
         ref = "Filtered DNS",
         nomo = "No-model",
-        tbnn = "TBNN",
-        conv = "Conv",
-        equi = "G-Conv",
         smag = "Smagorinsky",
+        vers = "Verstappen",
         clar = "Clark",
+        tbnn = "TBNN",
+        equi = "G-Conv",
+        conv = "Conv",
     )
     for (k, key) in u |> keys |> enumerate
         title = labels[key]
@@ -1621,7 +1632,8 @@ function compute_qr(velocities, setup)
         rvec = r |> cpu_device() |> vec
         qvec .*= t_kol^2
         rvec .*= t_kol^3
-        k => kde((rvec, qvec); npoints = (1000, 1000))
+        args = k == :dns ? (; npoints = (1000, 1000)) : (;)
+        k => kde((rvec, qvec); args...) #; npoints = (1000, 1000))
     end
     NamedTuple(dens)
 end
@@ -1680,6 +1692,7 @@ function plot_qr(setup, qr)
             ran = 1e-5, 1e1
             ncat = 7
         end
+        # @show extrema(qr[key].density)
         isref = key == :dns || key == :ref
         isref || contour!(
             ax,
@@ -1832,11 +1845,12 @@ function plot_sfs(setup, u_dns, models)
     labels = (;
         ref = "Reference",
         nomo = "No-model",
-        tbnn = "TBNN",
-        conv = "Conv",
-        equi = "G-Conv",
         smag = "Smagorinsky",
+        vers = "Verstappen",
         clar = "Clark",
+        tbnn = "TBNN",
+        equi = "G-Conv",
+        conv = "Conv",
     )
     fig = Figure(; size = (800, 550))
     for (i, comp) in enumerate([:xx, :xy, :zx, :zz])
@@ -1939,7 +1953,6 @@ function plot_spectrum_dns(setup)
     save("$(plotdir)/spectrum-dns.pdf", fig; backend = CairoMakie)
     fig
 end
-
 
 export vectorfield_to_svector,
     svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield

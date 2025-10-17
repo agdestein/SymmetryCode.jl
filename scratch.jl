@@ -66,29 +66,6 @@ let
     fig
 end
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
 setup = let
     l = 1.0
     n_les = 256
