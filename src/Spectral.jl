@@ -1633,7 +1633,7 @@ function compute_qr(velocities, setup)
         qvec .*= t_kol^2
         rvec .*= t_kol^3
         args = k == :dns ? (; npoints = (1000, 1000)) : (;)
-        k => kde((rvec, qvec); args...) #; npoints = (1000, 1000))
+        k => kde((rvec, qvec); args...)
     end
     NamedTuple(dens)
 end
@@ -1658,7 +1658,6 @@ function plot_qr(setup, qr)
     colorvec = Makie.wong_colors()
     lescolor = 2
     colors = (;
-        # line = colorvec[4],
         line = :red,
         dns = colorvec[3],
         ref = colorvec[1],
@@ -1700,9 +1699,6 @@ function plot_qr(setup, qr)
             qr.ref.y,
             max.(qr.ref.density, 1e-20);
             levels = logrange(ran..., ncat),
-            # colorrange = ran,
-            # colorscale = log10,
-            # colormap = :watermelon,
             color = colors.ref,
         )
         c = contour!(
@@ -1711,9 +1707,6 @@ function plot_qr(setup, qr)
             qr[key].y,
             max.(qr[key].density, 1e-20);
             levels = logrange(ran..., ncat),
-            # colorrange = ran,
-            # colorscale = log10,
-            # colormap = :watermelon,
             color = colors[key],
         )
         qtest = range(-10, 0, 200)
