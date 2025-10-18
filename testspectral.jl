@@ -84,11 +84,18 @@ m_tbnn, train_tbnn = let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     kern = ntuple(Returns(1), setup.D)
     net = Chain(
-        Conv(kern, Spectral.ninvariant(g) => 16, gelu),
-        Conv(kern, 16 => 32, gelu),
-        Conv(kern, 32 => 64, gelu),
-        Conv(kern, 64 => Spectral.nbasis(g); use_bias = false),
-    ) # 3_200 parameters
+        Conv(kern, Spectral.ninvariant(g) => 64, gelu),
+        Conv(kern, 64 => 64, gelu),
+        Conv(kern, 64 => 128, gelu),
+        Conv(kern, 128 => Spectral.nbasis(g); use_bias = false),
+    ) # 13_888 parameters
+    # net = Chain(
+    #     Conv(kern, Spectral.ninvariant(g) => 16, gelu),
+    #     Conv(kern, 16 => 32, gelu),
+    #     Conv(kern, 32 => 64, gelu),
+    #     Conv(kern, 64 => Spectral.nbasis(g); use_bias = false),
+    # ) # 3_200 parameters
+    net |> display
     ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
     for l in ps
         l.weight .*= 0.1
@@ -102,10 +109,10 @@ m_tbnn, train_tbnn = let
             dataloader = create_dataloader_tbnn(
                 setup,
                 data;
-                batchsize = 10,
+                batchsize = 20,
                 rng = Xoshiro(0),
             ),
-            nepoch = 5,
+            nepoch = 10,
             learning_rate = 1e-3,
             net_stuff = (; net, ps, st),
         )
@@ -124,8 +131,8 @@ m_equi, train_equi = let
     net_stuff = equivariant_net(
         setup,
         # [12, 16, 16, 24], # 40_328 actual params
-        # [8, 8, 8, 16], # 12_544 actual params
-        [4, 4, 4, 8], # 3_200 actual params
+        [8, 8, 8, 16], # 12_544 actual params
+        # [4, 4, 4, 8], # 3_200 actual params
     )
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-equi.jld2")
@@ -134,7 +141,7 @@ m_equi, train_equi = let
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
             setup,
-            dataloader = create_dataloader(setup, data; batchsize = 10),
+            dataloader = create_dataloader(setup, data; batchsize = 20),
             nepoch = 10,
             learning_rate = 1e-3,
             net_stuff,
@@ -157,8 +164,8 @@ m_conv, train_conv = let
     net_stuff = cnn(
         setup,
         # [48, 128, 128, 128]; # 40_550 parameters
-        # [48, 64, 64, 64]; # 12_326 parameters
-        [16, 32, 64]; # 3_200 parameters
+        [48, 64, 64, 64]; # 12_326 parameters
+        # [16, 32, 64]; # 3_200 parameters
         same_as_equi = false,
     )
     for ps in net_stuff.ps
@@ -172,7 +179,7 @@ m_conv, train_conv = let
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
             setup,
-            dataloader = create_dataloader(setup, data; batchsize = 10),
+            dataloader = create_dataloader(setup, data; batchsize = 20),
             nepoch = 10,
             learning_rate = 1e-3,
             net_stuff,
@@ -254,7 +261,7 @@ let
         models,
         files = upostfiles,
         cfl = 0.35,
-        tstop = 2e-1,
+        tstop = 1e-1,
         dodns = false,
     )
 end
@@ -291,8 +298,7 @@ let
         conv = "Conv",
     )
     u_dns = u.dns
-    keys_les = filter(!=(:dns), keys(u))
-    u_les = (; map(k -> k => u[k], keys_les)...)
+    u_les = filter(!=(u.dns), u)
     D = dim(g_dns)
     stat = turbulence_statistics(u_dns |> adapt(backend), visc, g_dns)
     stat |> pairs |> display
@@ -319,6 +325,7 @@ let
     # lines!(ax, kscale * s.k, escale * s.s; label = "DNS")
     # lines!(kscale * k, escale * kolmo)
     for (key, val) in pairs(s_les)
+        key == :vers && continue
         lines!(ax, kscale * val.k, escale * val.s; label = labels[key])
     end
     # axislegend(ax; position = :lb)
@@ -342,6 +349,7 @@ let
     labels = (;
         ref = "Reference",
         smag = "Smagorinsky",
+        vers = "Verstappen",
         clar = "Clark",
         tbnn = "TBNN",
         equi = "G-Conv",
@@ -459,6 +467,7 @@ dissipation_errors = let
     models = (;
         nomo = m_nomo,
         smag = m_smag,
+        vers = m_vers,
         clar = m_clar,
         tbnn = m_tbnn,
         conv = m_conv,
@@ -472,7 +481,8 @@ dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 let
     # comp = :x
     comp = :z
-    fig = plot_velocities(setup, u, comp)
+    uplot = filter(!=(u.vers), u)
+    fig = plot_velocities(setup, uplot, comp)
     save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
     fig
 end
@@ -510,7 +520,8 @@ end
 qr = load_object(qr_file);
 
 let
-    fig = plot_qr(setup, qr)
+    # fig = plot_qr(setup, qr)
+    fig = plot_qr(setup, filter(!=(qr.vers), qr))
     save("$(setup.plotdir)/qr.pdf", fig; backend = CairoMakie)
     fig
 end

@@ -1671,7 +1671,7 @@ function plot_qr(setup, qr)
     )
     for (k, key) in qr |> keys |> enumerate
         title = labels[key]
-        j, i = CartesianIndices((5, 2))[k].I
+        j, i = CartesianIndices((4, 2))[k].I
         ax = Axis(
             fig[i, j];
             xlabelvisible = i == 2,
@@ -1691,7 +1691,7 @@ function plot_qr(setup, qr)
             ran = 1e-5, 1e1
             ncat = 7
         end
-        # @show extrema(qr[key].density)
+        # key => extrema(qr[key].density) |> display
         isref = key == :dns || key == :ref
         isref || contour!(
             ax,
