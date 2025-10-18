@@ -120,7 +120,7 @@ end
 function test_equivariant_dense(D)
     rng = Xoshiro(0)
     f = f64
-    (; permutations, signs, elements, mats, cayley) = group_stuff(D)
+    (; elements, mats) = group_stuff(D)
     (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
     nelement = length(elements)
     proj_lift = Dense(nelement * D^2 => nelement * D^2; use_bias = false)
@@ -212,18 +212,13 @@ function test_equivariant_dense(D)
     rnx = mat * nx * mat'
     nrx - rnx |> display
     nothing
-    # nx = net(reshape(Array(x), D^2, 1), ps, st)[1] |> x -> reshape(x, 48)
-    # nrx = net(reshape(Array(rx), D^2, 1), ps, st)[1] |> x -> reshape(x, 48)
-    # rnx = nx[invperm(cayley[i, :])]
-    # nrx - rnx |> display
-    # nothing
 end
 
 function test_equivariant_conv(D)
     rng = Xoshiro(0)
     f = f64
     nten = D^2
-    (; permutations, signs, elements, mats, cayley) = group_stuff(D)
+    (; elements, mats) = group_stuff(D)
     (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
     nreg = length(elements)
     proj_lift = Dense(nten * nreg => nten * nreg; use_bias = false)
@@ -315,18 +310,13 @@ function test_equivariant_conv(D)
     rnx = mat * nx * mat'
     nrx - rnx |> display
     nothing
-    # nx = net(reshape(Array(x), 1, nten, 1), ps, st)[1] |> x -> reshape(x, nreg)
-    # nrx = net(reshape(Array(rx), 1, nten, 1), ps, st)[1] |> x -> reshape(x, nreg)
-    # rnx = nx[cayley[i, :] |> invperm]
-    # nrx - rnx |> display
-    # nothing
 end
 
 function test_equivariant_conv_sparse(D)
     rng = Xoshiro(0)
     T, f = Float64, f64
     nten = D^2
-    (; permutations, signs, elements, mats, cayley) = group_stuff(D)
+    (; elements, mats) = group_stuff(D)
     (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
     nreg = length(elements)
     e_lift = eigen(r_lift / nreg; sortby = -).vectors[:, 1:nten]
@@ -547,7 +537,7 @@ function cnn(setup, nchan; same_as_equi)
     dev = adapt(backend)
     # dev = identity
     rng = Xoshiro(0)
-    T, f = Float64, f64
+    f = f64
     nt_nonsym = D^2
     nt = D == 2 ? 3 : 6
     (; elements) = group_stuff(D)

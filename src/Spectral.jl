@@ -426,7 +426,7 @@ function transform_vector(u, g, (p, s))
     u_sa = reverse(u_sa; dims)
     m = roto_reflection_matrix(p, s)
     ru_sa = map(u -> m * u, u_sa)
-    ru = if D == 2
+    if D == 2
         (; x = getindex.(ru_sa, 1), y = getindex.(ru_sa, 2))
     elseif D == 3
         (; x = getindex.(ru_sa, 1), y = getindex.(ru_sa, 2), z = getindex.(ru_sa, 3))
@@ -507,7 +507,7 @@ create_loss(project) = function loss(net, ps, st, (x, y))
 end
 
 function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
-    (; D, backend) = setup
+    (; backend) = setup
     (; net, ps, st) = net_stuff
     ps = deepcopy(ps)
     device = adapt(backend)
@@ -563,12 +563,12 @@ function fullchain(setup, net, project, ps, st, Δ)
         @. y *= Δ^2 * A2 # Scale output with dimensional stuff
         reshape(y, s[1:D]..., :) # Remove sanple dimension
     end
+    model
 end
 
 function les!(du, u, grid, cache; model, visc)
     D = dim(grid)
     (; plan, σ, vi_vj, v, G) = cache
-    nx = space_ndrange(grid)
     stress!(σ, vi_vj, v, u, plan, visc, grid)
     apply!(vectorgradient!, grid, (G, u, grid))
     x = map(G) do G
@@ -683,7 +683,7 @@ function get_errors(setup, u_les)
     k_les = filter(!=(:dns), k)
     k_les = filter(!=(:ref), k_les)
     u_ref = u_les.ref |> adapt(setup.backend)
-    errs = map(k_les) do key
+    map(k_les) do key
         u = u_les[key] |> adapt(setup.backend)
         err = norm(u - u_ref) / norm(u_ref)
         println(key => round(err; sigdigits = 4))
@@ -809,7 +809,7 @@ function build_tensorbasis(grad, g, Δ)
     nx, nb, ni, nt = space_ndrange(g), nbasis(g), ninvariant(g), tensordim(g)
     basis = KernelAbstractions.zeros(g.backend, T, nx..., nt, nb)
     invariants = KernelAbstractions.zeros(g.backend, T, nx..., ni)
-    apply!(tb_kernel!, g, (invariants, basis, grad, g); ndrange = nx)
+    apply!(tb_kernel!, g, (invariants, basis, grad, g, Δ); ndrange = nx)
     invariants, basis
 end
 
@@ -828,7 +828,6 @@ function getgradient(u, g)
 end
 
 tbnn(net, ps, st, Δ, g) = function model(G)
-    D = dim(g)
     nx = space_ndrange(g)
     nt = tensordim(g)
     nb = nbasis(g)
@@ -851,7 +850,6 @@ end
 function create_dataloader_tbnn(setup, data; batchsize, rng)
     (; D, Δ) = setup
     g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
-    T = typeof(g.l)
     nx = space_ndrange(g)
     u = vectorfield(g)
     τ = scalarfield(g)
@@ -916,7 +914,6 @@ end
 
 export getdissipation
 function getdissipation(g, u, m)
-    nx = space_ndrange(g)
     D = dim(g)
     G = getgradient(u, g)
     τ = m(G)
@@ -941,27 +938,17 @@ function test_equivariance_post(;
     grid,
     model,
     groupindex,
-    rng,
     tstop,
     cfl,
     dolog,
 )
-    T, D = typeof(setup.l), setup.D
-
     # Group element
-    (; elements, permutations, signs, mats) = group_stuff(setup.D)
+    (; elements, permutations, signs) = group_stuff(setup.D)
     ip, is = elements[groupindex]
     p, s = permutations[ip], signs[is]
-    # mats[groupindex] |> display
-    # mats[groupindex] |> det |> display
-    # error()
 
     # Initial conditions + rotated copy
     u = map(copy, ustart)
-    # u = randomfield(grid; rng = Xoshiro(123), kpeak = 5)
-    # foreach(u -> randn!(Xoshiro(123), u), u)
-    # apply!(project!, grid, (u, grid))
-    # foreach(u -> apply!(twothirds!, grid, (u, grid)), u)
     space_u = inverse_vector_fourier(u, grid)
     space_ru = transform_vector(space_u, grid, (p, s))
     ru = forward_vector_fourier(space_ru, grid)
@@ -1011,7 +998,7 @@ end
 
 export plot_densities
 function plot_densities(; u_dns, setup, models, labels, dolog)
-    (; plotdir, name, D, l, n_dns, n_les, backend, visc, Δ) = setup
+    (; plotdir, name, D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     u_ref = vectorfield(g_les)
@@ -1116,7 +1103,7 @@ function plot_densities(; u_dns, setup, models, labels, dolog)
 
     # XY-component
     ax_xy = Makie.Axis(fig[1, 2]; xlabel = "xy-component", yscale)
-    for (key, val) in pairs(τxy)
+    for val in τxy
         k = val |> vec |> Array |> kde
         lines!(ax_xy, k.x, k.density)
     end
@@ -1133,7 +1120,7 @@ function plot_densities(; u_dns, setup, models, labels, dolog)
 
     # Dissipation
     ax_diss = Makie.Axis(fig[1, 3]; xlabel = "Dissipation", yscale)
-    for (key, val) in pairs(diss)
+    for val in diss
         k = val |> vec |> Array |> kde
         lines!(ax_diss, k.x, k.density)
     end
@@ -1259,6 +1246,7 @@ function create_smagorinsky(CS, Δ, g)
         apply!(smagorinsky_kernel!, g, (τ, G, CS, Δ, g); ndrange = space_ndrange(g))
         τ
     end
+    smagorinsky
 end
 
 export create_verstappen
@@ -1270,11 +1258,12 @@ function create_verstappen(C, Δ, g)
         apply!(verstappen_kernel!, g, (τ, G, C, Δ, g); ndrange = space_ndrange(g))
         τ
     end
+    verstappen
 end
 
 export apriori_error
-function apriori_error(; u_dns, setup, models, plotdir)
-    (; D, l, n_dns, n_les, backend, visc, Δ) = setup
+function apriori_error(; u_dns, setup, models)
+    (; D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     u_ref = vectorfield(g_les)
@@ -1292,18 +1281,6 @@ function apriori_error(; u_dns, setup, models, plotdir)
     end
     τ = stack(τ)
     G = getgradient(u_ref, g_les)
-    if D == 2
-        S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
-    elseif D == 3
-        S = (;
-            G.xx,
-            G.yy,
-            G.zz,
-            xy = (G.xy .+ G.yx) ./ 2,
-            yz = (G.yz .+ G.zy) ./ 2,
-            zx = (G.zx .+ G.xz) ./ 2,
-        )
-    end
     errors = map(models) do m
         # Predict stress
         y = m(G)
@@ -1323,12 +1300,9 @@ function apriori_error(; u_dns, setup, models, plotdir)
 end
 
 export apriori_equivariance_error
-function apriori_equivariance_error(; u, setup, models, plotdir)
-    (; D, l, n_les, backend, visc) = setup
+function apriori_equivariance_error(; u, setup, models)
+    (; D, l, n_les, backend) = setup
     (; elements, permutations, signs) = group_stuff(D)
-    nelement = length(elements)
-    T = typeof(setup.l)
-    SM = SMatrix{D,D,T,D^2}
     g = Grid{D}(; l, n = n_les, backend)
     u_ref = u.ref |> adapt(backend)
     G = getgradient(u_ref, g)
@@ -1424,7 +1398,7 @@ end
 
 export get_dissipation_errors
 function get_dissipation_errors(; setup, u_dns, models)
-    (; D, l, n_dns, n_les, backend, visc, Δ) = setup
+    (; D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     ubar = vectorfield(g_les)
@@ -1472,7 +1446,6 @@ function get_dissipation_errors(; setup, u_dns, models)
         end
     end
     τ_all = (; ref = τ, τ_les...)
-    temp = scalarfield(g_les)
     diss = map(τ_all) do τ
         d = if D == 2
             @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
@@ -1482,26 +1455,9 @@ function get_dissipation_errors(; setup, u_dns, models)
                τ.zz * S.zz +
                2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
         end
-        # mul!(temp, plan, d)
-        # apply!(twothirds!, g_les, (temp, g_les))
-        # ldiv!(d, plan, temp)
         d
     end
-    leskeys = filter(!=(:ref), keys(diss))
-
-    # e = map(leskeys) do k
-    #     k => norm(diss[k] - diss.ref) / norm(diss.ref)
-    # end
-    # NamedTuple(e)
-
-    # map(mean, NamedTuple(diss))
-
-    e = map(median, NamedTuple(diss))
-
-    # e = map(leskeys) do k
-    #     k => (e[k] - e.ref) / norm(e.ref)
-    # end
-    # NamedTuple(e)
+    map(median, NamedTuple(diss))
 end
 
 export setup_laptop
@@ -1538,7 +1494,7 @@ function setup_turbulator()
         name = "turbulator",
         outdir,
         plotdir,
-        visc = 1e-4,
+        visc = 2e-4,
         D = 3,
         l = 1.0,
         n_dns = 512,
@@ -1596,7 +1552,7 @@ end
 
 export compute_qr
 function compute_qr(velocities, setup)
-    (; D, l, n_dns, n_les, backend, visc) = setup
+    (; D, l, n_dns, n_les, backend) = setup
     g = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     Ghat = scalarfield(g)
@@ -1640,10 +1596,8 @@ end
 
 export plot_qr
 function plot_qr(setup, qr)
-    (; D, l, n_dns, n_les, backend, name) = setup
+    (; name) = setup
     fig = Figure(; size = (800, 440))
-    g_dns = Grid{D}(; l, n = n_dns, backend)
-    g_les = Grid{D}(; l, n = n_les, backend)
     labels = (;
         dns = "DNS",
         ref = "Filtered DNS",
@@ -1701,7 +1655,7 @@ function plot_qr(setup, qr)
             levels = logrange(ran..., ncat),
             color = colors.ref,
         )
-        c = contour!(
+        contour!(
             ax,
             qr[key].x,
             qr[key].y,
@@ -1726,8 +1680,7 @@ function plot_qr(setup, qr)
 end
 
 export plot_equivariance_errors
-function plot_equivariance_errors(errs, setup)
-    (; dets) = group_stuff(setup.D)
+function plot_equivariance_errors(errs)
     fig = Figure(; size = (400, 340))
     ax = Axis(
         fig[1, 1];
@@ -1790,7 +1743,7 @@ end
 
 export plot_sfs
 function plot_sfs(setup, u_dns, models)
-    (; D, l, n_dns, n_les, backend, visc, Δ) = setup
+    (; D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     ubar = vectorfield(g_les)
@@ -1864,7 +1817,7 @@ function plot_sfs(setup, u_dns, models)
             )
             data = τ_all[key][comp]
             data = data[:, :, end]
-            im = image!(
+            image!(
                 ax,
                 data;
                 colormap = :seaborn_icefire_gradient,

@@ -1,8 +1,8 @@
-if false
-    include("src/SymmetryCode.jl")
-    using .SymmetryCode
-    using .SymmetryCode.Spectral
-end
+# if false
+#     include("src/SymmetryCode.jl")
+#     using .SymmetryCode
+#     using .SymmetryCode.Spectral
+# end
 
 using Adapt
 using CairoMakie
@@ -31,7 +31,7 @@ create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0))
 
 let
     times, energies = load("$(setup.outdir)/dns.jld2", "times", "energies")
-    fig, ax, l = lines(times, energies)
+    fig, _, _ = lines(times, energies)
     save(joinpath(setup.plotdir, "energy.pdf"), fig; backend = CairoMakie)
     fig
 end
@@ -60,9 +60,7 @@ Base.summarysize(data) * 1e-9
 
 m_nomo = let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    nx = space_ndrange(g)
-    nt = tensordim(g)
-    m_nomo(G) = fill!(stack(spacetensorfield(g)), 0)
+    m_nomo(_) = fill!(stack(spacetensorfield(g)), 0)
 end
 
 m_smag = create_smagorinsky(
@@ -302,7 +300,7 @@ let
     D = dim(g_dns)
     stat = turbulence_statistics(u_dns |> adapt(backend), visc, g_dns)
     stat |> pairs |> display
-    s = spectrum(u_dns |> adapt(backend), g_dns)
+    # s = spectrum(u_dns |> adapt(backend), g_dns)
     s_les = map(u -> spectrum(u |> adapt(backend), g_les), u_les)
     fig = Figure(; size = (400, 360))
     ax = Axis(
@@ -312,14 +310,14 @@ let
         xlabel = "Normalized wavenumber",
         ylabel = "Normalized spectrum",
     )
-    k = [2, g_dns.n / 8]
-    if D == 2
-        kolmo = @. 2e0 * stat.diss^(1 / 3) * k^(-3)
-        escale = stat.diss^(-2 / 3) * stat.l_kol^(-3)
-    elseif D == 3
-        kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
-        escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
-    end
+    # k = [2, g_dns.n / 8]
+    # if D == 2
+    #     kolmo = @. 2e0 * stat.diss^(1 / 3) * k^(-3)
+    #     escale = stat.diss^(-2 / 3) * stat.l_kol^(-3)
+    # elseif D == 3
+    #     kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
+    #     escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
+    # end
     kscale = stat.l_kol
     # kscale = 1
     # lines!(ax, kscale * s.k, escale * s.s; label = "DNS")
@@ -447,7 +445,7 @@ let
         (equi_errors_prior, "equi-errors-prior.pdf"),
         (equi_errors_post, "equi-errors-post.pdf"),
     ]
-        fig = plot_equivariance_errors(errs, setup)
+        fig = plot_equivariance_errors(errs)
         save("$(setup.plotdir)/$(name)", fig; backend = CairoMakie)
         display(fig)
     end
@@ -507,7 +505,7 @@ let
     (; D, l, n_dns, visc, backend) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    stat = turbulence_statistics(u, visc, g_dns)
+    turbulence_statistics(u, visc, g_dns)
 end |> pairs
 
 qr_file = joinpath(setup.outdir, "qr.jld2")
