@@ -19,6 +19,18 @@ using Statistics
 using ..SymmetryCode
 using Zygote
 
+getlabels() = (;
+    dns = "DNS",
+    ref = "Filtered DNS",
+    nomo = "No-model",
+    smag = "Smagorinsky",
+    vers = "Verstappen",
+    clar = "Clark",
+    tbnn = "TBNN",
+    equi = "G-Conv",
+    conv = "Conv",
+)
+
 @inline function cutoff_index(nbar, n, i, is1)
     imax = div(nbar, 2) + is1
     isneg = i > imax
@@ -932,16 +944,7 @@ function getdissipation(g, u, m)
 end
 
 export test_equivariance_post
-function test_equivariance_post(;
-    ustart,
-    setup,
-    grid,
-    model,
-    groupindex,
-    tstop,
-    cfl,
-    dolog,
-)
+function test_equivariance_post(; ustart, setup, grid, model, groupindex, tstop, cfl, dolog)
     # Group element
     (; elements, permutations, signs) = group_stuff(setup.D)
     ip, is = elements[groupindex]
@@ -997,7 +1000,7 @@ function test_equivariance_post(;
 end
 
 export plot_densities
-function plot_densities(; u_dns, setup, models, labels, dolog)
+function plot_densities(; u_dns, setup, models, dolog)
     (; plotdir, name, D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
@@ -1081,6 +1084,7 @@ function plot_densities(; u_dns, setup, models, labels, dolog)
     yscale = dolog ? log10 : identity
 
     fig = Figure(; size = (800, 300))
+    labels = getlabels()
 
     # XX-component
     ax_xx = Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density", yscale)
@@ -1352,17 +1356,7 @@ function plot_velocities(setup, u, comp)
     ui = scalarfield(g_dns)
     ui_space = spacescalarfield(g_dns)
     plan = plan_rfft(ui_space)
-    labels = (;
-        dns = "DNS",
-        ref = "Filtered DNS",
-        nomo = "No-model",
-        smag = "Smagorinsky",
-        vers = "Verstappen",
-        clar = "Clark",
-        tbnn = "TBNN",
-        equi = "G-Conv",
-        conv = "Conv",
-    )
+    labels = getlabels()
     for (k, key) in u |> keys |> enumerate
         title = labels[key]
         j, i = CartesianIndices((4, 2))[k].I
@@ -1598,17 +1592,7 @@ export plot_qr
 function plot_qr(setup, qr)
     (; name) = setup
     fig = Figure(; size = (800, 440))
-    labels = (;
-        dns = "DNS",
-        ref = "Filtered DNS",
-        nomo = "No-model",
-        smag = "Smagorinsky",
-        vers = "Verstappen",
-        clar = "Clark",
-        tbnn = "TBNN",
-        conv = "Conv",
-        equi = "G-Conv",
-    )
+    labels = getlabels()
     colorvec = Makie.wong_colors()
     lescolor = 2
     colors = (;
@@ -1699,14 +1683,7 @@ function plot_equivariance_errors(errs)
         equi = Cycled(5),
         conv = Cycled(6),
     )
-    labels = (;
-        nomo = "No-model",
-        smag = "Smagorinsky",
-        clar = "Clark",
-        tbnn = "TBNN",
-        equi = "G-Conv",
-        conv = "Conv",
-    )
+    labels = getlabels()
     markers = (;
         nomo = :utriangle,
         smag = :circle,
@@ -1788,16 +1765,7 @@ function plot_sfs(setup, u_dns, models)
         end |> cpu_device()
     end
     τ_all = (; ref = τ, τ_les...)
-    labels = (;
-        ref = "Reference",
-        nomo = "No-model",
-        smag = "Smagorinsky",
-        vers = "Verstappen",
-        clar = "Clark",
-        tbnn = "TBNN",
-        equi = "G-Conv",
-        conv = "Conv",
-    )
+    labels = getlabels()
     fig = Figure(; size = (800, 550))
     for (i, comp) in enumerate([:xx, :xy, :zx, :zz])
         for (j, key) in τ_all |> keys |> enumerate
@@ -1897,6 +1865,59 @@ function plot_spectrum_dns(setup)
     )
     rowgap!(fig.layout, 5)
     save("$(plotdir)/spectrum-dns.pdf", fig; backend = CairoMakie)
+    fig
+end
+
+export plot_spectrum_les
+function plot_spectrum_les(setup, u)
+    (; D, l, n_dns, n_les, backend, visc) = setup
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
+    labels = getlabels()
+    u_dns = u.dns
+    u_les = filter(!=(u.dns), u)
+    D = dim(g_dns)
+    stat = turbulence_statistics(u_dns |> adapt(backend), visc, g_dns)
+    stat |> pairs |> display
+    # s = spectrum(u_dns |> adapt(backend), g_dns)
+    s_les = map(u -> spectrum(u |> adapt(backend), g_les), u_les)
+    fig = Figure(; size = (400, 360))
+    ax = Axis(
+        fig[1, 1];
+        xscale = log10,
+        yscale = log10,
+        xlabel = "Normalized wavenumber",
+        ylabel = "Normalized spectrum",
+    )
+    k = [2, g_dns.n / 8]
+    if D == 2
+        kolmo = @. 2e0 * stat.diss^(1 / 3) * k^(-3)
+        escale = stat.diss^(-2 / 3) * stat.l_kol^(-3)
+    elseif D == 3
+        kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
+        escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
+    end
+    kscale = stat.l_kol
+    # kscale = 1
+    # lines!(ax, kscale * s.k, escale * s.s; label = "DNS")
+    # lines!(kscale * k, escale * kolmo)
+    for (key, val) in pairs(s_les)
+        key == :vers && continue
+        lines!(ax, kscale * val.k, escale * val.s; label = labels[key])
+    end
+    # axislegend(ax; position = :lb)
+    Legend(
+        fig[0, :],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 3,
+    )
+    rowgap!(fig.layout, 5)
+    # ylims!(1e-7, 1)
+    save("$(setup.plotdir)/spectrum-les.pdf", fig; backend = CairoMakie)
     fig
 end
 

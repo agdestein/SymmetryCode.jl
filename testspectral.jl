@@ -280,81 +280,12 @@ u = map(f -> load(f, "u"), upostfiles);
 get_errors(setup, u);
 
 # Plot LES spectrum
-let
-    (; D, l, n_dns, n_les, backend, visc) = setup
-    g_dns = Grid{D}(; l, n = n_dns, backend)
-    g_les = Grid{D}(; l, n = n_les, backend)
-    labels = (;
-        dns = "DNS",
-        ref = "Filtered DNS",
-        nomo = "No-model",
-        smag = "Smagorinsky",
-        vers = "Verstappen",
-        clar = "Clark",
-        tbnn = "TBNN",
-        equi = "G-Conv",
-        conv = "Conv",
-    )
-    u_dns = u.dns
-    u_les = filter(!=(u.dns), u)
-    D = dim(g_dns)
-    stat = turbulence_statistics(u_dns |> adapt(backend), visc, g_dns)
-    stat |> pairs |> display
-    # s = spectrum(u_dns |> adapt(backend), g_dns)
-    s_les = map(u -> spectrum(u |> adapt(backend), g_les), u_les)
-    fig = Figure(; size = (400, 360))
-    ax = Axis(
-        fig[1, 1];
-        xscale = log10,
-        yscale = log10,
-        xlabel = "Normalized wavenumber",
-        ylabel = "Normalized spectrum",
-    )
-    # k = [2, g_dns.n / 8]
-    # if D == 2
-    #     kolmo = @. 2e0 * stat.diss^(1 / 3) * k^(-3)
-    #     escale = stat.diss^(-2 / 3) * stat.l_kol^(-3)
-    # elseif D == 3
-    #     kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
-    #     escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
-    # end
-    kscale = stat.l_kol
-    # kscale = 1
-    # lines!(ax, kscale * s.k, escale * s.s; label = "DNS")
-    # lines!(kscale * k, escale * kolmo)
-    for (key, val) in pairs(s_les)
-        key == :vers && continue
-        lines!(ax, kscale * val.k, escale * val.s; label = labels[key])
-    end
-    # axislegend(ax; position = :lb)
-    Legend(
-        fig[0, :],
-        ax;
-        tellwidth = false,
-        tellheight = true,
-        framevisible = false,
-        horizontal = true,
-        nbanks = 3,
-    )
-    rowgap!(fig.layout, 5)
-    # ylims!(1e-7, 1)
-    save("$(setup.plotdir)/spectrum-les.pdf", fig; backend = CairoMakie)
-    fig
-end
+plot_spectrum_les(setup, u)
 
 let
     models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
-    labels = (;
-        ref = "Reference",
-        smag = "Smagorinsky",
-        vers = "Verstappen",
-        clar = "Clark",
-        tbnn = "TBNN",
-        equi = "G-Conv",
-        conv = "Conv",
-    )
     u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    plot_densities(; u_dns, setup, models, labels, dolog = true)
+    plot_densities(; u_dns, setup, models, dolog = true)
 end
 
 prediction_error_prior_file = joinpath(setup.outdir, "prediction-error-prior.jld2")
