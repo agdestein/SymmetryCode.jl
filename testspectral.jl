@@ -48,7 +48,6 @@ data, datatiming = let
             cfl = 0.35,
             nstep = setup.D == 2 ? 1000 : 30,
             nsubstep = 10,
-            setup.Δ,
         )
         t = time() - t
         jldsave(filename; data = d, timing = t)
@@ -162,7 +161,7 @@ m_conv, train_conv = let
     net_stuff = cnn(
         setup,
         # [48, 128, 128, 128]; # 40_550 parameters
-        [48, 64, 64, 64]; # 12_326 parameters
+        [48, 64, 64, 64]; # 12_320 parameters
         # [16, 32, 64]; # 3_200 parameters
         same_as_equi = false,
     )
@@ -260,20 +259,11 @@ let
         files = upostfiles,
         cfl = 0.35,
         tstop = 1e-1,
-        dodns = false,
+        dodns = true,
     )
 end
 
 map(f -> load(f, "timing"), upostfiles) |> t -> map(x -> round(x; digits = 1), t) |> pairs
-
-# :dns  => 24.9 22.0 
-# :ref  => 24.9 22.0 
-# :nomo => 0.9  0.2  
-# :smag => 0.7  0.2  
-# :clar => 0.5  0.2  
-# :tbnn => 2.3  2.0  
-# :equi => 37.1 34.7 
-# :conv => 1.8  1.3  
 
 u = map(f -> load(f, "u"), upostfiles);
 
@@ -301,7 +291,7 @@ let
         conv = m_conv,
     )
     u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    e = apriori_error(; u_dns, setup, models, setup.plotdir)
+    e = apriori_error(; u_dns, setup, models)
     save_object(prediction_error_prior_file, e)
 end
 
@@ -382,11 +372,6 @@ let
     end
 end
 
-let
-    s = group_stuff(3)
-    s.mats[43]
-end
-
 ##################################
 # Dissipation
 ##################################
@@ -420,7 +405,7 @@ let
     models = (;
         # nomo = m_nomo,
         smag = m_smag,
-        vers = m_vers,
+        # vers = m_vers,
         clar = m_clar,
         tbnn = m_tbnn,
         equi = m_equi,

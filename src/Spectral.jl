@@ -183,8 +183,8 @@ function create_dns(setup; t_warmup, cfl, rng)
     jldsave(file; u = u |> cpu_device(), times, energies)
 end
 
-function create_data(setup; cfl, nstep, nsubstep, Δ)
-    (; visc, D, n_dns, n_les, backend, ou_radius, ou_energy, ou_time, outdir) = setup
+function create_data(setup; cfl, nstep, nsubstep)
+    (; visc, D, n_dns, n_les, backend, ou_radius, ou_energy, ou_time, outdir, Δ) = setup
     g_dns = Grid{D}(; setup.l, n = n_dns, backend)
     g_les = Grid{D}(; setup.l, n = n_les, backend)
     c_dns = getcache(g_dns)
@@ -295,7 +295,7 @@ function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, 
     end
     nonlinearity!(σbar2, c_les.vi_vj, c_les.v, ubar, c_les.plan, g_les)
     foreach(i -> (τ[i] .= σbar1[i] .- σbar2[i]), 1:tensordim(g_dns))
-    # foreach(τ -> apply!(twothirds!, g_les, (τ, g_les)), τ)
+    foreach(τ -> apply!(twothirds!, g_les, (τ, g_les)), τ)
 
     # Make tensor trace-free
     if D == 2
@@ -513,7 +513,7 @@ end
 create_loss(project) = function loss(net, ps, st, (x, y))
     ps = project(ps)
     yhat = net(x, ps, st) |> first
-    # l = MSELoss()(yhat, y)
+    # l = MSELoss()(yhat, y) # (x, y) pair is already normalized
     l = sum(abs2, yhat - y) / sum(abs2, y)
     l, st, (;)
 end
@@ -578,10 +578,15 @@ function fullchain(setup, net, project, ps, st, Δ)
     model
 end
 
+"Compute LES right-hand side with closure model (put force in `du`)."
 function les!(du, u, grid, cache; model, visc)
     D = dim(grid)
     (; plan, σ, vi_vj, v, G) = cache
+
+    # Coarse DNS stress
     stress!(σ, vi_vj, v, u, plan, visc, grid)
+
+    # Closure model stress (in physical space)
     apply!(vectorgradient!, grid, (G, u, grid))
     x = map(G) do G
         apply!(twothirds!, grid, (G, grid))
@@ -592,9 +597,12 @@ function les!(du, u, grid, cache; model, visc)
     # x = stack(x)
     # x = reshape(x, size(x)..., 1)
     y = model(x)
+
+    # Add closure stress to existing stress (in spectral space)
     for (i, σ) in enumerate(σ)
+        # Use vi_vj and du.x as temp storage
         copyto!(vi_vj, selectdim(y, D + 1, i))
-        mul!(du.x, plan, vi_vj) # Use du.x as temp storage
+        mul!(du.x, plan, vi_vj)
         @. σ += du.x / grid.n^D # With FFT factor
     end
     apply!(tensordivergence!, grid, (du, σ, grid))
@@ -636,13 +644,23 @@ function inference_post(; u_dns, setup, models, files, cfl, tstop, dodns)
     end
 
     # Solve LES for each model
+    u_model = vectorfield(g_les)
     for key in keys(models)
         @info "Solving LES with $(key)"
         model = models[key]
-        u_model = map(copy, u_les)
+
+        # Do a short model warmup (so that compilation does not get included in timing)
+        twarm = 1e-6
+        foreach(copyto!, u_model, u_les)
+        solve_les!(u_model; grid = g_les, visc, model, tstop = twarm, cfl)
+
+        # Solve LES
+        foreach(copyto!, u_model, u_les)
         t = time()
         solve_les!(u_model; grid = g_les, visc, model, tstop, cfl)
         t = time() - t
+
+        # Save results
         jldsave(files[key]; u = u_model |> cpu_device(), timing = t)
     end
 end
@@ -703,11 +721,10 @@ function get_errors(setup, u_les)
     end
 end
 
-@inline nbasis(::Grid{2}) = 3 # Number of entries below
+@inline nbasis(::Grid{2}) = 2 # Number of entries below
 @inline getbasis(::Grid{2}, S, R) = (
-    one(S),
-    S,
-    S * R - R * S,
+    deviator(S),
+    deviator(S * R - R * S),
     # deviator(S * S),
     # deviator(R * R),
 )
@@ -719,21 +736,8 @@ end
 
 # New reduced basis:
 # https://arc.aiaa.org/doi/10.2514/6.2022-0595
-# @inline nbasis(::Grid{3}) = 8
-# @inline getbasis(::Grid{3}, S, R) = (
-#     one(S),
-#     S,
-#     S * S,
-#     R * R,
-#     S * R - R * S,
-#     R * S * R,
-#     R * S * S - S * S * R,
-#     R * S * R * R - R * R * S * R,
-# )
-
 @inline nbasis(::Grid{3}) = 7
 @inline getbasis(::Grid{3}, S, R) = (
-    # one(S),
     deviator(S),
     deviator(S * S),
     deviator(R * R),
@@ -773,46 +777,47 @@ end
     nb, ni = nbasis(g), ninvariant(g)
     I = @index(Global, Cartesian)
     Gxx, Gyx, Gxy, Gyy = grads.xx[I], grads.yx[I], grads.xy[I], grads.yy[I]
-    G = @SMatrix [Gxx Gxy; Gyx Gyy]
-    G2 = sum(abs2, G)
-    G = G / (sqrt(G2) + eps(eltype(G))) # Normalize gradient
-    S, R = (G + G') / 2, (G - G') / 2
+    A = @SMatrix [Gxx Gxy; Gyx Gyy]
+    A2 = sum(abs2, A)
+    A = A / (sqrt(A2) + eps(eltype(A))) # Normalize gradient
+    S, R = (A + A') / 2, (A - A') / 2
     i, b = getinvariants(g, S, R), getbasis(g, S, R)
     for iinv in Base.OneTo(ni)
         invariants[I, iinv] = i[iinv]
     end
     for ibas in Base.OneTo(nb)
-        # Convert 2x2 tensor b to symmetric tensor [xx, yy, xy]
-        # Also premultiply by |G|^2, since the output tensor is
-        # |G|^2 * coeffs * basis
-        basis[I, 1, ibas] = b[ibas][1, 1] * G2 * Δ^2
-        basis[I, 2, ibas] = b[ibas][2, 2] * G2 * Δ^2
-        basis[I, 3, ibas] = b[ibas][1, 2] * G2 * Δ^2
+        # Convert symmetric 2x2 tensor b to
+        # flattened symmetric tensor [xx, yy, xy].
+        # Also premultiply by Δ^2 * |A|^2, since the output tensor is
+        # Δ^2 * |A|^2 * coeffs * basis
+        basis[I, 1, ibas] = b[ibas][1, 1] * A2 * Δ^2
+        basis[I, 2, ibas] = b[ibas][2, 2] * A2 * Δ^2
+        basis[I, 3, ibas] = b[ibas][1, 2] * A2 * Δ^2
     end
 end
 
 @kernel function tb_kernel!(invariants, basis, grads, Δ, g::Grid{3})
     ni, nb = ninvariant(g), nbasis(g)
     I = @index(Global, Cartesian)
-    Gxx, Gxy, Gxz = grads.xx[I], grads.xy[I], grads.xz[I]
-    Gyx, Gyy, Gyz = grads.yx[I], grads.yy[I], grads.yz[I]
-    Gzx, Gzy, Gzz = grads.zx[I], grads.zy[I], grads.zz[I]
-    G = @SMatrix [Gxx Gxy Gxz; Gyx Gyy Gyz; Gzx Gzy Gzz]
-    G2 = sum(abs2, G)
-    G = G / (sqrt(G2) + eps(eltype(G))) # Normalize gradient
-    S, R = (G + G') / 2, (G - G') / 2
+    Axx, Axy, Axz = grads.xx[I], grads.xy[I], grads.xz[I]
+    Ayx, Ayy, Ayz = grads.yx[I], grads.yy[I], grads.yz[I]
+    Azx, Azy, Azz = grads.zx[I], grads.zy[I], grads.zz[I]
+    A = @SMatrix [Axx Axy Axz; Ayx Ayy Ayz; Azx Azy Azz]
+    A2 = sum(abs2, A)
+    A = A / (sqrt(A2) + eps(eltype(A))) # Normalize gradient
+    S, R = (A + A') / 2, (A - A') / 2
     i, b = getinvariants(g, S, R), getbasis(g, S, R)
     for iinv in Base.OneTo(ni)
         invariants[I, iinv] = i[iinv]
     end
     for ibas in Base.OneTo(nb)
-        # Convert 3x3 tensor b to flattened symmetric tensor [xx, yy, zz, xy, yz, zx]
-        basis[I, 1, ibas] = b[ibas][1, 1] * G2 * Δ^2
-        basis[I, 2, ibas] = b[ibas][2, 2] * G2 * Δ^2
-        basis[I, 3, ibas] = b[ibas][3, 3] * G2 * Δ^2
-        basis[I, 4, ibas] = b[ibas][1, 2] * G2 * Δ^2
-        basis[I, 5, ibas] = b[ibas][2, 3] * G2 * Δ^2
-        basis[I, 6, ibas] = b[ibas][3, 1] * G2 * Δ^2
+        # Convert symmetric 3x3 tensor b to flattened symmetric tensor [xx, yy, zz, xy, yz, zx]
+        basis[I, 1, ibas] = b[ibas][1, 1] * A2 * Δ^2
+        basis[I, 2, ibas] = b[ibas][2, 2] * A2 * Δ^2
+        basis[I, 3, ibas] = b[ibas][3, 3] * A2 * Δ^2
+        basis[I, 4, ibas] = b[ibas][1, 2] * A2 * Δ^2
+        basis[I, 5, ibas] = b[ibas][2, 3] * A2 * Δ^2
+        basis[I, 6, ibas] = b[ibas][3, 1] * A2 * Δ^2
     end
 end
 
@@ -821,31 +826,31 @@ function build_tensorbasis(grad, g, Δ)
     nx, nb, ni, nt = space_ndrange(g), nbasis(g), ninvariant(g), tensordim(g)
     basis = KernelAbstractions.zeros(g.backend, T, nx..., nt, nb)
     invariants = KernelAbstractions.zeros(g.backend, T, nx..., ni)
-    apply!(tb_kernel!, g, (invariants, basis, grad, g, Δ); ndrange = nx)
+    apply!(tb_kernel!, g, (invariants, basis, grad, Δ, g); ndrange = nx)
     invariants, basis
 end
 
 function getgradient(u, g)
     D = dim(g)
-    G = tensorfield_nonsym(g)
-    GG = spacetensorfield_nonsym(g)
-    apply!(vectorgradient!, g, (G, u, g))
-    plan = plan_rfft(GG.xx)
-    for (GG, G) in zip(GG, G)
-        apply!(twothirds!, g, (G, g))
-        ldiv!(GG, plan, G) # Inverse RFFT
-        GG .*= g.n^D # FFT factor
+    A = tensorfield_nonsym(g)
+    AA = spacetensorfield_nonsym(g)
+    apply!(vectorgradient!, g, (A, u, g))
+    plan = plan_rfft(AA.xx)
+    for (AA, A) in zip(AA, A)
+        apply!(twothirds!, g, (A, g))
+        ldiv!(AA, plan, A) # Inverse RFFT
+        AA .*= g.n^D # FFT factor
     end
-    GG
+    AA
 end
 
-tbnn(net, ps, st, Δ, g) = function model(G)
+tbnn(net, ps, st, Δ, g) = function model(A)
     nx = space_ndrange(g)
     nt = tensordim(g)
     nb = nbasis(g)
 
     # Compute invariants and basis tensors
-    invariants, basis = build_tensorbasis(G, g, Δ)
+    invariants, basis = build_tensorbasis(A, g, Δ)
 
     # Compute coefficients
     invariants = reshape(invariants, size(invariants)..., 1) # One sample
@@ -1013,7 +1018,7 @@ function plot_densities(; u_dns, setup, models, dolog)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
-        # apply!(twothirds!, g_les, (τhat, g_les))
+        apply!(twothirds!, g_les, (τhat, g_les))
         ldiv!(τ, plan, τhat)
         τ .*= g_les.n^D
     end
@@ -1061,12 +1066,12 @@ function plot_densities(; u_dns, setup, models, dolog)
         τ[2] .-= traces
         τ[3] .-= traces
     end
-    for S in S
-        plan = plan_rfft(S)
-        temp = plan * S
-        apply!(twothirds!, g_les, (temp, g_les))
-        ldiv!(S, plan, temp)
-    end
+    # for S in S
+    #     plan = plan_rfft(S)
+    #     temp = plan * S
+    #     apply!(twothirds!, g_les, (temp, g_les))
+    #     ldiv!(S, plan, temp)
+    # end
     τxx = map(τ -> τ.xx, τ_all)
     τxy = map(τ -> τ.xy, τ_all)
     diss = map(τ_all) do τ
@@ -1270,21 +1275,26 @@ function apriori_error(; u_dns, setup, models)
     (; D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
+
+    # Inputs
     u_ref = vectorfield(g_les)
     for (u_ref, u_dns) in zip(u_ref, u_dns)
         apply!(cutoff!, g_les, (u_ref, u_dns))
         isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, g_les))
     end
+    G = getgradient(u_ref, g_les)
+
+    # Outputs
     τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
-        # apply!(twothirds!, g_les, (τhat, g_les))
+        apply!(twothirds!, g_les, (τhat, g_les))
         ldiv!(τ, plan, τhat)
         τ .*= g_les.n^dim(g_les)
     end
     τ = stack(τ)
-    G = getgradient(u_ref, g_les)
+
     errors = map(models) do m
         # Predict stress
         y = m(G)
@@ -1835,6 +1845,7 @@ function plot_spectrum_dns(setup)
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
         # escale = 1
     end
+    # escale = 1
     kscale = stat.l_kol / l
     span = [1, ou_radius] * kscale
     oucolor = Makie.wong_colors()[4]
