@@ -129,22 +129,29 @@ function dns_aid()
 end
 
 export create_dns
-function create_dns(setup; t_warmup, cfl, rng)
+function create_dns(setup; tstop, cfl, rng)
     (; outdir, l, visc, D, n_dns, backend, ou_radius, ou_time, ou_energy) = setup
     g = Grid{D}(; l, n = n_dns, backend)
+
+    @info "Creating initial conditions"
+    flush(stderr)
     u = randomfield(g; rng, kpeak = 5)
+    GC.gc(); CUDA.reclaim()
     cache = getcache(g)
 
     # OU stuff
     ou = ouforcer(g, ou_radius)
 
+    @info "Running DNS simulation"
+    flush(stderr)
     t = 0.0
     k = 0
     times = [t]
     energies = [energy(u)]
-    while t < t_warmup
+    walltime = time()
+    while t < tstop
         Δt = cfl * propose_timestep(u, g, visc, cache)
-        Δt = min(Δt, t_warmup - t)
+        Δt = min(Δt, tstop - t)
         t += Δt
         k += 1
 
@@ -175,12 +182,16 @@ function create_dns(setup; t_warmup, cfl, rng)
                 ],
                 ",\t",
             )
+            flush(stderr)
         end
     end
+    walltime = time() - walltime
 
     # Save results
     file = joinpath(outdir, "dns.jld2")
-    jldsave(file; u = u |> cpu_device(), times, energies)
+    @info "Saving final DNS snapshot to $(file)"
+    flush(stderr)
+    jldsave(file; u = u |> cpu_device(), times, energies, walltime)
 end
 
 function create_data(setup; cfl, nstep, nsubstep)
@@ -1519,9 +1530,10 @@ function setup_snellius()
     Δ = 4 * l / n_les
     (;
         name = "snellius",
-        outdir = mkpath("/projects/prjs1757/SymmetryOutput"),
+        # outdir = mkpath("/projects/prjs1757/SymmetryOutput"),
+        outdir = mkpath("/projects/prjs1757/SymmetryOutput2"),
         plotdir = joinpath(@__DIR__, "..", "output", "snellius") |> mkpath,
-        visc = 4e-5,
+        visc = 1e-4,
         D = 3,
         l = 1.0,
         n_dns = 810,
@@ -1636,7 +1648,7 @@ function plot_qr(setup, qr)
             ran = 1e-3, 1e2
             ncat = 6
         elseif name == "snellius"
-            ran = 1e-5, 1e1
+            ran = 1e-4, 1e1
             ncat = 7
         end
         # key => extrema(qr[key].density) |> display
@@ -1666,8 +1678,8 @@ function plot_qr(setup, qr)
             xlims!(ax, -1.5, 1.5)
             ylims!(ax, -3, 3)
         elseif name == "snellius"
-            xlims!(ax, -3.5, 3.5)
-            ylims!(ax, -4, 6)
+            xlims!(ax, -2.0, 2.0)
+            ylims!(ax, -3, 4)
         end
     end
     fig

@@ -20,28 +20,28 @@ using StaticArrays
 using Statistics
 using SymmetryCode
 using SymmetryCode.Spectral
-using WGLMakie
-lines([1, 2, 3])
+# using WGLMakie
+# lines([1, 2, 3])
 
 # setup = setup_laptop()
-setup = setup_turbulator()
-# setup = setup_snellius()
+# setup = setup_turbulator()
+setup = setup_snellius()
 
-create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0))
+# create_dns(setup; tstop = 0.5, cfl = 0.35, rng = Xoshiro(0))
 
-let
-    times, energies = load("$(setup.outdir)/dns.jld2", "times", "energies")
-    fig, _, _ = lines(times, energies)
-    save(joinpath(setup.plotdir, "energy.pdf"), fig; backend = CairoMakie)
-    fig
-end
+# let
+#     times, energies = load("$(setup.outdir)/dns.jld2", "times", "energies")
+#     fig, _, _ = lines(times, energies)
+#     save(joinpath(setup.plotdir, "energy.pdf"), fig; backend = CairoMakie)
+#     fig
+# end
 
-# Plot DNS spectrum
-plot_spectrum_dns(setup)
+# # Plot DNS spectrum
+# plot_spectrum_dns(setup)
 
 data, datatiming = let
     filename = joinpath(setup.outdir, "data.jld2")
-    if true
+    if false
         t = time()
         d = create_data(
             setup;
@@ -93,12 +93,15 @@ m_tbnn, train_tbnn = let
     #     Conv(kern, 64 => Spectral.nbasis(g); use_bias = false),
     # ) # 3_200 parameters
     net |> display
+    flush(stdout)
     ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
     for l in ps
         l.weight .*= 0.1
     end
     file = joinpath(setup.outdir, "ps-tbnn.jld2")
-    if true
+    if false
+        @info "Training TBNN"
+        flush(stderr)
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss_tbnn(g),
@@ -133,7 +136,9 @@ m_equi, train_equi = let
     )
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-equi.jld2")
-    if true
+    if false
+        @info "Training G-conv"
+        flush(stderr)
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
@@ -152,6 +157,7 @@ m_equi, train_equi = let
     # ps = net_stuff.ps
     ps = ps |> adapt(setup.backend)
     ps |> cpu_device() |> ComponentArray |> length |> display
+    flush(stdout)
     (; net, project) = net_stuff
     chain = fullchain(setup, net, project, ps, st, setup.Δ)
     chain, (; losses_train, losses_valid, timing)
@@ -171,7 +177,9 @@ m_conv, train_conv = let
     end
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-conv.jld2")
-    if true
+    if false
+        @info "Training Conv"
+        flush(stderr)
         t = time()
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
@@ -190,41 +198,43 @@ m_conv, train_conv = let
         load(file, "ps", "losses_train", "losses_valid", "timing")
     ps = ps |> adapt(setup.backend)
     ps |> cpu_device() |> ComponentArray |> length |> display
+    flush(stdout)
     (; net, project) = net_stuff
     chain = fullchain(setup, net, project, ps, st, setup.Δ)
     chain, (; losses_train, losses_valid, timing)
 end;
 
-let
-    fig = Figure(; size = (400, 340))
-    ax = Axis(
-        fig[1, 1];
-        # xscale = log10,
-        # yscale = log10,
-        xlabel = "Iteration",
-        ylabel = "Loss",
-    )
-    lines!(ax, train_tbnn.losses_valid; label = "TBNN")
-    lines!(ax, train_equi.losses_valid; label = "G-Conv")
-    lines!(ax, train_conv.losses_valid; label = "Conv")
-    Legend(
-        fig[0, 1],
-        ax;
-        tellwidth = false,
-        tellheight = true,
-        framevisible = false,
-        horizontal = true,
-        nbanks = 3,
-    )
-    rowgap!(fig.layout, 5)
-    save("$(setup.plotdir)/training.pdf", fig; backend = CairoMakie)
-    fig
-end
+# let
+#     fig = Figure(; size = (400, 340))
+#     ax = Axis(
+#         fig[1, 1];
+#         # xscale = log10,
+#         # yscale = log10,
+#         xlabel = "Iteration",
+#         ylabel = "Loss",
+#     )
+#     lines!(ax, train_tbnn.losses_valid; label = "TBNN")
+#     lines!(ax, train_equi.losses_valid; label = "G-Conv")
+#     lines!(ax, train_conv.losses_valid; label = "Conv")
+#     Legend(
+#         fig[0, 1],
+#         ax;
+#         tellwidth = false,
+#         tellheight = true,
+#         framevisible = false,
+#         horizontal = true,
+#         nbanks = 3,
+#     )
+#     rowgap!(fig.layout, 5)
+#     save("$(setup.plotdir)/training.pdf", fig; backend = CairoMakie)
+#     fig
+# end
 
 map(
     t -> round(t; digits = 1),
     (; tbnn = train_tbnn.timing, conv = train_conv.timing, equi = train_equi.timing),
-) |> pairs
+) |> pairs |> display
+flush(stdout)
 
 upostfiles = map(
     name -> joinpath(setup.outdir, "u-post-$(name).jld2"),
@@ -241,29 +251,30 @@ upostfiles = map(
     ),
 )
 
-let
-    models = (;
-        nomo = m_nomo,
-        smag = m_smag,
-        vers = m_vers,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        equi = m_equi,
-        conv = m_conv,
-    )
-    u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    inference_post(;
-        u_dns,
-        setup,
-        models,
-        files = upostfiles,
-        cfl = 0.35,
-        tstop = 1e-1,
-        dodns = true,
-    )
-end
+# let
+#     models = (;
+#         nomo = m_nomo,
+#         smag = m_smag,
+#         vers = m_vers,
+#         clar = m_clar,
+#         tbnn = m_tbnn,
+#         equi = m_equi,
+#         conv = m_conv,
+#     )
+#     u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
+#     inference_post(;
+#         u_dns,
+#         setup,
+#         models,
+#         files = upostfiles,
+#         cfl = 0.35,
+#         tstop = 1e-1,
+#         dodns = true,
+#     )
+# end
 
-map(f -> load(f, "timing"), upostfiles) |> t -> map(x -> round(x; digits = 1), t) |> pairs
+map(f -> load(f, "timing"), upostfiles) |> t -> map(x -> round(x; digits = 1), t) |> pairs |> display
+flush(stdout)
 
 u = map(f -> load(f, "u"), upostfiles);
 
@@ -308,13 +319,14 @@ equi_errors_prior_file = joinpath(setup.outdir, "equi-errors-prior.jld2")
 
 let
     models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
-    errors = apriori_equivariance_error(; u, setup, models, setup.plotdir)
+    errors = apriori_equivariance_error(; u, setup, models)
     save_object(equi_errors_prior_file, errors)
 end
 
 equi_errors_prior = load_object(equi_errors_prior_file)
 
-equi_errors_prior |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
+equi_errors_prior |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs |> display
+flush(stdout)
 
 ##################################
 # A-posteriori equivariance errors
@@ -340,13 +352,13 @@ let
             @info "Computing equivariance error for $(key)"
             e = map(eachindex(elements)) do i
                 @info "Element $(i) of $(length(elements))"
+                flush(stderr)
                 test_equivariance_post(;
                     ustart,
                     setup,
                     grid,
                     model,
                     groupindex = i,
-                    rng = Xoshiro(123),
                     tstop = 1e-1,
                     cfl = 0.35,
                     dolog = false,
@@ -360,6 +372,7 @@ end
 equi_errors_post = load_object(equi_errors_post_file)
 
 equi_errors_post |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
+flush(stdout)
 
 let
     for (errs, name) in [
@@ -371,6 +384,10 @@ let
         display(fig)
     end
 end
+
+@info "Done."
+flush(stderr)
+exit()
 
 ##################################
 # Dissipation
@@ -394,11 +411,13 @@ dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
 let
     # comp = :x
-    comp = :z
-    uplot = filter(!=(u.vers), u)
-    fig = plot_velocities(setup, uplot, comp)
-    save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
-    fig
+    # comp = :z
+    for comp in [:z, :x]
+        uplot = filter(!=(u.vers), u)
+        fig = plot_velocities(setup, uplot, comp)
+        save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
+        fig
+    end
 end
 
 let
@@ -422,7 +441,8 @@ let
     g_dns = Grid{D}(; l, n = n_dns, backend)
     u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
     turbulence_statistics(u, visc, g_dns)
-end |> pairs
+end |> pairs |> display
+flush(stdout)
 
 qr_file = joinpath(setup.outdir, "qr.jld2")
 
