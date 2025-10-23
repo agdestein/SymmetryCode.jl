@@ -7,6 +7,7 @@ using FFTW
 using JLD2
 using KernelAbstractions
 using KernelDensity
+using LaTeXStrings
 using LinearAlgebra
 using Lux
 using Makie
@@ -67,14 +68,14 @@ end
 export gaussianfilter!
 @kernel function gaussianfilter!(u, Δ, g::Grid{2})
     I = @index(Global, Cartesian)
-    kx, ky = wavenumbers(g, I)
+    kx, ky = wavenumber_full(g, I)
     k2 = kx^2 + ky^2
     w = exp(-Δ^2 * k2 / 24)
     u[I] *= w
 end
 @kernel function gaussianfilter!(u, Δ, g::Grid{3})
     I = @index(Global, Cartesian)
-    kx, ky, kz = wavenumbers(g, I)
+    kx, ky, kz = wavenumber_full(g, I)
     k2 = kx^2 + ky^2 + kz^2
     w = exp(-Δ^2 * k2 / 24)
     u[I] *= w
@@ -136,7 +137,8 @@ function create_dns(setup; tstop, cfl, rng)
     @info "Creating initial conditions"
     flush(stderr)
     u = randomfield(g; rng, kpeak = 5)
-    GC.gc(); CUDA.reclaim()
+    GC.gc();
+    CUDA.reclaim()
     cache = getcache(g)
 
     # OU stuff
@@ -1835,14 +1837,17 @@ function plot_spectrum_dns(setup)
     D = dim(g_dns)
     stat = turbulence_statistics(u, visc, g_dns)
     @show stat.Re_tay
-    s_dns = spectrum(u, g_dns)
-    s_les = spectrum(ubar, g_les)
+    stuff_dns = Seneca.spectral_stuff(g_dns)
+    stuff_les = Seneca.spectral_stuff(g_les)
+    s_dns = spectrum(u, g_dns, stuff_dns)
+    s_les = spectrum(ubar, g_les, stuff_les)
     fig = Figure(; size = (400, 340))
     ax = Axis(
         fig[1, 1];
         xscale = log10,
         yscale = log10,
-        xlabel = "Normalized wavenumber",
+        xlabel = L"\kappa \eta",
+        xlabelsize = 20,
         ylabel = "Normalized spectrum",
     )
     if D == 2

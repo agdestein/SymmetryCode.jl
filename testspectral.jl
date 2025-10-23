@@ -20,12 +20,19 @@ using StaticArrays
 using Statistics
 using SymmetryCode
 using SymmetryCode.Spectral
-# using WGLMakie
-# lines([1, 2, 3])
+using WGLMakie
+lines([1, 2, 3])
 
 # setup = setup_laptop()
-# setup = setup_turbulator()
-setup = setup_snellius()
+setup = setup_turbulator()
+# setup = setup_snellius()
+
+let
+    (; Δ, l) = setup
+    i = 2
+    k = 2π * i / l
+    exp(-Δ^2 * k^2 / 24)
+end
 
 # create_dns(setup; tstop = 0.5, cfl = 0.35, rng = Xoshiro(0))
 
@@ -36,19 +43,22 @@ setup = setup_snellius()
 #     fig
 # end
 
-# # Plot DNS spectrum
-# plot_spectrum_dns(setup)
+set_theme!(;
+# fontsize = 18,
+# fonts = (;
+#     regular = "Dejavu",
+#     # regular = "Palatino",
+# ),
+)
+
+# Plot DNS spectrum
+plot_spectrum_dns(setup)
 
 data, datatiming = let
     filename = joinpath(setup.outdir, "data.jld2")
     if false
         t = time()
-        d = create_data(
-            setup;
-            cfl = 0.35,
-            nstep = setup.D == 2 ? 1000 : 30,
-            nsubstep = 10,
-        )
+        d = create_data(setup; cfl = 0.35, nstep = setup.D == 2 ? 1000 : 30, nsubstep = 10)
         t = time() - t
         jldsave(filename; data = d, timing = t)
     end
@@ -233,7 +243,9 @@ end;
 map(
     t -> round(t; digits = 1),
     (; tbnn = train_tbnn.timing, conv = train_conv.timing, equi = train_equi.timing),
-) |> pairs |> display
+) |>
+pairs |>
+display
 flush(stdout)
 
 upostfiles = map(
