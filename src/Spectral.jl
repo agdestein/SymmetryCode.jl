@@ -66,18 +66,26 @@ export inverse_cutoff!
 end
 
 export gaussianfilter!
-@kernel function gaussianfilter!(u, Δ, g::Grid{2})
+@kernel function gaussianfilter!(u, Δ, kstart, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = wavenumber_full(g, I)
     k2 = kx^2 + ky^2
-    w = exp(-Δ^2 * k2 / 24)
+    kstart2 = (π / g.l * 2 * kstart)^2
+    # Don't filter the forced wavenumbers (where k < kstart)
+    # Otherwise, the fixed-energy forcing will not commute with the filter.
+    # Since we only force the low wavenumbers, the Gaussian is close to 1 anyway.
+    w = ifelse(k2 < kstart2, one(Δ), exp(-Δ^2 * k2 / 24))
     u[I] *= w
 end
-@kernel function gaussianfilter!(u, Δ, g::Grid{3})
+@kernel function gaussianfilter!(u, Δ, kstart, g::Grid{3})
     I = @index(Global, Cartesian)
     kx, ky, kz = wavenumber_full(g, I)
     k2 = kx^2 + ky^2 + kz^2
-    w = exp(-Δ^2 * k2 / 24)
+    kstart2 = (π / g.l * 2 * kstart)^2
+    # Don't filter the forced wavenumbers (where k < kstart)
+    # Otherwise, the fixed-energy forcing will not commute with the filter.
+    # Since we only force the low wavenumbers, the Gaussian is close to 1 anyway.
+    w = ifelse(k2 < kstart2, one(Δ), exp(-Δ^2 * k2 / 24))
     u[I] *= w
 end
 
@@ -131,18 +139,34 @@ end
 
 export create_dns
 function create_dns(setup; tstop, cfl, rng)
-    (; outdir, l, visc, D, n_dns, backend, ou_radius, ou_time, ou_energy) = setup
+    (; outdir, l, visc, D, n_dns, backend, force) = setup
     g = Grid{D}(; l, n = n_dns, backend)
 
     @info "Creating initial conditions"
     flush(stderr)
-    u = randomfield(g; rng, kpeak = 5)
+    u = randomfield(
+        g;
+        rng,
+        # totalenergy = 5,
+        kpeak = 5,
+    )
+    # u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
     GC.gc();
     CUDA.reclaim()
     cache = getcache(g)
 
-    # OU stuff
-    ou = ouforcer(g, ou_radius)
+    # Forcing stuff
+    b = getband(g, force[1])
+
+    # Indices for computing energy (with conjugate indices)
+    energyinds = vcat(b...) |> adapt(backend)
+
+    # Components to be forced (without conjugate indices)
+    inds = b[1] |> adapt(backend)
+
+    band = (; inds, energyinds)
+
+    eref = force[2]
 
     @info "Running DNS simulation"
     flush(stderr)
@@ -160,17 +184,20 @@ function create_dns(setup; tstop, cfl, rng)
         # Step
         wray3!(convectiondiffusion!, u, Δt, g, cache; visc)
 
-        # Evolve OU process and inject energy
-        randn!(ou.b)
-        @. ou.b *= sqrt(2 * Δt * ou_energy / ou_time^2)
-        @. ou.b += (1 - Δt / ou_time) * ou.bold
-        copyto!(ou.bold, ou.b)
-        for (i, u) in enumerate(u)
-            @. u[ou.iuse] += Δt * ou.b[:, i]
-        end
-        apply!(project!, g, (u, g))
+        # Reinject energy in forced band
+        # Current energy in band
+        e = sum(u -> sum(abs2, view(u, band.energyinds)) / 2, u)
 
-        if k % 10 == 0
+        # Scaling factor that enforces energy
+        fac = sqrt(eref / e)
+
+        # Scale components in band
+        for u in u
+            uband = view(u, band.inds)
+            uband .*= fac
+        end
+
+        if k % 1 == 0
             e = energy(u)
             push!(times, t)
             push!(energies, e)
@@ -197,41 +224,75 @@ function create_dns(setup; tstop, cfl, rng)
 end
 
 function create_data(setup; cfl, nstep, nsubstep)
-    (; visc, D, n_dns, n_les, backend, ou_radius, ou_energy, ou_time, outdir, Δ) = setup
+    (; visc, D, n_dns, n_les, backend, force, outdir, Δ) = setup
     g_dns = Grid{D}(; setup.l, n = n_dns, backend)
     g_les = Grid{D}(; setup.l, n = n_les, backend)
     c_dns = getcache(g_dns)
     c_les = getcache(g_les)
-    fu = vectorfield(g_les)
-    σfu = tensorfield(g_les)
-    fσu = tensorfield(g_les)
+
+    # Allocate arrays
+    ubar = vectorfield(g_les)
+    σbar1 = tensorfield(g_les)
+    σbar2 = tensorfield(g_les)
     trace = scalarfield(g_les)
     τ = tensorfield(g_les)
-    inputs = fill(map(Array, fu), 0)
-    outputs = fill(map(Array, fσu), 0)
+    inputs = fill(map(Array, ubar), 0)
+    outputs = fill(map(Array, τ), 0)
 
+    # Load DNS state from warm-up simulation
     u = load(joinpath(outdir, "dns.jld2"), "u") |> adapt(backend)
 
-    # OU stuff
-    ou = ouforcer(g_dns, ou_radius)
+    # Forcing stuff
+    b = getband(g_dns, force[1])
+
+    # Indices for computing energy (with conjugate indices)
+    energyinds = vcat(b...) |> adapt(backend)
+
+    # Components to be forced (without conjugate indices)
+    inds = b[1] |> adapt(backend)
+
+    band = (; inds, energyinds)
+
+    # These energies will be maintained throughout the simulation.
+    eref = force[2]
+
+    # Spectra
+    stuff_dns = Seneca.spectral_stuff(g_dns)
+    stuff_les = Seneca.spectral_stuff(g_les)
+    spectra_dns = fill(zeros(0), 0)
+    spectra_les = fill(zeros(0), 0)
+
+    # Compute turbulence statistics (use σ as temporary tensor storage)
+    stat = turbulence_statistics(u, visc, g_dns, c_dns.σ)
+    statistics = fill(stat, 0)
+
+    times = zeros(0)
 
     # Time stepping
     t = 0.0
     for i = 1:nstep
-        for j = 1:nsubstep
+        # Do multiple substeps before storing data
+        # Skip first step to get initial statistics
+        i == 1 || for j = 1:nsubstep
+            # Time step
             Δt = cfl * propose_timestep(u, g_dns, visc, c_dns)
             t += Δt
+
+            # Evolve DNS
             wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
 
-            # Evolve OU process and inject energy
-            randn!(ou.b)
-            @. ou.b *= sqrt(2 * Δt * ou_energy / ou_time^2)
-            @. ou.b += (1 - Δt / ou_time) * ou.bold
-            copyto!(ou.bold, ou.b)
-            for (i, u) in enumerate(u)
-                @. u[ou.iuse] += Δt * ou.b[:, i]
+            # Reinject energy in forced band
+            # Current energy in band
+            e = sum(u -> sum(abs2, view(u, band.energyinds)) / 2, u)
+
+            # Scaling factor that enforces energy
+            fac = sqrt(eref / e)
+
+            # Scale components in band
+            for u in u
+                uband = view(u, band.inds)
+                uband .*= fac
             end
-            apply!(project!, g_dns, (u, g_dns))
 
             # Log
             if j == nsubstep && i % 1 == 0
@@ -249,40 +310,32 @@ function create_data(setup; cfl, nstep, nsubstep)
             end
         end
 
-        # Compute sub-filter stress
-        nonlinearity!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, g_dns)
-        for (fu, u) in zip(fu, u)
-            apply!(cutoff!, g_les, (fu, u))
-            isnothing(Δ) || apply!(gaussianfilter!, g_les, (fu, Δ, g_les))
-        end
-        for (fσu, σu) in zip(fσu, c_dns.σ)
-            apply!(cutoff!, g_les, (fσu, σu))
-            isnothing(Δ) || apply!(gaussianfilter!, g_les, (fσu, Δ, g_les))
-        end
-        nonlinearity!(σfu, c_les.vi_vj, c_les.v, fu, c_les.plan, g_les)
-        foreach(i -> (τ[i] .= fσu[i] .- σfu[i]), 1:tensordim(g_dns))
-
-        # Make tensor trace-free
-        if D == 2
-            @. trace = (τ[1] + τ[2]) / 2
-            τ[1] .-= trace
-            τ[2] .-= trace
-        elseif D == 3
-            @. trace = (τ[1] + τ[2] + τ[3]) / 3
-            τ[1] .-= trace
-            τ[2] .-= trace
-            τ[3] .-= trace
-        end
+        # Compute ubar and sub-filter stress
+        sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ, kforce = force[1])
 
         # Save current (ubar,tau)-pair
-        push!(inputs, map(Array, fu))
+        push!(inputs, map(Array, ubar))
         push!(outputs, map(Array, τ))
+
+        # Compute spectra
+        s_dns = spectrum(u, g_dns, stuff_dns)
+        s_les = spectrum(ubar, g_les, stuff_les)
+        push!(spectra_dns, s_dns.s)
+        push!(spectra_les, s_les.s)
+
+        # Compute turbulence statistics (use σ as temporary tensor storage)
+        stat = turbulence_statistics(u, visc, g_dns, c_dns.σ)
+        push!(statistics, stat)
+
+        # Keep track of times
+        push!(times, t)
     end
-    inputs, outputs
+
+    (; inputs, outputs, times, spectra_dns, spectra_les, statistics)
 end
 
 export sfs
-function sfs(u, g_dns, g_les, Δ)
+function sfs(u, g_dns, g_les, Δ, kforce)
     c_dns = getcache(g_dns)
     c_les = getcache(g_les)
     ubar = vectorfield(g_les)
@@ -290,21 +343,21 @@ function sfs(u, g_dns, g_les, Δ)
     σbar2 = tensorfield(g_les)
     trace = scalarfield(g_les)
     τ = tensorfield(g_les)
-    sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
+    sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ, kforce)
     τ
 end
 
 export sfs!
-function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
+function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ, kforce)
     D = dim(g_dns)
     nonlinearity!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, g_dns)
     for (ubar, u) in zip(ubar, u)
         apply!(cutoff!, g_les, (ubar, u))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, kforce, g_les))
     end
     for (σbar1, σ) in zip(σbar1, c_dns.σ)
         apply!(cutoff!, g_les, (σbar1, σ))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (σbar1, Δ, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (σbar1, Δ, kforce, g_les))
     end
     nonlinearity!(σbar2, c_les.vi_vj, c_les.v, ubar, c_les.plan, g_les)
     foreach(i -> (τ[i] .= σbar1[i] .- σbar2[i]), 1:tensordim(g_dns))
@@ -551,7 +604,10 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
         _, l_train, _, train_state =
             Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
         if ibatch % 1 == 0
+            # Check performance on validation batch
             l_valid = loss(net, ps, st, b_valid) |> first
+
+            # Log
             @info join(
                 [
                     "iepoch = $iepoch",
@@ -561,16 +617,18 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
                 ],
                 ",\t",
             )
+            push!(losses_train, l_train)
+            push!(losses_valid, l_valid)
+
+            # Keep current best parameters
             if l_valid < l_best
                 l_best = l_valid
                 ps_best = deepcopy(train_state.parameters)
             end
-            push!(losses_train, l_train)
-            push!(losses_valid, l_valid)
         end
     end
-    ps = ps_best
-    st = train_state.states
+    ps = ps_best # Retain best (not last) parameters
+    st = train_state.states # Note: If st is non-empty, need to make "best"-mechanism for states
     (; ps, st, losses_train, losses_valid)
 end
 
@@ -581,12 +639,12 @@ function fullchain(setup, net, project, ps, st, Δ)
         x = stack(x) # Convert named tuple to array
         T = eltype(x)
         s = size(x)
-        x = reshape(x, s..., 1) # Add sample dimension
+        x = reshape(x, s..., 1) # Add singleton sample dimension
         A2 = sum(abs2, x; dims = D + 1) # VGT squared norm
         @. x /= (sqrt(A2) + eps(T)) # Normalize input gradient
         y = net(x, ps, st) |> first # Apply model
         @. y *= Δ^2 * A2 # Scale output with dimensional stuff
-        reshape(y, s[1:D]..., :) # Remove sanple dimension
+        reshape(y, s[1:D]..., :) # Remove singleton sample dimension
     end
     model
 end
@@ -618,11 +676,13 @@ function les!(du, u, grid, cache; model, visc)
         mul!(du.x, plan, vi_vj)
         @. σ += du.x / grid.n^D # With FFT factor
     end
+
+    # Final force
     apply!(tensordivergence!, grid, (du, σ, grid))
 end
 
 function inference_post(; u_dns, setup, models, files, cfl, tstop, dodns)
-    (; D, l, n_dns, n_les, backend, visc, Δ) = setup
+    (; D, l, n_dns, n_les, backend, visc, Δ, nshell) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
 
@@ -631,7 +691,7 @@ function inference_post(; u_dns, setup, models, files, cfl, tstop, dodns)
     u_les = vectorfield(g_les)
     for (u_les, u_dns) in zip(u_les, u_dns)
         apply!(cutoff!, g_les, (u_les, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_les, Δ, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_les, Δ, nshell + 1, g_les))
     end
 
     if dodns
@@ -646,7 +706,7 @@ function inference_post(; u_dns, setup, models, files, cfl, tstop, dodns)
         u_ref = vectorfield(g_les)
         for (u_ref, u_dns) in zip(u_ref, u_dns)
             apply!(cutoff!, g_les, (u_ref, u_dns))
-            isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, g_les))
+            isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, nshell + 1, g_les))
         end
 
         # Save DNS results and free up memory
@@ -681,12 +741,10 @@ end
 export solve_les!
 function solve_les!(u; grid, visc, model, cfl, tstop)
     t = 0.0
-    if isnothing(model)
-        # No closure
-        cache = getcache(grid)
-    else
+    cache = getcache(grid)
+    if !isnothing(model)
         # Allocate velocity gradient for closure
-        cache = (; getcache(grid)..., G = tensorfield_nonsym(grid))
+        cache = (; cache..., G = tensorfield_nonsym(grid))
     end
     t = zero(tstop)
     i = 0
@@ -734,6 +792,7 @@ function get_errors(setup, u_les)
     end
 end
 
+# 2D basis
 @inline nbasis(::Grid{2}) = 2 # Number of entries below
 @inline getbasis(::Grid{2}, S, R) = (
     deviator(S),
@@ -745,7 +804,8 @@ end
 # # Second-order only basis:
 # # https://arc.aiaa.org/doi/10.2514/6.2022-0595
 # @inline nbasis(::Grid{3}) = 5
-# @inline getbasis(::Grid{3}, S, R) = (one(S), S, S * S, R * R, S * R - R * S)
+# @inline getbasis(::Grid{3}, S, R) =
+#     (deviator(S), deviator(S * S), deviator(R * R), deviator(S * R - R * S))
 
 # New reduced basis:
 # https://arc.aiaa.org/doi/10.2514/6.2022-0595
@@ -763,28 +823,30 @@ end
 # # Pope's basis:
 # @inline nbasis(::Grid{3}) = 11
 # @inline getbasis(::Grid{3}, S, R) = (
-#     one(S),
-#     S,
-#     S * R - R * S,
+#     deviator(S),
+#     deviator(S * R - R * S),
 #     deviator(S * S),
 #     deviator(R * R),
-#     R * S * S - S * S * R,
+#     deviator(R * S * S - S * S * R),
 #     deviator(S * R * R + R * R * S),
-#     R * S * R * R - R * R * S * R,
-#     S * R * S * S - S * S * R * S,
+#     deviator(R * S * R * R - R * R * S * R),
+#     deviator(S * R * S * S - S * S * R * S),
 #     deviator(R * R * S * S + S * S * R * R),
-#     R * S * S * R * R - R * R * S * S * R,
+#     deviator(R * S * S * R * R - R * R * S * S * R),
 # )
 
+# 2D invariants
 @inline ninvariant(::Grid{2}) = 2
 @inline getinvariants(::Grid{2}, S, R) = tr(S * S), tr(R * R)
 
+# 3D invariants
 @inline ninvariant(::Grid{3}) = 5
 @inline getinvariants(::Grid{3}, S, R) =
     tr(S * S), tr(R * R), tr(S * S * S), tr(S * R * R), tr(S * S * R * R)
 
 "Compute deviatoric part of a tensor."
-@inline deviator(σ) = σ - tr(σ) / 3 * one(σ)
+@inline deviator(σ::SMatrix{2,2}) = σ - tr(σ) / 2 * one(σ)
+@inline deviator(σ::SMatrix{3,3}) = σ - tr(σ) / 3 * one(σ)
 
 @kernel function tb_kernel!(invariants, basis, grads, Δ, g::Grid{2})
     nb, ni = nbasis(g), ninvariant(g)
@@ -825,6 +887,8 @@ end
     end
     for ibas in Base.OneTo(nb)
         # Convert symmetric 3x3 tensor b to flattened symmetric tensor [xx, yy, zz, xy, yz, zx]
+        # Also premultiply by Δ^2 * |A|^2, since the output tensor is
+        # Δ^2 * |A|^2 * coeffs * basis
         basis[I, 1, ibas] = b[ibas][1, 1] * A2 * Δ^2
         basis[I, 2, ibas] = b[ibas][2, 2] * A2 * Δ^2
         basis[I, 3, ibas] = b[ibas][3, 3] * A2 * Δ^2
@@ -872,8 +936,8 @@ tbnn(net, ps, st, Δ, g) = function model(A)
     # Basis contraction
     b = reshape(basis, :, nt, nb)
     w = reshape(w, :, 1, nb)
-    wb = @. w * b
-    m = sum(wb; dims = 3)
+    b .*= w
+    m = sum(b; dims = 3)
     reshape(m, nx..., nt)
 end
 
@@ -1019,15 +1083,15 @@ end
 
 export plot_densities
 function plot_densities(; u_dns, setup, models, dolog)
-    (; plotdir, name, D, l, n_dns, n_les, backend, Δ) = setup
+    (; plotdir, name, D, l, n_dns, n_les, backend, Δ, force) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     u_ref = vectorfield(g_les)
     for (u_ref, u_dns) in zip(u_ref, u_dns)
         apply!(cutoff!, g_les, (u_ref, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, nshell + 1, g_les))
     end
-    τhat = sfs(u_dns, g_dns, g_les, Δ)
+    τhat = sfs(u_dns, g_dns, g_les, Δ, force[1])
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
@@ -1285,7 +1349,7 @@ end
 
 export apriori_error
 function apriori_error(; u_dns, setup, models)
-    (; D, l, n_dns, n_les, backend, Δ) = setup
+    (; D, l, n_dns, n_les, backend, Δ, force) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
 
@@ -1293,12 +1357,12 @@ function apriori_error(; u_dns, setup, models)
     u_ref = vectorfield(g_les)
     for (u_ref, u_dns) in zip(u_ref, u_dns)
         apply!(cutoff!, g_les, (u_ref, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, nshell + 1, g_les))
     end
     G = getgradient(u_ref, g_les)
 
     # Outputs
-    τhat = sfs(u_dns, g_dns, g_les, Δ)
+    τhat = sfs(u_dns, g_dns, g_les, Δ, force[1])
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
@@ -1415,15 +1479,15 @@ end
 
 export get_dissipation_errors
 function get_dissipation_errors(; setup, u_dns, models)
-    (; D, l, n_dns, n_les, backend, Δ) = setup
+    (; D, l, n_dns, n_les, backend, Δ, force) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     ubar = vectorfield(g_les)
     for (ubar, u_dns) in zip(ubar, u_dns)
         apply!(cutoff!, g_les, (ubar, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, nshell + 1, g_les))
     end
-    τhat = sfs(u_dns, g_dns, g_les, Δ)
+    τhat = sfs(u_dns, g_dns, g_les, Δ, force)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
@@ -1502,25 +1566,25 @@ end
 export setup_turbulator
 function setup_turbulator()
     l = 1.0
+    # n_dns = 256
+    n_dns = 512
     n_les = 64
     Δ = 4 * l / n_les
-    outdir = joinpath(@__DIR__, "..", "output", "turbulator512") |> mkpath
+    outdir = joinpath(@__DIR__, "..", "output", "turbulator$(n_dns)") |> mkpath
     # plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
     plotdir = joinpath(outdir, "plots") |> mkpath
     (;
         name = "turbulator",
         outdir,
         plotdir,
-        visc = 2e-4,
+        visc = 1e-4,
         D = 3,
         l = 1.0,
-        n_dns = 512,
+        n_dns,
         n_les,
         kpeak = 5,
         Δ,
-        ou_radius = 2.3,
-        ou_time = 0.005,
-        ou_energy = 0.01,
+        force = 3.5 => 0.5,
         backend = CUDABackend(),
     )
 end
@@ -1744,15 +1808,15 @@ end
 
 export plot_sfs
 function plot_sfs(setup, u_dns, models)
-    (; D, l, n_dns, n_les, backend, Δ) = setup
+    (; D, l, n_dns, n_les, backend, Δ, force) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     ubar = vectorfield(g_les)
     for (ubar, u_dns) in zip(ubar, u_dns)
         apply!(cutoff!, g_les, (ubar, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, nshell + 1, g_les))
     end
-    τhat = sfs(u_dns, g_dns, g_les, Δ)
+    τhat = sfs(u_dns, g_dns, g_les, Δ, force)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
@@ -1825,22 +1889,36 @@ end
 
 export plot_spectrum_dns
 function plot_spectrum_dns(setup)
-    (; outdir, plotdir, D, l, n_dns, n_les, backend, visc, ou_radius) = setup
+    (;
+        outdir,
+        plotdir,
+        D,
+        l,
+        n_dns,
+        n_les,
+        backend,
+        visc,
+        force,
+    ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
     ubar = vectorfield(g_les)
     for (ubar, u) in zip(ubar, u)
         apply!(cutoff!, g_les, (ubar, u))
-        apply!(gaussianfilter!, g_les, (ubar, setup.Δ, g_les))
+        apply!(gaussianfilter!, g_les, (ubar, setup.Δ, force[1], g_les))
     end
     D = dim(g_dns)
-    stat = turbulence_statistics(u, visc, g_dns)
-    @show stat.Re_tay
     stuff_dns = Seneca.spectral_stuff(g_dns)
     stuff_les = Seneca.spectral_stuff(g_les)
+    stat = turbulence_statistics(u, visc, g_dns)
+    @show stat.Re_tay
     s_dns = spectrum(u, g_dns, stuff_dns)
     s_les = spectrum(ubar, g_les, stuff_les)
+    # l_int_new = pi / 2 / stat.uavg * sum(eachindex(s_dns.s)) do i
+    #     s_dns.s[i] / stuff_dns.k[i]
+    # end
+    # @show stat.l_int l_int_new; error()
     fig = Figure(; size = (400, 340))
     ax = Axis(
         fig[1, 1];
@@ -1851,37 +1929,43 @@ function plot_spectrum_dns(setup)
         ylabel = "Normalized spectrum",
     )
     if D == 2
-        k = [3, g_dns.n / 10]
-        kolmo = @. stat.diss^(-1 / 3) * k^(-3)
+        kkolmo = [3, g_dns.n / 10]
+        kolmo = @. stat.diss^(-1 / 3) * kkolmo^(-3)
         escale = stat.diss^(-1 / 3) * stat.l_kol^(-3)
     elseif D == 3
-        k = [3, g_dns.n / 8]
+        kkolmo = [3, g_dns.n / 8]
         # C = 0.65
         C = 0.4
-        kolmo = @. C * stat.diss^(2 / 3) * k^(-5 / 3)
+        # C = 1.6
+        kolmo = @. C * stat.diss^(2 / 3) * kkolmo^(-5 / 3)
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
         # escale = 1
     end
     # escale = 1
-    kscale = stat.l_kol / l
-    span = [1, ou_radius] * kscale
-    oucolor = Makie.wong_colors()[4]
-    vspan!(ax, span...; alpha = 0.3, color = oucolor)
+    kscale = stat.l_kol
+    band = getband(g_dns, force[1])
+    k2min = minimum(band.k2)
+    k2max = maximum(band.k2)
+    kforce = 2π / l * [sqrt(k2min), sqrt(k2max)]
+    span = kforce * kscale
+    forcecolor = Makie.wong_colors()[4]
+    vspan!(ax, span...; alpha = 0.3, color = forcecolor)
     b = sqrt(prod(extrema(escale * s_dns.s)))
-    a = 1.1 * kscale * ou_radius
+    a = 1.1 * span[2]
     c = sqrt(prod(span))
     w = D == 2 ? 1 : 1.5
-    text!(ax, a, b / w; color = oucolor, text = "Force")
+    text!(ax, a, b / w; color = forcecolor, text = "Force")
     arr = D == 2 ? 100 : 5
     arrows2d!(
         ax,
         Point2(c, b / arr),
         Point2(c, b * arr) - Point2(c, b / arr);
-        color = oucolor,
+        color = forcecolor,
     )
+    @show kscale * s_dns.k[end]
     lines!(ax, kscale * s_dns.k, escale * s_dns.s; label = "DNS")
     lines!(ax, kscale * s_les.k, escale * s_les.s; label = "Filtered DNS")
-    lines!(kscale * k, escale * kolmo; label = "Kolmogorov")
+    lines!(kscale * 2π / l * kkolmo, escale * kolmo; label = "Kolmogorov")
     Legend(
         fig[0, 1],
         ax;
@@ -1917,7 +2001,7 @@ function plot_spectrum_les(setup, u)
         xlabel = "Normalized wavenumber",
         ylabel = "Normalized spectrum",
     )
-    k = [2, g_dns.n / 8]
+    k = 2π / l * [2, g_dns.n / 8]
     if D == 2
         kolmo = @. 2e0 * stat.diss^(1 / 3) * k^(-3)
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-3)

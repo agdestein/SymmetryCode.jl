@@ -1,8 +1,8 @@
-# if false
-#     include("src/SymmetryCode.jl")
-#     using .SymmetryCode
-#     using .SymmetryCode.Spectral
-# end
+if false
+    include("src/SymmetryCode.jl")
+    using .SymmetryCode
+    using .SymmetryCode.Spectral
+end
 
 using Adapt
 using CairoMakie
@@ -27,6 +27,8 @@ lines([1, 2, 3])
 setup = setup_turbulator()
 # setup = setup_snellius()
 
+setup |> pairs
+
 let
     (; Δ, l) = setup
     i = 2
@@ -34,38 +36,96 @@ let
     exp(-Δ^2 * k^2 / 24)
 end
 
-# create_dns(setup; tstop = 0.5, cfl = 0.35, rng = Xoshiro(0))
+let
+    (; outdir, l, visc, D, n_dns, backend, force_shells) = setup
+    g = Grid{D}(; l, n = n_dns, backend)
+    shells = getshells(g, force_shells)
+    shells = map(shells) do (; shell, inds)
+        energyinds = vcat(inds...) |> adapt(backend)
+        inds = inds[1] |> adapt(backend)
+        (; shell, inds, energyinds)
+    end
+    getfield.(shells, :energyinds)[1]
+end
 
-# let
-#     times, energies = load("$(setup.outdir)/dns.jld2", "times", "energies")
-#     fig, _, _ = lines(times, energies)
-#     save(joinpath(setup.plotdir, "energy.pdf"), fig; backend = CairoMakie)
-#     fig
-# end
+# Warmup simulation
+setup = setup_turbulator();
+create_dns(setup; tstop = 1.0, cfl = 0.35, rng = Xoshiro(0))
+
+# Plot DNS spectrum
+plot_spectrum_dns(setup)
+
+let
+    times, energies = load("$(setup.outdir)/dns.jld2", "times", "energies")
+    fig, ax, _ = lines(times, energies)
+    ylims!(ax, -0.1, maximum(energies) + 0.1)
+    save(joinpath(setup.plotdir, "energy.pdf"), fig; backend = CairoMakie)
+    fig
+end
 
 set_theme!(;
-# fontsize = 18,
 # fonts = (;
 #     regular = "Dejavu",
 #     # regular = "Palatino",
 # ),
 )
 
-# Plot DNS spectrum
-plot_spectrum_dns(setup)
-
-data, datatiming = let
+data = let
     filename = joinpath(setup.outdir, "data.jld2")
     if false
-        t = time()
-        d = create_data(setup; cfl = 0.35, nstep = setup.D == 2 ? 1000 : 30, nsubstep = 10)
+       t = time()
+        d = create_data(setup; cfl = 0.35, nstep = setup.D == 2 ? 1000 : 200, nsubstep = 25)
         t = time() - t
-        jldsave(filename; data = d, timing = t)
+        save_object(filename, (; d..., timing = t))
     end
-    load(filename, "data", "timing")
+    load_object(filename)
 end;
 
+let
+    u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
+    g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    v = spacescalarfield(g)
+    p = plan_rfft(v)
+    ldiv!(v, p, u.x)
+    v[:, :, end] |> Array |> heatmap
+end
+
+let
+    u = data.inputs[1] |> adapt(setup.backend)
+    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    v = spacescalarfield(g)
+    p = plan_rfft(v)
+    ldiv!(v, p, u.x)
+    v[:, :, end] |> Array |> heatmap
+end
+
 Base.summarysize(data) * 1e-9
+
+data |> pairs
+
+getindex.(data.statistics, :diss)
+getindex.(data.statistics, :uavg) .^ 2 / 2 * 3
+getindex.(data.statistics, :Re_tay)
+getindex.(data.statistics, :t_int)
+getindex.(data.statistics, :l_int)
+getindex.(data.statistics, :l_kol)
+
+let
+    s_dns = mean(data.spectra_dns)
+    s_les = mean(data.spectra_les)
+    diss = mean(s -> s.diss, data.statistics)
+    fig = Figure()
+    ax = Axis(fig[1,1];
+              xscale = log10,
+              yscale = log10,
+              )
+    k_dns = 2π / setup.l * eachindex(s_dns)
+    k_les = 2π / setup.l * eachindex(s_les)
+    lines!(ax, k_dns, s_dns)
+    lines!(ax, k_les, s_les)
+    lines!(ax, k_dns, 0.4 * diss^(2/3) * (k_dns * setup.l / 2π) .^ (-5/3))
+    fig
+end
 
 m_nomo = let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
@@ -285,7 +345,8 @@ upostfiles = map(
 #     )
 # end
 
-map(f -> load(f, "timing"), upostfiles) |> t -> map(x -> round(x; digits = 1), t) |> pairs |> display
+map(f -> load(f, "timing"), upostfiles) |>
+t -> map(x -> round(x; digits = 1), t) |> pairs |> display
 flush(stdout)
 
 u = map(f -> load(f, "u"), upostfiles);
