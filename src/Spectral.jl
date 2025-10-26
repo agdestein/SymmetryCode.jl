@@ -311,7 +311,20 @@ function create_data(setup; cfl, nstep, nsubstep)
         end
 
         # Compute ubar and sub-filter stress
-        sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ, kforce = force[1])
+        sfs!(;
+            τ,
+            trace,
+            σbar1,
+            σbar2,
+            ubar,
+            u,
+            c_dns,
+            c_les,
+            g_dns,
+            g_les,
+            Δ,
+            kforce = force[1],
+        )
 
         # Save current (ubar,tau)-pair
         push!(inputs, map(Array, ubar))
@@ -1889,17 +1902,7 @@ end
 
 export plot_spectrum_dns
 function plot_spectrum_dns(setup)
-    (;
-        outdir,
-        plotdir,
-        D,
-        l,
-        n_dns,
-        n_les,
-        backend,
-        visc,
-        force,
-    ) = setup
+    (; outdir, plotdir, D, l, n_dns, n_les, backend, visc, force) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)

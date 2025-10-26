@@ -73,8 +73,8 @@ set_theme!(;
 data = let
     filename = joinpath(setup.outdir, "data.jld2")
     if false
-       t = time()
-        d = create_data(setup; cfl = 0.35, nstep = setup.D == 2 ? 1000 : 200, nsubstep = 25)
+        t = time()
+        d = create_data(setup; cfl = 0.35, nstep = setup.D == 2 ? 1000 : 100, nsubstep = 25)
         t = time() - t
         save_object(filename, (; d..., timing = t))
     end
@@ -115,10 +115,7 @@ let
     s_les = mean(data.spectra_les)
     diss = mean(s -> s.diss, data.statistics)
     fig = Figure()
-    ax = Axis(fig[1,1];
-              xscale = log10,
-              yscale = log10,
-              )
+    ax = Axis(fig[1, 1]; xscale = log10, yscale = log10)
     k_dns = 2π / setup.l * eachindex(s_dns)
     k_les = 2π / setup.l * eachindex(s_les)
     lines!(ax, k_dns, s_dns)
