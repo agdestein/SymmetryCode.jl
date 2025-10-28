@@ -4,6 +4,9 @@ if false
     using .SymmetryCode.Spectral
 end
 
+@info "Loading packages"
+flush(stderr)
+
 using Adapt
 using CairoMakie
 using ComponentArrays: ComponentArray
@@ -45,7 +48,7 @@ plot_dissipation_finite_difference(setup)
 #     ),
 # )
 
-true && create_data(setup)
+create_data(setup)
 
 data = joinpath(setup.outdir, "data.jld2") |> load_object;
 

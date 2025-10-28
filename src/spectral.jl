@@ -1800,6 +1800,8 @@ function plot_evolution_dns(setup)
     times, energies, dissipations =
         load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
     a = @. dissipations / 2 / energies
+
+    # Create plot
     fig = Figure(; size = (400, 340))
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Normalized quantity")
     lines!(ax, times, energies / maximum(energies); label = "Energy")
@@ -1815,8 +1817,10 @@ function plot_evolution_dns(setup)
         nbanks = 3,
     )
     rowgap!(fig.layout, 10)
+
+    # Save plot
     file = joinpath(setup.plotdir, "evolution-dns.pdf")
-    @info "Saving DNS evolution plot to $(file)"
+    @info "Saving DNS time series plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
     fig
@@ -1826,6 +1830,8 @@ export plot_dissipation_finite_difference
 function plot_dissipation_finite_difference(setup)
     times, energies, dissipations =
         load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
+
+    # Create plot
     fig = Figure(; size = (400, 340))
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity")
     lines!(ax, times, 6/5 * dissipations; label = "Dissipation")
@@ -1845,7 +1851,11 @@ function plot_dissipation_finite_difference(setup)
         nbanks = 2,
     )
     rowgap!(fig.layout, 10)
+
+    # Save plot
     file = joinpath(setup.plotdir, "dissipation_finite_difference.pdf")
+    @info "Saving DNS dissipation plot to $(file)"
+    flush(stderr)
     save(file, fig; backend = CairoMakie)
     fig
 end
@@ -1932,7 +1942,12 @@ function plot_spectrum_dns(setup)
         nbanks = 4,
     )
     rowgap!(fig.layout, 5)
-    save("$(plotdir)/spectrum-dns.pdf", fig; backend = CairoMakie)
+
+    # Save plot
+    file = "$(plotdir)/spectrum-dns.pdf"
+    @info "Saving DNS spectrum to $file"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
     fig
 end
 
@@ -1985,7 +2000,12 @@ function plot_spectrum_les(setup, u)
     )
     rowgap!(fig.layout, 5)
     # ylims!(1e-7, 1)
-    save("$(setup.plotdir)/spectrum-les.pdf", fig; backend = CairoMakie)
+
+    # Save plot
+    file = "$(setup.plotdir)/spectrum-les.pdf"
+    @info "Saving DNS time series to $file"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
     fig
 end
 
