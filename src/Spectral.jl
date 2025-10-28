@@ -71,10 +71,11 @@ export gaussianfilter!
     kx, ky = wavenumber_full(g, I)
     k2 = kx^2 + ky^2
     kstart2 = (π / g.l * 2 * kstart)^2
-    # Don't filter the forced wavenumbers (where k < kstart)
-    # Otherwise, the fixed-energy forcing will not commute with the filter.
-    # Since we only force the low wavenumbers, the Gaussian is close to 1 anyway.
-    w = ifelse(k2 < kstart2, one(Δ), exp(-Δ^2 * k2 / 24))
+    # # Don't filter the forced wavenumbers (where k < kstart)
+    # # Otherwise, the fixed-energy forcing will not commute with the filter.
+    # # Since we only force the low wavenumbers, the Gaussian is close to 1 anyway.
+    # w = ifelse(k2 < kstart2, one(Δ), exp(-Δ^2 * k2 / 24))
+    w = exp(-Δ^2 * k2 / 24)
     u[I] *= w
 end
 @kernel function gaussianfilter!(u, Δ, kstart, g::Grid{3})
@@ -82,10 +83,11 @@ end
     kx, ky, kz = wavenumber_full(g, I)
     k2 = kx^2 + ky^2 + kz^2
     kstart2 = (π / g.l * 2 * kstart)^2
-    # Don't filter the forced wavenumbers (where k < kstart)
-    # Otherwise, the fixed-energy forcing will not commute with the filter.
-    # Since we only force the low wavenumbers, the Gaussian is close to 1 anyway.
-    w = ifelse(k2 < kstart2, one(Δ), exp(-Δ^2 * k2 / 24))
+    # # Don't filter the forced wavenumbers (where k < kstart)
+    # # Otherwise, the fixed-energy forcing will not commute with the filter.
+    # # Since we only force the low wavenumbers, the Gaussian is close to 1 anyway.
+    # w = ifelse(k2 < kstart2, one(Δ), exp(-Δ^2 * k2 / 24))
+    w = exp(-Δ^2 * k2 / 24)
     u[I] *= w
 end
 
@@ -137,20 +139,50 @@ function dns_aid()
     sum(i -> sum(abs2, v[i] - ubar[i]) / sum(abs2, ubar[i]), 1:D)
 end
 
+function get_forcing_constant(g, u, S, visc, band)
+    D = dim(g)
+    foreach(u -> apply!(twothirds!, g, (u, g)), u)
+    u2 = sum(getenergy, u)
+    # u2 = sum(u -> sum(abs2, view(u, band.energyinds)), u)
+    diss = get_dissipation!(S.xx, u, visc, g)
+    diss / u2
+end
+
+function forced_rhs!(du, u, grid, cache; forceval, visc)
+    (; band) = cache
+    convectiondiffusion!(du, u, grid, cache; visc)
+    if isnothing(forceval)
+        # Use adaptive forcing strength
+        # This constant maintains the total energy.
+        # This will overwrite σ, but it is no used after convectiondiffusion!
+        forceval = 4 / 5 * get_forcing_constant(grid, u, cache.σ, visc, cache.band)
+        # forceval = 0.5
+    end
+    for (du, u) in zip(du, u)
+        # Add linear forcing to du in forced modes
+        # dui = view(du, band.inds)
+        # ui = view(u, band.inds)
+        # @. dui += forceval * ui
+        @. du += forceval * u
+    end
+    nothing
+end
+
 export create_dns
-function create_dns(setup; tstop, cfl, rng)
-    (; outdir, l, visc, D, n_dns, backend, force) = setup
+function create_dns(setup; cfl, rng)
+    (; outdir, l, visc, D, n_dns, backend, force, totalenergy, kpeak, t_warmup) = setup
     g = Grid{D}(; l, n = n_dns, backend)
+    tstop = t_warmup
 
     @info "Creating initial conditions"
     flush(stderr)
-    u = randomfield(
-        g;
-        rng,
-        # totalenergy = 5,
-        kpeak = 5,
-    )
-    # u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
+    # u = randomfield(
+    #     g;
+    #     rng,
+    #     totalenergy,
+    #     kpeak,
+    # )
+    u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
     GC.gc();
     CUDA.reclaim()
     cache = getcache(g)
@@ -159,14 +191,19 @@ function create_dns(setup; tstop, cfl, rng)
     b = getband(g, force[1])
 
     # Indices for computing energy (with conjugate indices)
-    energyinds = vcat(b...) |> adapt(backend)
+    energyinds = vcat(b.inds, b.conjinds) |> adapt(backend)
 
     # Components to be forced (without conjugate indices)
     inds = b[1] |> adapt(backend)
 
     band = (; inds, energyinds)
 
-    eref = force[2]
+    # forcecache = (; cache..., forceinds = inds)
+    forcecache = (; cache..., band)
+
+    dissfield = similar(u.x, typeof(g.l))
+
+    # eref = force[2]
 
     @info "Running DNS simulation"
     flush(stderr)
@@ -174,6 +211,7 @@ function create_dns(setup; tstop, cfl, rng)
     k = 0
     times = [t]
     energies = [energy(u)]
+    dissipations = [get_dissipation!(dissfield, u, visc, g)]
     walltime = time()
     while t < tstop
         Δt = cfl * propose_timestep(u, g, visc, cache)
@@ -182,32 +220,46 @@ function create_dns(setup; tstop, cfl, rng)
         k += 1
 
         # Step
-        wray3!(convectiondiffusion!, u, Δt, g, cache; visc)
+        # wray3!(convectiondiffusion!, u, Δt, g, cache; visc)
+        wray3!(forced_rhs!, u, Δt, g, forcecache; forceval = force[2], visc)
 
-        # Reinject energy in forced band
-        # Current energy in band
-        e = sum(u -> sum(abs2, view(u, band.energyinds)) / 2, u)
+        # forceval = 0.9 * get_forcing_constant(g, u, cache.σ, visc, band)
+        # for u in u
+        #     # Add linear forcing to du in forced modes
+        #     ui = view(u, band.inds)
+        #     # @. ui += Δt * forceval * ui
+        #     # @. ui *= exp(Δt * forceval)
+        #     @. ui /= (1 - Δt * forceval)
+        #     # @. u += Δt * forceval * u
+        # end
 
-        # Scaling factor that enforces energy
-        fac = sqrt(eref / e)
-
-        # Scale components in band
-        for u in u
-            uband = view(u, band.inds)
-            uband .*= fac
-        end
+        # # Reinject energy in forced band
+        # # Current energy in band
+        # e = sum(u -> sum(abs2, view(u, band.energyinds)) / 2, u)
+        #
+        # # Scaling factor that enforces energy
+        # fac = sqrt(eref / e)
+        #
+        # # Scale components in band
+        # for u in u
+        #     uband = view(u, band.inds)
+        #     uband .*= fac
+        # end
 
         if k % 1 == 0
             e = energy(u)
+            diss = get_dissipation!(dissfield, u, visc, g)
             push!(times, t)
             push!(energies, e)
+            push!(dissipations, diss)
             @info join(
                 [
-                    "k = $k",
+                    # "k = $k",
                     "t = $(round(t; sigdigits = 4))",
-                    "Δt = $(round(Δt; sigdigits = 4))",
+                    # "Δt = $(round(Δt; sigdigits = 4))",
                     # "umax = $(round(maximum(u -> maximum(abs, u), u); sigdigits = 4))",
                     "energy = $(round(e; sigdigits = 4))",
+                    "diss = $(round(diss; sigdigits = 4))",
                 ],
                 ",\t",
             )
@@ -220,7 +272,7 @@ function create_dns(setup; tstop, cfl, rng)
     file = joinpath(outdir, "dns.jld2")
     @info "Saving final DNS snapshot to $(file)"
     flush(stderr)
-    jldsave(file; u = u |> cpu_device(), times, energies, walltime)
+    jldsave(file; u = u |> cpu_device(), times, energies, dissipations, walltime)
 end
 
 function create_data(setup; cfl, nstep, nsubstep)
@@ -246,15 +298,17 @@ function create_data(setup; cfl, nstep, nsubstep)
     b = getband(g_dns, force[1])
 
     # Indices for computing energy (with conjugate indices)
-    energyinds = vcat(b...) |> adapt(backend)
+    energyinds = vcat(b.inds, b.conjinds) |> adapt(backend)
 
     # Components to be forced (without conjugate indices)
     inds = b[1] |> adapt(backend)
 
     band = (; inds, energyinds)
 
-    # These energies will be maintained throughout the simulation.
-    eref = force[2]
+    forcecache = (; c_dns..., forceinds = inds)
+
+    # # These energies will be maintained throughout the simulation.
+    # eref = force[2]
 
     # Spectra
     stuff_dns = Seneca.spectral_stuff(g_dns)
@@ -279,20 +333,21 @@ function create_data(setup; cfl, nstep, nsubstep)
             t += Δt
 
             # Evolve DNS
-            wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
+            # wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
+            wray3!(forced_rhs!, u, Δt, g_dns, forcecache; forceval = force[2], visc)
 
-            # Reinject energy in forced band
-            # Current energy in band
-            e = sum(u -> sum(abs2, view(u, band.energyinds)) / 2, u)
-
-            # Scaling factor that enforces energy
-            fac = sqrt(eref / e)
-
-            # Scale components in band
-            for u in u
-                uband = view(u, band.inds)
-                uband .*= fac
-            end
+            # # Reinject energy in forced band
+            # # Current energy in band
+            # e = sum(u -> sum(abs2, view(u, band.energyinds)) / 2, u)
+            #
+            # # Scaling factor that enforces energy
+            # fac = sqrt(eref / e)
+            #
+            # # Scale components in band
+            # for u in u
+            #     uband = view(u, band.inds)
+            #     uband .*= fac
+            # end
 
             # Log
             if j == nsubstep && i % 1 == 0
@@ -1557,21 +1612,28 @@ end
 export setup_laptop
 function setup_laptop()
     l = 1.0
-    n_les = 128
-    Δ = 2 * l / n_les
+    n_les = 256
+    Δ = 4 * l / n_les
+    outdir = joinpath(@__DIR__, "..", "output", "laptop") |> mkpath
+    plotdir = joinpath(outdir, "plots") |> mkpath
     (;
         name = "laptop",
-        outdir = joinpath(@__DIR__, "..", "output", "laptop") |> mkpath,
         visc = 1e-5,
+        outdir,
+        plotdir,
         D = 2,
         l = 1.0,
         n_dns = 2048,
         n_les,
         kpeak = 5,
+        totalenergy = 1.0,
+        t_warmup = 0.5,
         Δ,
         ou_radius = 2.3,
         ou_time = 0.005,
         ou_energy = 0.01,
+        # force = 8.1 => 0.1,
+        force = 8.1 => nothing,
         backend = CUDABackend(),
     )
 end
@@ -1579,6 +1641,7 @@ end
 export setup_turbulator
 function setup_turbulator()
     l = 1.0
+    # n_dns = 32
     # n_dns = 256
     n_dns = 512
     n_les = 64
@@ -1595,9 +1658,13 @@ function setup_turbulator()
         l = 1.0,
         n_dns,
         n_les,
-        kpeak = 5,
+        kpeak = 2,
+        totalenergy = 1.0,
+        t_warmup = 0.1,
         Δ,
-        force = 3.5 => 0.5,
+        # force = 8.1 => 0.3,
+        # force = 8.1 => nothing,
+        force = 16.1 => nothing,
         backend = CUDABackend(),
     )
 end
@@ -1946,25 +2013,28 @@ function plot_spectrum_dns(setup)
     end
     # escale = 1
     kscale = stat.l_kol
-    band = getband(g_dns, force[1])
-    k2min = minimum(band.k2)
-    k2max = maximum(band.k2)
-    kforce = 2π / l * [sqrt(k2min), sqrt(k2max)]
-    span = kforce * kscale
-    forcecolor = Makie.wong_colors()[4]
-    vspan!(ax, span...; alpha = 0.3, color = forcecolor)
-    b = sqrt(prod(extrema(escale * s_dns.s)))
-    a = 1.1 * span[2]
-    c = sqrt(prod(span))
-    w = D == 2 ? 1 : 1.5
-    text!(ax, a, b / w; color = forcecolor, text = "Force")
-    arr = D == 2 ? 100 : 5
-    arrows2d!(
-        ax,
-        Point2(c, b / arr),
-        Point2(c, b * arr) - Point2(c, b / arr);
-        color = forcecolor,
-    )
+
+    # # Banded force stuff
+    # band = getband(g_dns, force[1])
+    # k2min = minimum(band.k2)
+    # k2max = maximum(band.k2)
+    # kforce = 2π / l * [sqrt(k2min), sqrt(k2max)]
+    # span = kforce * kscale
+    # forcecolor = Makie.wong_colors()[4]
+    # vspan!(ax, span...; alpha = 0.3, color = forcecolor)
+    # b = sqrt(prod(extrema(escale * s_dns.s)))
+    # a = 1.1 * span[2]
+    # c = sqrt(prod(span))
+    # w = D == 2 ? 1 : 1.5
+    # text!(ax, a, b / w; color = forcecolor, text = "Force")
+    # arr = D == 2 ? 100 : 5
+    # arrows2d!(
+    #     ax,
+    #     Point2(c, b / arr),
+    #     Point2(c, b * arr) - Point2(c, b / arr);
+    #     color = forcecolor,
+    # )
+
     @show kscale * s_dns.k[end]
     lines!(ax, kscale * s_dns.k, escale * s_dns.s; label = "DNS")
     lines!(ax, kscale * s_les.k, escale * s_les.s; label = "Filtered DNS")

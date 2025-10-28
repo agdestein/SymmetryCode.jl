@@ -23,9 +23,9 @@ using SymmetryCode.Spectral
 using WGLMakie
 lines([1, 2, 3])
 
-# setup = setup_laptop()
+setup = setup_laptop()
 setup = setup_turbulator()
-# setup = setup_snellius()
+setup = setup_snellius()
 
 setup |> pairs
 
@@ -49,16 +49,29 @@ let
 end
 
 # Warmup simulation
-setup = setup_turbulator();
-create_dns(setup; tstop = 1.0, cfl = 0.35, rng = Xoshiro(0))
+setup = setup_turbulator(); create_dns(setup; cfl = 0.35, rng = Xoshiro(0))
 
 # Plot DNS spectrum
 plot_spectrum_dns(setup)
 
 let
-    times, energies = load("$(setup.outdir)/dns.jld2", "times", "energies")
-    fig, ax, _ = lines(times, energies)
-    ylims!(ax, -0.1, maximum(energies) + 0.1)
+    times, energies, dissipations = load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
+    fig = Figure()
+    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Normalized quantity")
+    lines!(ax, times, energies / maximum(energies); label = "Energy")
+    lines!(ax, times, dissipations / maximum(dissipations); label = "Dissipation")
+    axislegend(ax; position = :rt)
+    save(joinpath(setup.plotdir, "energy.pdf"), fig; backend = CairoMakie)
+    fig
+end
+
+let
+    times, energies, dissipations = load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
+    fig = Figure()
+    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Normalized quantity")
+    scatterlines!(ax, times, 6/5 * dissipations; label = "Dissipation")
+    scatterlines!(ax, times[2:end], -diff(energies) ./ diff(times); label = "Finite difference of energy")
+    axislegend(ax; position = :rt)
     save(joinpath(setup.plotdir, "energy.pdf"), fig; backend = CairoMakie)
     fig
 end
@@ -72,7 +85,7 @@ set_theme!(;
 
 data = let
     filename = joinpath(setup.outdir, "data.jld2")
-    if false
+    if true
         t = time()
         d = create_data(setup; cfl = 0.35, nstep = setup.D == 2 ? 1000 : 100, nsubstep = 25)
         t = time() - t
@@ -86,7 +99,8 @@ let
     g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
     v = spacescalarfield(g)
     p = plan_rfft(v)
-    ldiv!(v, p, u.x)
+    ldiv!(v, p, u.z)
+    v .*= g.n^3 # FFT factor
     v[:, :, end] |> Array |> heatmap
 end
 
@@ -513,6 +527,18 @@ let
     turbulence_statistics(u, visc, g_dns)
 end |> pairs |> display
 flush(stdout)
+
+let
+    (; D, l, n_dns, visc, backend) = setup
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
+    stat = turbulence_statistics(u, visc, g_dns)
+    diss1 = stat.diss
+    dd = similar(u.x, typeof(l))
+    diss2 = get_dissipation!(dd, u, visc, g_dns)
+    @show diss1 diss2
+end;
+
 
 qr_file = joinpath(setup.outdir, "qr.jld2")
 
