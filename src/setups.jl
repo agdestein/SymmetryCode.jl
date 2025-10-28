@@ -63,7 +63,7 @@ function setup_snellius()
         n_dns = 810,
         n_les,
         Δ,
-        warmup = (; kpeak = 2, totalenergy = 1.0, tstop = 2.0, cfl = 0.35, seed = 0),
+        warmup = (; kpeak = 3, totalenergy = 1.0, tstop = 2.0, cfl = 0.35, seed = 0),
         datagen = (; nstep = 100, nsubstep = 25, cfl = 0.35),
         backend = CUDABackend(),
     )
