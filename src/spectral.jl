@@ -1814,9 +1814,38 @@ function plot_evolution_dns(setup)
         horizontal = true,
         nbanks = 3,
     )
+    rowgap!(fig.layout, 10)
     file = joinpath(setup.plotdir, "evolution-dns.pdf")
     @info "Saving DNS evolution plot to $(file)"
     flush(stderr)
+    save(file, fig; backend = CairoMakie)
+    fig
+end
+
+export plot_dissipation_finite_difference
+function plot_dissipation_finite_difference(setup)
+    times, energies, dissipations =
+        load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
+    fig = Figure(; size = (400, 340))
+    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity")
+    lines!(ax, times, 6/5 * dissipations; label = "Dissipation")
+    lines!(
+        ax,
+        times[2:end],
+        -diff(energies) ./ diff(times);
+        label = "Finite difference of energy",
+    )
+    Legend(
+        fig[0, 1],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 2,
+    )
+    rowgap!(fig.layout, 10)
+    file = joinpath(setup.plotdir, "dissipation_finite_difference.pdf")
     save(file, fig; backend = CairoMakie)
     fig
 end

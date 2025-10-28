@@ -26,29 +26,8 @@ setup = setup_laptop()
 setup = setup_turbulator()
 setup = setup_snellius()
 
-setup |> pairs
-
-let
-    (; Δ, l) = setup
-    i = 2
-    k = 2π * i / l
-    exp(-Δ^2 * k^2 / 24)
-end
-
-let
-    (; outdir, l, visc, D, n_dns, backend, force_shells) = setup
-    g = Grid{D}(; l, n = n_dns, backend)
-    shells = getshells(g, force_shells)
-    shells = map(shells) do (; shell, inds)
-        energyinds = vcat(inds...) |> adapt(backend)
-        inds = inds[1] |> adapt(backend)
-        (; shell, inds, energyinds)
-    end
-    getfield.(shells, :energyinds)[1]
-end
-
 # Warmup simulation
-setup = setup_turbulator(); create_dns(setup)
+create_dns(setup)
 
 # Plot DNS spectrum
 plot_spectrum_dns(setup)
@@ -56,32 +35,16 @@ plot_spectrum_dns(setup)
 # Plot time series
 plot_evolution_dns(setup)
 
-let
-    times, energies, dissipations =
-        load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
-    fig = Figure()
-    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Normalized quantity")
-    scatterlines!(ax, times, 6/5 * dissipations; label = "Dissipation")
-    scatterlines!(
-        ax,
-        times[2:end],
-        -diff(energies) ./ diff(times);
-        label = "Finite difference of energy",
-    )
-    axislegend(ax; position = :rt)
-    file = joinpath(setup.plotdir, "energy.pdf")
-    save(file, fig; backend = CairoMakie)
-    fig
-end
+# Plot dissipation vs finite difference of energy
+plot_dissipation_finite_difference(setup)
 
-set_theme!(;
-# fonts = (;
-#     regular = "Dejavu",
-#     # regular = "Palatino",
-# ),
-)
+# set_theme!(;
+#     fonts = (;
+#         regular = "Dejavu",
+#         # regular = "Palatino",
+#     ),
+# )
 
-setup = setup_turbulator();
 true && create_data(setup)
 
 data = joinpath(setup.outdir, "data.jld2") |> load_object;
