@@ -14,15 +14,9 @@ function setup_laptop()
         l = 1.0,
         n_dns = 2048,
         n_les,
-        kpeak = 5,
-        totalenergy = 1.0,
-        t_warmup = 0.5,
         Δ,
-        ou_radius = 2.3,
-        ou_time = 0.005,
-        ou_energy = 0.01,
-        # force = 8.1 => 0.1,
-        force = 8.1 => nothing,
+        warmup = (; kpeak = 5, totalenergy = 1.0, tstop = 0.5, cfl = 0.35, seed = 0),
+        datagen = (; nstep = 1000, nsubstep = 25, cfl = 0.35),
         backend = CUDABackend(),
     )
 end
@@ -47,13 +41,9 @@ function setup_turbulator()
         l = 1.0,
         n_dns,
         n_les,
-        kpeak = 2,
-        totalenergy = 1.0,
-        t_warmup = 0.1,
         Δ,
-        # force = 8.1 => 0.3,
-        # force = 8.1 => nothing,
-        force = 16.1 => nothing,
+        warmup = (; kpeak = 2, totalenergy = 1.0, tstop = 2.0, cfl = 0.35, seed = 0),
+        datagen = (; nstep = 100, nsubstep = 25, cfl = 0.35),
         backend = CUDABackend(),
     )
 end
@@ -65,19 +55,16 @@ function setup_snellius()
     Δ = 4 * l / n_les
     (;
         name = "snellius",
-        # outdir = mkpath("/projects/prjs1757/SymmetryOutput"),
-        outdir = mkpath("/projects/prjs1757/SymmetryOutput2"),
+        outdir = mkpath("/projects/prjs1757/SymmetryOutput"),
         plotdir = joinpath(@__DIR__, "..", "output", "snellius") |> mkpath,
         visc = 1e-4,
         D = 3,
         l = 1.0,
         n_dns = 810,
         n_les,
-        kpeak = 5,
         Δ,
-        ou_radius = 2.3,
-        ou_time = 0.005,
-        ou_energy = 0.01,
+        warmup = (; kpeak = 2, totalenergy = 1.0, tstop = 2.0, cfl = 0.35, seed = 0),
+        datagen = (; nstep = 100, nsubstep = 25, cfl = 0.35),
         backend = CUDABackend(),
     )
 end

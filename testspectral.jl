@@ -19,7 +19,6 @@ using Seneca
 using StaticArrays
 using Statistics
 using SymmetryCode
-using SymmetryCode.Spectral
 using WGLMakie
 lines([1, 2, 3])
 
@@ -49,30 +48,29 @@ let
 end
 
 # Warmup simulation
-setup = setup_turbulator(); create_dns(setup; cfl = 0.35, rng = Xoshiro(0))
+setup = setup_turbulator(); create_dns(setup)
 
 # Plot DNS spectrum
 plot_spectrum_dns(setup)
 
-let
-    times, energies, dissipations = load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
-    fig = Figure()
-    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Normalized quantity")
-    lines!(ax, times, energies / maximum(energies); label = "Energy")
-    lines!(ax, times, dissipations / maximum(dissipations); label = "Dissipation")
-    axislegend(ax; position = :rt)
-    save(joinpath(setup.plotdir, "energy.pdf"), fig; backend = CairoMakie)
-    fig
-end
+# Plot time series
+plot_evolution_dns(setup)
 
 let
-    times, energies, dissipations = load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
+    times, energies, dissipations =
+        load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
     fig = Figure()
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Normalized quantity")
     scatterlines!(ax, times, 6/5 * dissipations; label = "Dissipation")
-    scatterlines!(ax, times[2:end], -diff(energies) ./ diff(times); label = "Finite difference of energy")
+    scatterlines!(
+        ax,
+        times[2:end],
+        -diff(energies) ./ diff(times);
+        label = "Finite difference of energy",
+    )
     axislegend(ax; position = :rt)
-    save(joinpath(setup.plotdir, "energy.pdf"), fig; backend = CairoMakie)
+    file = joinpath(setup.plotdir, "energy.pdf")
+    save(file, fig; backend = CairoMakie)
     fig
 end
 
@@ -83,16 +81,10 @@ set_theme!(;
 # ),
 )
 
-data = let
-    filename = joinpath(setup.outdir, "data.jld2")
-    if true
-        t = time()
-        d = create_data(setup; cfl = 0.35, nstep = setup.D == 2 ? 1000 : 100, nsubstep = 25)
-        t = time() - t
-        save_object(filename, (; d..., timing = t))
-    end
-    load_object(filename)
-end;
+setup = setup_turbulator();
+true && create_data(setup)
+
+data = joinpath(setup.outdir, "data.jld2") |> load_object;
 
 let
     u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
@@ -117,17 +109,17 @@ Base.summarysize(data) * 1e-9
 
 data |> pairs
 
-getindex.(data.statistics, :diss)
-getindex.(data.statistics, :uavg) .^ 2 / 2 * 3
-getindex.(data.statistics, :Re_tay)
-getindex.(data.statistics, :t_int)
-getindex.(data.statistics, :l_int)
-getindex.(data.statistics, :l_kol)
+getindex.(data.statistics_dns, :diss)
+getindex.(data.statistics_dns, :uavg) .^ 2 / 2 * 3
+getindex.(data.statistics_dns, :Re_tay)
+getindex.(data.statistics_dns, :t_int)
+getindex.(data.statistics_dns, :l_int)
+getindex.(data.statistics_dns, :l_kol)
 
 let
     s_dns = mean(data.spectra_dns)
     s_les = mean(data.spectra_les)
-    diss = mean(s -> s.diss, data.statistics)
+    diss = mean(s -> s.diss, data.statistics_dns)
     fig = Figure()
     ax = Axis(fig[1, 1]; xscale = log10, yscale = log10)
     k_dns = 2π / setup.l * eachindex(s_dns)
@@ -521,6 +513,7 @@ let
 end
 
 let
+    setup = setup_turbulator()
     (; D, l, n_dns, visc, backend) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
@@ -538,7 +531,6 @@ let
     diss2 = get_dissipation!(dd, u, visc, g_dns)
     @show diss1 diss2
 end;
-
 
 qr_file = joinpath(setup.outdir, "qr.jld2")
 

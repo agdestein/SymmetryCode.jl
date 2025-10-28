@@ -19,6 +19,13 @@ using StaticArrays
 using Statistics
 using Zygote
 
+"Free up GPU memory."
+function clean()
+    GC.gc()
+    CUDA.reclaim()
+end
+export clean
+
 include("octahedral.jl")
 include("spectral.jl")
 include("setups.jl")

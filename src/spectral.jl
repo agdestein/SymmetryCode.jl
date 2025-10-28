@@ -44,27 +44,17 @@ export inverse_cutoff!
 end
 
 export gaussianfilter!
-@kernel function gaussianfilter!(u, Δ, kstart, g::Grid{2})
+@kernel function gaussianfilter!(u, Δ, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = wavenumber_full(g, I)
     k2 = kx^2 + ky^2
-    kstart2 = (π / g.l * 2 * kstart)^2
-    # # Don't filter the forced wavenumbers (where k < kstart)
-    # # Otherwise, the fixed-energy forcing will not commute with the filter.
-    # # Since we only force the low wavenumbers, the Gaussian is close to 1 anyway.
-    # w = ifelse(k2 < kstart2, one(Δ), exp(-Δ^2 * k2 / 24))
     w = exp(-Δ^2 * k2 / 24)
     u[I] *= w
 end
-@kernel function gaussianfilter!(u, Δ, kstart, g::Grid{3})
+@kernel function gaussianfilter!(u, Δ, g::Grid{3})
     I = @index(Global, Cartesian)
     kx, ky, kz = wavenumber_full(g, I)
     k2 = kx^2 + ky^2 + kz^2
-    kstart2 = (π / g.l * 2 * kstart)^2
-    # # Don't filter the forced wavenumbers (where k < kstart)
-    # # Otherwise, the fixed-energy forcing will not commute with the filter.
-    # # Since we only force the low wavenumbers, the Gaussian is close to 1 anyway.
-    # w = ifelse(k2 < kstart2, one(Δ), exp(-Δ^2 * k2 / 24))
     w = exp(-Δ^2 * k2 / 24)
     u[I] *= w
 end
@@ -117,71 +107,48 @@ function dns_aid()
     sum(i -> sum(abs2, v[i] - ubar[i]) / sum(abs2, ubar[i]), 1:D)
 end
 
-function get_forcing_constant(g, u, S, visc, band)
+function get_forcing_constant(g, u, diss, visc)
     D = dim(g)
     foreach(u -> apply!(twothirds!, g, (u, g)), u)
     u2 = sum(getenergy, u)
-    # u2 = sum(u -> sum(abs2, view(u, band.energyinds)), u)
-    diss = get_dissipation!(S.xx, u, visc, g)
-    diss / u2
+    d = get_dissipation!(diss, u, visc, g)
+    4 / 5 * d / u2
 end
 
 function forced_rhs!(du, u, grid, cache; forceval, visc)
-    (; band) = cache
     convectiondiffusion!(du, u, grid, cache; visc)
     if isnothing(forceval)
         # Use adaptive forcing strength
         # This constant maintains the total energy.
         # This will overwrite σ, but it is no used after convectiondiffusion!
-        forceval = 4 / 5 * get_forcing_constant(grid, u, cache.σ, visc, cache.band)
+        forceval = get_forcing_constant(grid, u, cache.dissfield, visc)
         # forceval = 0.5
     end
     for (du, u) in zip(du, u)
-        # Add linear forcing to du in forced modes
-        # dui = view(du, band.inds)
-        # ui = view(u, band.inds)
-        # @. dui += forceval * ui
+        # Add linear forcing to du
         @. du += forceval * u
     end
     nothing
 end
 
 export create_dns
-function create_dns(setup; cfl, rng)
-    (; outdir, l, visc, D, n_dns, backend, force, totalenergy, kpeak, t_warmup) = setup
+function create_dns(setup)
+    (; outdir, l, visc, D, n_dns, backend, warmup) = setup
+    (; kpeak, totalenergy, tstop, cfl, seed) = warmup
+    rng = Xoshiro(seed)
+
     g = Grid{D}(; l, n = n_dns, backend)
-    tstop = t_warmup
 
     @info "Creating initial conditions"
     flush(stderr)
-    # u = randomfield(
-    #     g;
-    #     rng,
-    #     totalenergy,
-    #     kpeak,
-    # )
-    u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
-    GC.gc();
-    CUDA.reclaim()
-    cache = getcache(g)
+    clean()
+    u = randomfield(g; rng, totalenergy, kpeak)
+    # u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
+    clean()
 
-    # Forcing stuff
-    b = getband(g, force[1])
-
-    # Indices for computing energy (with conjugate indices)
-    energyinds = vcat(b.inds, b.conjinds) |> adapt(backend)
-
-    # Components to be forced (without conjugate indices)
-    inds = b[1] |> adapt(backend)
-
-    band = (; inds, energyinds)
-
-    # forcecache = (; cache..., forceinds = inds)
-    forcecache = (; cache..., band)
-
+    # Allocate arrays
     dissfield = similar(u.x, typeof(g.l))
-
-    # eref = force[2]
+    cache = (; getcache(g)..., dissfield)
 
     @info "Running DNS simulation"
     flush(stderr)
@@ -199,30 +166,7 @@ function create_dns(setup; cfl, rng)
 
         # Step
         # wray3!(convectiondiffusion!, u, Δt, g, cache; visc)
-        wray3!(forced_rhs!, u, Δt, g, forcecache; forceval = force[2], visc)
-
-        # forceval = 0.9 * get_forcing_constant(g, u, cache.σ, visc, band)
-        # for u in u
-        #     # Add linear forcing to du in forced modes
-        #     ui = view(u, band.inds)
-        #     # @. ui += Δt * forceval * ui
-        #     # @. ui *= exp(Δt * forceval)
-        #     @. ui /= (1 - Δt * forceval)
-        #     # @. u += Δt * forceval * u
-        # end
-
-        # # Reinject energy in forced band
-        # # Current energy in band
-        # e = sum(u -> sum(abs2, view(u, band.energyinds)) / 2, u)
-        #
-        # # Scaling factor that enforces energy
-        # fac = sqrt(eref / e)
-        #
-        # # Scale components in band
-        # for u in u
-        #     uband = view(u, band.inds)
-        #     uband .*= fac
-        # end
+        wray3!(forced_rhs!, u, Δt, g, cache; forceval = nothing, visc)
 
         if k % 1 == 0
             e = energy(u)
@@ -253,12 +197,15 @@ function create_dns(setup; cfl, rng)
     jldsave(file; u = u |> cpu_device(), times, energies, dissipations, walltime)
 end
 
-function create_data(setup; cfl, nstep, nsubstep)
-    (; visc, D, n_dns, n_les, backend, force, outdir, Δ) = setup
-    g_dns = Grid{D}(; setup.l, n = n_dns, backend)
-    g_les = Grid{D}(; setup.l, n = n_les, backend)
-    c_dns = getcache(g_dns)
-    c_les = getcache(g_les)
+function create_data(setup)
+    (; l, visc, D, n_dns, n_les, backend, outdir, datagen, Δ) = setup
+    (; nstep, nsubstep, cfl) = datagen
+
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
+
+    # Load DNS state from warm-up simulation
+    u = load(joinpath(outdir, "dns.jld2"), "u") |> adapt(backend)
 
     # Allocate arrays
     ubar = vectorfield(g_les)
@@ -268,25 +215,10 @@ function create_data(setup; cfl, nstep, nsubstep)
     τ = tensorfield(g_les)
     inputs = fill(map(Array, ubar), 0)
     outputs = fill(map(Array, τ), 0)
-
-    # Load DNS state from warm-up simulation
-    u = load(joinpath(outdir, "dns.jld2"), "u") |> adapt(backend)
-
-    # Forcing stuff
-    b = getband(g_dns, force[1])
-
-    # Indices for computing energy (with conjugate indices)
-    energyinds = vcat(b.inds, b.conjinds) |> adapt(backend)
-
-    # Components to be forced (without conjugate indices)
-    inds = b[1] |> adapt(backend)
-
-    band = (; inds, energyinds)
-
-    forcecache = (; c_dns..., forceinds = inds)
-
-    # # These energies will be maintained throughout the simulation.
-    # eref = force[2]
+    dissfield_dns = similar(u.x, typeof(l))
+    dissfield_les = similar(ubar.x, typeof(l))
+    c_dns = (; getcache(g_dns)..., dissfield = dissfield_dns)
+    c_les = (; getcache(g_les)..., dissfield = dissfield_les)
 
     # Spectra
     stuff_dns = Seneca.spectral_stuff(g_dns)
@@ -295,13 +227,18 @@ function create_data(setup; cfl, nstep, nsubstep)
     spectra_les = fill(zeros(0), 0)
 
     # Compute turbulence statistics (use σ as temporary tensor storage)
-    stat = turbulence_statistics(u, visc, g_dns, c_dns.σ)
-    statistics = fill(stat, 0)
+    statistics_dns  = fill(turbulence_statistics(u, visc, g_dns, dissfield_dns), 0)
+    statistics_les  = fill(turbulence_statistics(ubar, visc, g_les, dissfield_les), 0)
 
+    # Keep track of adaptive time stepping
     times = zeros(0)
+
+    # Compute force factor from DNS
+    forceval = get_forcing_constant(g_dns, u, dissfield_dns, visc)
 
     # Time stepping
     t = 0.0
+    timing = time()
     for i = 1:nstep
         # Do multiple substeps before storing data
         # Skip first step to get initial statistics
@@ -312,20 +249,7 @@ function create_data(setup; cfl, nstep, nsubstep)
 
             # Evolve DNS
             # wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
-            wray3!(forced_rhs!, u, Δt, g_dns, forcecache; forceval = force[2], visc)
-
-            # # Reinject energy in forced band
-            # # Current energy in band
-            # e = sum(u -> sum(abs2, view(u, band.energyinds)) / 2, u)
-            #
-            # # Scaling factor that enforces energy
-            # fac = sqrt(eref / e)
-            #
-            # # Scale components in band
-            # for u in u
-            #     uband = view(u, band.inds)
-            #     uband .*= fac
-            # end
+            wray3!(forced_rhs!, u, Δt, g_dns, c_dns; forceval, visc)
 
             # Log
             if j == nsubstep && i % 1 == 0
@@ -356,7 +280,6 @@ function create_data(setup; cfl, nstep, nsubstep)
             g_dns,
             g_les,
             Δ,
-            kforce = force[1],
         )
 
         # Save current (ubar,tau)-pair
@@ -370,18 +293,29 @@ function create_data(setup; cfl, nstep, nsubstep)
         push!(spectra_les, s_les.s)
 
         # Compute turbulence statistics (use σ as temporary tensor storage)
-        stat = turbulence_statistics(u, visc, g_dns, c_dns.σ)
-        push!(statistics, stat)
+        stat_dns = turbulence_statistics(u, visc, g_dns, dissfield_dns)
+        stat_les = turbulence_statistics(ubar, visc, g_les, dissfield_les)
+        push!(statistics_dns, stat_dns)
+        push!(statistics_les, stat_les)
 
         # Keep track of times
         push!(times, t)
     end
 
-    (; inputs, outputs, times, spectra_dns, spectra_les, statistics)
+    timing = time() - t
+
+    # Save results 
+    filename = joinpath(setup.outdir, "data.jld2")
+    save_object(
+        filename,
+        (; inputs, outputs, times, spectra_dns, spectra_les, statistics_dns, statistics_les, timing),
+    )
+
+    nothing
 end
 
 export sfs
-function sfs(u, g_dns, g_les, Δ, kforce)
+function sfs(u, g_dns, g_les, Δ)
     c_dns = getcache(g_dns)
     c_les = getcache(g_les)
     ubar = vectorfield(g_les)
@@ -389,21 +323,21 @@ function sfs(u, g_dns, g_les, Δ, kforce)
     σbar2 = tensorfield(g_les)
     trace = scalarfield(g_les)
     τ = tensorfield(g_les)
-    sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ, kforce)
+    sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     τ
 end
 
 export sfs!
-function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ, kforce)
+function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     D = dim(g_dns)
     nonlinearity!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, g_dns)
     for (ubar, u) in zip(ubar, u)
         apply!(cutoff!, g_les, (ubar, u))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, kforce, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
     end
     for (σbar1, σ) in zip(σbar1, c_dns.σ)
         apply!(cutoff!, g_les, (σbar1, σ))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (σbar1, Δ, kforce, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (σbar1, Δ, g_les))
     end
     nonlinearity!(σbar2, c_les.vi_vj, c_les.v, ubar, c_les.plan, g_les)
     foreach(i -> (τ[i] .= σbar1[i] .- σbar2[i]), 1:tensordim(g_dns))
@@ -1129,7 +1063,7 @@ end
 
 export plot_densities
 function plot_densities(; u_dns, setup, models, dolog)
-    (; plotdir, name, D, l, n_dns, n_les, backend, Δ, force) = setup
+    (; plotdir, name, D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     u_ref = vectorfield(g_les)
@@ -1137,7 +1071,7 @@ function plot_densities(; u_dns, setup, models, dolog)
         apply!(cutoff!, g_les, (u_ref, u_dns))
         isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, nshell + 1, g_les))
     end
-    τhat = sfs(u_dns, g_dns, g_les, Δ, force[1])
+    τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
@@ -1395,7 +1329,7 @@ end
 
 export apriori_error
 function apriori_error(; u_dns, setup, models)
-    (; D, l, n_dns, n_les, backend, Δ, force) = setup
+    (; D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
 
@@ -1408,7 +1342,7 @@ function apriori_error(; u_dns, setup, models)
     G = getgradient(u_ref, g_les)
 
     # Outputs
-    τhat = sfs(u_dns, g_dns, g_les, Δ, force[1])
+    τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
@@ -1525,7 +1459,7 @@ end
 
 export get_dissipation_errors
 function get_dissipation_errors(; setup, u_dns, models)
-    (; D, l, n_dns, n_les, backend, Δ, force) = setup
+    (; D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     ubar = vectorfield(g_les)
@@ -1533,7 +1467,7 @@ function get_dissipation_errors(; setup, u_dns, models)
         apply!(cutoff!, g_les, (ubar, u_dns))
         isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, nshell + 1, g_les))
     end
-    τhat = sfs(u_dns, g_dns, g_les, Δ, force)
+    τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
@@ -1782,7 +1716,7 @@ end
 
 export plot_sfs
 function plot_sfs(setup, u_dns, models)
-    (; D, l, n_dns, n_les, backend, Δ, force) = setup
+    (; D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     ubar = vectorfield(g_les)
@@ -1790,7 +1724,7 @@ function plot_sfs(setup, u_dns, models)
         apply!(cutoff!, g_les, (ubar, u_dns))
         isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, nshell + 1, g_les))
     end
-    τhat = sfs(u_dns, g_dns, g_les, Δ, force)
+    τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
     plan = Seneca.getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
@@ -1861,16 +1795,42 @@ function plot_sfs(setup, u_dns, models)
     fig
 end
 
+export plot_evolution_dns
+function plot_evolution_dns(setup)
+    times, energies, dissipations =
+        load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
+    a = @. dissipations / 2 / energies
+    fig = Figure(; size = (400, 340))
+    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Normalized quantity")
+    lines!(ax, times, energies / maximum(energies); label = "Energy")
+    lines!(ax, times, dissipations / maximum(dissipations); label = "Dissipation")
+    lines!(ax, times, a / maximum(a); linestyle = :dash, label = "Forcing")
+    Legend(
+        fig[0, 1],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 3,
+    )
+    file = joinpath(setup.plotdir, "evolution-dns.pdf")
+    @info "Saving DNS evolution plot to $(file)"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
+    fig
+end
+
 export plot_spectrum_dns
 function plot_spectrum_dns(setup)
-    (; outdir, plotdir, D, l, n_dns, n_les, backend, visc, force) = setup
+    (; outdir, plotdir, D, l, n_dns, n_les, backend, visc) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
     ubar = vectorfield(g_les)
     for (ubar, u) in zip(ubar, u)
         apply!(cutoff!, g_les, (ubar, u))
-        apply!(gaussianfilter!, g_les, (ubar, setup.Δ, force[1], g_les))
+        apply!(gaussianfilter!, g_les, (ubar, setup.Δ, g_les))
     end
     D = dim(g_dns)
     stuff_dns = Seneca.spectral_stuff(g_dns)
