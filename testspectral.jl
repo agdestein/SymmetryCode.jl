@@ -28,6 +28,11 @@ lines([1, 2, 3])
 setup = setup_laptop()
 setup = setup_turbulator()
 setup = setup_snellius()
+setup |> pairs
+
+setup = setup_turbulator();
+create_dns(setup);
+plot_spectrum_dns(setup)
 
 # Warmup simulation
 create_dns(setup)
@@ -48,6 +53,7 @@ plot_dissipation_finite_difference(setup)
 #     ),
 # )
 
+setup = setup_turbulator();
 create_data(setup)
 
 data = joinpath(setup.outdir, "data.jld2") |> load_object;
@@ -59,7 +65,15 @@ let
     p = plan_rfft(v)
     ldiv!(v, p, u.z)
     v .*= g.n^3 # FFT factor
-    v[:, :, end] |> Array |> heatmap
+    r = 5e-1
+    field = v[:, :, end] |> Array
+    image(
+        field;
+        # colorrange = (-r, r),
+        # colormap = :balance,
+        colormap = :RdBu,
+        # colormap = :seaborn_icefire_gradient,
+    )
 end
 
 let
@@ -83,16 +97,48 @@ getindex.(data.statistics_dns, :l_int)
 getindex.(data.statistics_dns, :l_kol)
 
 let
+    fig = Figure()
+    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity")
+    s = data.statistics_dns
+    t = data.times
+    for (key, label) in [
+        (:diss, "Dissipation"),
+        (:uavg, "Kinetic Energy"),
+        (:Re_tay, "Taylor Reynolds"),
+        (:t_int, "Integral time"),
+    ]
+        y = getindex.(s, key)
+        lines!(ax, t, y ./ maximum(y); label)
+    end
+    eps = 0.1
+    ylims!(ax, -eps, 1 + eps)
+    Legend(
+        fig[0, 1],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 4,
+    )
+    fig
+end
+
+let
     s_dns = mean(data.spectra_dns)
     s_les = mean(data.spectra_les)
     diss = mean(s -> s.diss, data.statistics_dns)
+    eta = mean(s -> s.l_kol, data.statistics_dns)
     fig = Figure()
     ax = Axis(fig[1, 1]; xscale = log10, yscale = log10)
     k_dns = 2π / setup.l * eachindex(s_dns)
     k_les = 2π / setup.l * eachindex(s_les)
-    lines!(ax, k_dns, s_dns)
-    lines!(ax, k_les, s_les)
-    lines!(ax, k_dns, 0.4 * diss^(2/3) * (k_dns * setup.l / 2π) .^ (-5/3))
+    C = 1.6
+    s_kol = C * diss^(2/3) * k_dns .^ (-5/3)
+    escale = C^(-1) * diss^(-2/3) * eta^(-5/3)
+    lines!(ax, eta * k_dns, escale * s_dns)
+    lines!(ax, eta * k_les, escale * s_les)
+    lines!(ax, eta * k_dns, escale * s_kol)
     fig
 end
 
@@ -107,12 +153,12 @@ m_smag = create_smagorinsky(
     Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
 )
 
-m_vers = create_verstappen(
-    sqrt(3 / 2) / π, # 0.3898, in original paper
-    # 0.527, # Higher value from Trias "building proper invariants" paper
-    setup.Δ,
-    Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
-)
+# m_vers = create_verstappen(
+#     sqrt(3 / 2) / π, # 0.3898, in original paper
+#     # 0.527, # Higher value from Trias "building proper invariants" paper
+#     setup.Δ,
+#     Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
+# )
 
 m_clar = create_clark(setup.Δ, Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
 
@@ -120,10 +166,10 @@ m_tbnn, train_tbnn = let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     kern = ntuple(Returns(1), setup.D)
     net = Chain(
-        Conv(kern, Spectral.ninvariant(g) => 64, gelu),
+        Conv(kern, ninvariant(g) => 64, gelu),
         Conv(kern, 64 => 64, gelu),
         Conv(kern, 64 => 128, gelu),
-        Conv(kern, 128 => Spectral.nbasis(g); use_bias = false),
+        Conv(kern, 128 => nbasis(g); use_bias = false),
     ) # 13_888 parameters
     # net = Chain(
     #     Conv(kern, Spectral.ninvariant(g) => 16, gelu),
@@ -183,7 +229,7 @@ m_equi, train_equi = let
             loss = create_loss(net_stuff.project),
             setup,
             dataloader = create_dataloader(setup, data; batchsize = 20),
-            nepoch = 10,
+            nepoch = 5,
             learning_rate = 1e-3,
             net_stuff,
         )
@@ -224,7 +270,7 @@ m_conv, train_conv = let
             loss = create_loss(net_stuff.project),
             setup,
             dataloader = create_dataloader(setup, data; batchsize = 20),
-            nepoch = 10,
+            nepoch = 5,
             learning_rate = 1e-3,
             net_stuff,
         )
@@ -243,31 +289,31 @@ m_conv, train_conv = let
     chain, (; losses_train, losses_valid, timing)
 end;
 
-# let
-#     fig = Figure(; size = (400, 340))
-#     ax = Axis(
-#         fig[1, 1];
-#         # xscale = log10,
-#         # yscale = log10,
-#         xlabel = "Iteration",
-#         ylabel = "Loss",
-#     )
-#     lines!(ax, train_tbnn.losses_valid; label = "TBNN")
-#     lines!(ax, train_equi.losses_valid; label = "G-Conv")
-#     lines!(ax, train_conv.losses_valid; label = "Conv")
-#     Legend(
-#         fig[0, 1],
-#         ax;
-#         tellwidth = false,
-#         tellheight = true,
-#         framevisible = false,
-#         horizontal = true,
-#         nbanks = 3,
-#     )
-#     rowgap!(fig.layout, 5)
-#     save("$(setup.plotdir)/training.pdf", fig; backend = CairoMakie)
-#     fig
-# end
+let
+    fig = Figure(; size = (400, 340))
+    ax = Axis(
+        fig[1, 1];
+        # xscale = log10,
+        # yscale = log10,
+        xlabel = "Iteration",
+        ylabel = "Loss",
+    )
+    lines!(ax, train_tbnn.losses_valid; label = "TBNN")
+    lines!(ax, train_equi.losses_valid; label = "G-Conv")
+    lines!(ax, train_conv.losses_valid; label = "Conv")
+    Legend(
+        fig[0, 1],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 3,
+    )
+    rowgap!(fig.layout, 5)
+    save("$(setup.plotdir)/training.pdf", fig; backend = CairoMakie)
+    fig
+end
 
 map(
     t -> round(t; digits = 1),
@@ -280,11 +326,11 @@ flush(stdout)
 upostfiles = map(
     name -> joinpath(setup.outdir, "u-post-$(name).jld2"),
     (;
-        dns = "dns",
-        ref = "ref",
+        # dns = "dns",
+        # ref = "ref",
         nomo = "nomo",
         smag = "smag",
-        vers = "vers",
+        # vers = "vers",
         clar = "clar",
         tbnn = "tbnn",
         equi = "equi",
@@ -292,35 +338,54 @@ upostfiles = map(
     ),
 )
 
-# let
-#     models = (;
-#         nomo = m_nomo,
-#         smag = m_smag,
-#         vers = m_vers,
-#         clar = m_clar,
-#         tbnn = m_tbnn,
-#         equi = m_equi,
-#         conv = m_conv,
-#     )
-#     u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-#     inference_post(;
-#         u_dns,
-#         setup,
-#         models,
-#         files = upostfiles,
-#         cfl = 0.35,
-#         tstop = 1e-1,
-#         dodns = true,
-#     )
-# end
+let
+    models = (;
+        nomo = m_nomo,
+        smag = m_smag,
+        # vers = m_vers,
+        clar = m_clar,
+        tbnn = m_tbnn,
+        equi = m_equi,
+        conv = m_conv,
+    )
+    inference_post(; data, setup, models, files = upostfiles)
+end
 
-map(f -> load(f, "timing"), upostfiles) |>
+map(f -> load_object(f).timing, upostfiles) |>
 t -> map(x -> round(x; digits = 1), t) |> pairs |> display
 flush(stdout)
 
-u = map(f -> load(f, "u"), upostfiles);
+u = map(f -> load_object(f).u, upostfiles);
 
-get_errors(setup, u);
+e_post = SymmetryCode.get_errors(setup, data, upostfiles);
+
+map(e -> round(mean(e); sigdigits = 4), e_post) |> pairs
+
+let
+    fig = Figure()
+    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity",
+            yscale = log10,
+            xscale = log10,
+              )
+    t = data.times
+    labels = getlabels()
+    for k in keys(e_post)
+        e = e_post[k]
+        lines!(ax, t[2:end], e[2:end]; label = labels[k])
+    end
+    # eps = 0.1
+    # ylims!(ax, -eps, 1 + eps)
+    Legend(
+        fig[0, 1],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 3,
+    )
+    fig
+end
 
 # Plot LES spectrum
 plot_spectrum_les(setup, u)
@@ -337,7 +402,7 @@ let
     models = (;
         nomo = m_nomo,
         smag = m_smag,
-        vers = m_vers,
+        # vers = m_vers,
         clar = m_clar,
         tbnn = m_tbnn,
         equi = m_equi,

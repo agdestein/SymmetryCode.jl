@@ -9,6 +9,7 @@ getlabels() = (;
     equi = "G-Conv",
     conv = "Conv",
 )
+export getlabels
 
 @inline function cutoff_index(nbar, n, i, is1)
     imax = div(nbar, 2) + is1
@@ -49,6 +50,8 @@ export gaussianfilter!
     kx, ky = wavenumber_full(g, I)
     k2 = kx^2 + ky^2
     w = exp(-Δ^2 * k2 / 24)
+    nshell = 2
+    w = ifelse(k2 < (nshell + 1)^2, one(w), w) # Don't filter forced shells
     u[I] *= w
 end
 @kernel function gaussianfilter!(u, Δ, g::Grid{3})
@@ -56,6 +59,9 @@ end
     kx, ky, kz = wavenumber_full(g, I)
     k2 = kx^2 + ky^2 + kz^2
     w = exp(-Δ^2 * k2 / 24)
+    nshell = 2
+    kbound2 = (2π / g.l * (nshell + 1))^2
+    w = ifelse(k2 < kbound2, one(w), w) # Don't filter forced shells
     u[I] *= w
 end
 
@@ -133,8 +139,8 @@ end
 
 export create_dns
 function create_dns(setup)
-    (; outdir, l, visc, D, n_dns, backend, warmup) = setup
-    (; kpeak, totalenergy, tstop, cfl, seed) = warmup
+    (; outdir, l, visc, D, n_dns, cfl, backend, warmup) = setup
+    (; totalenergy, tstop, seed) = warmup
     rng = Xoshiro(seed)
 
     g = Grid{D}(; l, n = n_dns, backend)
@@ -142,21 +148,44 @@ function create_dns(setup)
     @info "Creating initial conditions"
     flush(stderr)
     clean()
-    u = randomfield(g; rng, totalenergy, kpeak)
-    # u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
+    u = randomfield(linear_profile, g; rng, totalenergy)#, kpeak)
     clean()
 
+    # # Load previous DNS state
+    # u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
+    # times, energies, dissipations =
+    #     load("$(outdir)/dns.jld2", "times", "energies", "dissipations")
+    # t = times[end]
+
+    # # Band stuff
+    # b = getband(g, 3)
+    # band = (;
+    #     inds = b.inds |> adapt(backend),
+    #     energyinds = vcat(b.inds, b.conjinds) |> adapt(backend),
+    # )
+    # eband_ref = sum(u -> sum(abs2, view(u, band.energyinds)), u) / 2
+
+    # Shell stuff
+    s = getshells(g, [1, 2])
+    shells = map(s) do s
+        inds = s.inds[1] |> adapt(backend)
+        energyinds = vcat(s.inds[1], s.inds[2]) |> adapt(backend)
+        eref = sum(u -> sum(abs2, view(u, energyinds)), u) / 2
+        (; inds, energyinds, eref)
+    end
+
     # Allocate arrays
-    dissfield = similar(u.x, typeof(g.l))
+    dissfield = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
     cache = (; getcache(g)..., dissfield)
 
-    @info "Running DNS simulation"
-    flush(stderr)
     t = 0.0
-    k = 0
     times = [t]
     energies = [energy(u)]
     dissipations = [get_dissipation!(dissfield, u, visc, g)]
+
+    @info "Running DNS simulation"
+    flush(stderr)
+    k = 0
     walltime = time()
     while t < tstop
         Δt = cfl * propose_timestep(u, g, visc, cache)
@@ -165,8 +194,18 @@ function create_dns(setup)
         k += 1
 
         # Step
-        # wray3!(convectiondiffusion!, u, Δt, g, cache; visc)
-        wray3!(forced_rhs!, u, Δt, g, cache; forceval = nothing, visc)
+        wray3!(convectiondiffusion!, u, Δt, g, cache; visc)
+        # wray3!(forced_rhs!, u, Δt, g, cache; forceval = nothing, visc)
+
+        # # Maintain energy
+        # eband = sum(u -> sum(abs2, view(u, band.energyinds)), u) / 2
+        # foreach(u -> (view(u, band.inds) .*= sqrt(eband_ref / eband)), u)
+
+        # Maintain energy
+        for s in shells
+            eshell = sum(u -> sum(abs2, view(u, s.energyinds)), u) / 2
+            foreach(u -> (view(u, s.inds) .*= sqrt(s.eref / eshell)), u)
+        end
 
         if k % 1 == 0
             e = energy(u)
@@ -178,7 +217,7 @@ function create_dns(setup)
                 [
                     # "k = $k",
                     "t = $(round(t; sigdigits = 4))",
-                    # "Δt = $(round(Δt; sigdigits = 4))",
+                    "Δt = $(round(Δt; sigdigits = 4))",
                     # "umax = $(round(maximum(u -> maximum(abs, u), u); sigdigits = 4))",
                     "energy = $(round(e; sigdigits = 4))",
                     "diss = $(round(diss; sigdigits = 4))",
@@ -198,8 +237,8 @@ function create_dns(setup)
 end
 
 function create_data(setup)
-    (; l, visc, D, n_dns, n_les, backend, outdir, datagen, Δ) = setup
-    (; nstep, nsubstep, cfl) = datagen
+    (; l, visc, D, n_dns, n_les, cfl, backend, outdir, datagen, Δ) = setup
+    (; nstep, nsubstep) = datagen
 
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
@@ -227,14 +266,23 @@ function create_data(setup)
     spectra_les = fill(zeros(0), 0)
 
     # Compute turbulence statistics (use σ as temporary tensor storage)
-    statistics_dns  = fill(turbulence_statistics(u, visc, g_dns, dissfield_dns), 0)
-    statistics_les  = fill(turbulence_statistics(ubar, visc, g_les, dissfield_les), 0)
+    statistics_dns = fill(turbulence_statistics(u, visc, g_dns, dissfield_dns), 0)
+    statistics_les = fill(turbulence_statistics(ubar, visc, g_les, dissfield_les), 0)
 
     # Keep track of adaptive time stepping
     times = zeros(0)
 
-    # Compute force factor from DNS
-    forceval = get_forcing_constant(g_dns, u, dissfield_dns, visc)
+    # Shell stuff
+    s = getshells(g_dns, [1, 2])
+    shells = map(s) do s
+        inds = s.inds[1] |> adapt(backend)
+        energyinds = vcat(s.inds[1], s.inds[2]) |> adapt(backend)
+        eref = sum(u -> sum(abs2, view(u, energyinds)), u) / 2
+        (; inds, energyinds, eref)
+    end
+
+    # # Compute force factor from DNS
+    # forceval = get_forcing_constant(g_dns, u, dissfield_dns, visc)
 
     # Time stepping
     t = 0.0
@@ -248,8 +296,14 @@ function create_data(setup)
             t += Δt
 
             # Evolve DNS
-            # wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
-            wray3!(forced_rhs!, u, Δt, g_dns, c_dns; forceval, visc)
+            wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
+            # wray3!(forced_rhs!, u, Δt, g_dns, c_dns; forceval, visc)
+
+            # Maintain energy
+            for s in shells
+                eshell = sum(u -> sum(abs2, view(u, s.energyinds)), u) / 2
+                foreach(u -> (view(u, s.inds) .*= sqrt(s.eref / eshell)), u)
+            end
 
             # Log
             if j == nsubstep && i % 1 == 0
@@ -268,19 +322,7 @@ function create_data(setup)
         end
 
         # Compute ubar and sub-filter stress
-        sfs!(;
-            τ,
-            trace,
-            σbar1,
-            σbar2,
-            ubar,
-            u,
-            c_dns,
-            c_les,
-            g_dns,
-            g_les,
-            Δ,
-        )
+        sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
 
         # Save current (ubar,tau)-pair
         push!(inputs, map(Array, ubar))
@@ -302,13 +344,22 @@ function create_data(setup)
         push!(times, t)
     end
 
-    timing = time() - t
+    timing = time() - timing
 
     # Save results 
     filename = joinpath(setup.outdir, "data.jld2")
     save_object(
         filename,
-        (; inputs, outputs, times, spectra_dns, spectra_les, statistics_dns, statistics_les, timing),
+        (;
+            inputs,
+            outputs,
+            times,
+            spectra_dns,
+            spectra_les,
+            statistics_dns,
+            statistics_les,
+            timing,
+        ),
     )
 
     nothing
@@ -366,7 +417,7 @@ function create_dataloader(setup, data; batchsize)
     ττ = spacetensorfield(g)
     plan = plan_rfft(GG.xx)
     T = typeof(setup.l)
-    snaps = map(zip(data...)) do (ucpu, τcpu)
+    snaps = map(zip(data.inputs, data.outputs)) do (ucpu, τcpu)
         foreach(copyto!, u, ucpu)
         apply!(vectorgradient!, g, (G, u, g))
         for (GG, G) in zip(GG, G)
@@ -661,116 +712,110 @@ function les!(du, u, grid, cache; model, visc)
     apply!(tensordivergence!, grid, (du, σ, grid))
 end
 
-function inference_post(; u_dns, setup, models, files, cfl, tstop, dodns)
-    (; D, l, n_dns, n_les, backend, visc, Δ, nshell) = setup
-    g_dns = Grid{D}(; l, n = n_dns, backend)
-    g_les = Grid{D}(; l, n = n_les, backend)
+function inference_post(; data, setup, models, files)
+    (; D, l, n_les, backend, visc, Δ, cfl) = setup
+    grid = Grid{D}(; l, n = n_les, backend)
 
-    # Initial ubar
-    @info "Filtering initial DNS"
-    u_les = vectorfield(g_les)
-    for (u_les, u_dns) in zip(u_les, u_dns)
-        apply!(cutoff!, g_les, (u_les, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_les, Δ, nshell + 1, g_les))
-    end
-
-    if dodns
-        # Solve DNS
-        @info "Solving DNS"
-        t = time()
-        solve_les!(u_dns; grid = g_dns, visc, model = nothing, tstop, cfl)
-        t = time() - t
-
-        # Compute final filtered DNS
-        @info "Filtering final DNS"
-        u_ref = vectorfield(g_les)
-        for (u_ref, u_dns) in zip(u_ref, u_dns)
-            apply!(cutoff!, g_les, (u_ref, u_dns))
-            isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, nshell + 1, g_les))
-        end
-
-        # Save DNS results and free up memory
-        jldsave(files.dns; u = u_dns |> cpu_device(), timing = t)
-        jldsave(files.ref; u = u_ref |> cpu_device(), timing = t)
-        u_dns = nothing
-        u_ref = nothing
-    end
+    u_les = data.inputs[1]
 
     # Solve LES for each model
-    u_model = vectorfield(g_les)
+    u_model = vectorfield(grid)
     for key in keys(models)
         @info "Solving LES with $(key)"
         model = models[key]
 
         # Do a short model warmup (so that compilation does not get included in timing)
-        twarm = 1e-6
+        twarm = [0.0, 1e-6]
         foreach(copyto!, u_model, u_les)
-        solve_les!(u_model; grid = g_les, visc, model, tstop = twarm, cfl)
+        solve_les!(u_model; times = twarm, grid, visc, model, cfl)
 
         # Solve LES
         foreach(copyto!, u_model, u_les)
         t = time()
-        solve_les!(u_model; grid = g_les, visc, model, tstop, cfl)
+        snapshots = solve_les!(u_model; data.times, grid, visc, model, cfl)
         t = time() - t
 
         # Save results
-        jldsave(files[key]; u = u_model |> cpu_device(), timing = t)
+        save_object(files[key], (; data.times, u = snapshots, timing = t))
     end
 end
 
 export solve_les!
-function solve_les!(u; grid, visc, model, cfl, tstop)
-    t = 0.0
+function solve_les!(u; times, grid, visc, model, cfl)
+    backend = get_backend(u.x)
     cache = getcache(grid)
     if !isnothing(model)
         # Allocate velocity gradient for closure
         cache = (; cache..., G = tensorfield_nonsym(grid))
     end
-    t = zero(tstop)
-    i = 0
-    while t < tstop
-        Δt = cfl * propose_timestep(u, grid, visc, cache)
-        Δt = min(Δt, tstop - t)
-        t += Δt
-        if isnothing(model)
-            # Without closure
-            wray3!(convectiondiffusion!, u, Δt, grid, cache; visc)
-        else
-            # With closure
-            wray3!(les!, u, Δt, grid, cache; model, visc)
-        end
-        if i % 5 == 0
-            energy = Seneca.energy(u)
-            @info join(
-                [
-                    "i = $i",
-                    "t = $(round(t; sigdigits = 4))",
-                    "Δt = $(round(Δt; sigdigits = 4))",
-                    # "umax = $(round(maximum(u -> maximum(abs, u), u); sigdigits = 4))",
-                    "energy = $(round(energy; sigdigits = 4))",
-                ],
-                ",\t",
-            )
-        end
-        i += 1
+
+    # Shell stuff
+    s = getshells(grid, [1, 2])
+    shells = map(s) do s
+        inds = s.inds[1] |> adapt(backend)
+        energyinds = vcat(s.inds[1], s.inds[2]) |> adapt(backend)
+        eref = sum(u -> sum(abs2, view(u, energyinds)), u) / 2
+        (; inds, energyinds, eref)
     end
-    foreach(u -> apply!(twothirds!, grid, (u, grid)), u)
-    u
+
+    # Storage for states on CPU
+    states = fill(map(Array, u), 0)
+
+    t = times[1]
+    j = 0
+    for (i, tstop) in enumerate(times)
+        # Skip first step to get initial condition
+        i == 1 || while t < tstop
+            Δt = cfl * propose_timestep(u, grid, visc, cache)
+            Δt = min(Δt, tstop - t)
+            t += Δt
+
+            # Unforced step
+            if isnothing(model)
+                # Without closure
+                wray3!(convectiondiffusion!, u, Δt, grid, cache; visc)
+            else
+                # With closure
+                wray3!(les!, u, Δt, grid, cache; model, visc)
+            end
+
+            # Maintain energy
+            for s in shells
+                eshell = sum(u -> sum(abs2, view(u, s.energyinds)), u) / 2
+                foreach(u -> (view(u, s.inds) .*= sqrt(s.eref / eshell)), u)
+            end
+
+            if j % 5 == 0
+                energy = Seneca.energy(u)
+                @info join(
+                    [
+                        "j = $j",
+                        "t = $(round(t; sigdigits = 4))",
+                        "Δt = $(round(Δt; sigdigits = 4))",
+                        "energy = $(round(energy; sigdigits = 4))",
+                    ],
+                    ",\t",
+                )
+            end
+            j += 1
+        end
+
+        # Store current state
+        foreach(u -> apply!(twothirds!, grid, (u, grid)), u)
+        push!(states, map(Array, u))
+    end
+
+    states
 end
 
-function get_errors(setup, u_les)
-    u_les = map(stack, u_les)
-    k = keys(u_les)
-    k_les = filter(!=(:dns), k)
-    k_les = filter(!=(:ref), k_les)
-    u_ref = u_les.ref |> adapt(setup.backend)
-    map(k_les) do key
-        u = u_les[key] |> adapt(setup.backend)
-        err = norm(u - u_ref) / norm(u_ref)
-        println(key => round(err; sigdigits = 4))
-        key => err
+function get_errors(setup, data, files)
+    u_ref = map(stack, data.inputs)
+    map(files) do f
+        u_les = f |> load_object |> x -> map(stack, x.u)
+        map((u_les, u_ref) -> norm(u_les - u_ref) / norm(u_ref), u_les, u_ref)
     end
 end
+export get_errors
 
 # 2D basis
 @inline nbasis(::Grid{2}) = 2 # Number of entries below
@@ -929,7 +974,7 @@ function create_dataloader_tbnn(setup, data; batchsize, rng)
     τ = scalarfield(g)
     ττ = spacetensorfield(g)
     plan = plan_rfft(ττ.xx)
-    snaps = map(zip(data...)) do (ucpu, τcpu)
+    snaps = map(zip(data.inputs, data.outputs)) do (ucpu, τcpu)
         foreach(copyto!, u, ucpu)
         G = getgradient(u, g)
         for (ττ, τcpu) in zip(ττ, τcpu)
@@ -1875,7 +1920,7 @@ function plot_spectrum_dns(setup)
     stuff_dns = Seneca.spectral_stuff(g_dns)
     stuff_les = Seneca.spectral_stuff(g_les)
     stat = turbulence_statistics(u, visc, g_dns)
-    @show stat.Re_tay
+    stat |> pairs |> display
     s_dns = spectrum(u, g_dns, stuff_dns)
     s_les = spectrum(ubar, g_les, stuff_les)
     # l_int_new = pi / 2 / stat.uavg * sum(eachindex(s_dns.s)) do i
@@ -1889,19 +1934,20 @@ function plot_spectrum_dns(setup)
         yscale = log10,
         xlabel = L"\kappa \eta",
         xlabelsize = 20,
-        ylabel = "Normalized spectrum",
+        # ylabel = "Normalized spectrum",
+        ylabel = L"\epsilon^{-2 / 3} \eta^{5 / 3} E(\kappa)",
+        ylabelsize = 20,
     )
     if D == 2
-        kkolmo = [3, g_dns.n / 10]
+        kkolmo = 2π / l * [3, g_dns.n / 10]
         kolmo = @. stat.diss^(-1 / 3) * kkolmo^(-3)
-        escale = stat.diss^(-1 / 3) * stat.l_kol^(-3)
+        escale = stat.diss^(-1 / 3) * stat.l_kol^(3)
     elseif D == 3
-        kkolmo = [3, g_dns.n / 8]
-        # C = 0.65
-        C = 0.4
-        # C = 1.6
+        kkolmo = 2π / l * [1, g_dns.n / 8]
+        C = 1.6
+        # C = (1 + sqrt(5)) / 2
         kolmo = @. C * stat.diss^(2 / 3) * kkolmo^(-5 / 3)
-        escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
+        escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
         # escale = 1
     end
     # escale = 1
@@ -1931,7 +1977,7 @@ function plot_spectrum_dns(setup)
     @show kscale * s_dns.k[end]
     lines!(ax, kscale * s_dns.k, escale * s_dns.s; label = "DNS")
     lines!(ax, kscale * s_les.k, escale * s_les.s; label = "Filtered DNS")
-    lines!(kscale * 2π / l * kkolmo, escale * kolmo; label = "Kolmogorov")
+    lines!(kscale * kkolmo, escale * kolmo; label = "Kolmogorov")
     Legend(
         fig[0, 1],
         ax;
@@ -2015,4 +2061,3 @@ export transform_scalar, transform_vector, transform_tensor
 export getgradient
 export dns_aid, create_data, create_dataloader, train, fullchain, inference_post
 export tbnn, ninvariant, nbasis, create_dataloader_tbnn, create_loss, create_loss_tbnn
-export get_errors
