@@ -355,7 +355,9 @@ map(f -> load_object(f).timing, upostfiles) |>
 t -> map(x -> round(x; digits = 1), t) |> pairs |> display
 flush(stdout)
 
-u = map(f -> load_object(f).u, upostfiles);
+# u = map(f -> load_object(f).u, upostfiles);
+
+e_post = compute_les_statistics(setup, data, upostfiles);
 
 e_post = SymmetryCode.get_errors(setup, data, upostfiles);
 
@@ -364,8 +366,8 @@ map(e -> round(mean(e); sigdigits = 4), e_post) |> pairs
 let
     fig = Figure()
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity",
-            yscale = log10,
-            xscale = log10,
+            # yscale = log10,
+            # xscale = log10,
               )
     t = data.times
     labels = getlabels()

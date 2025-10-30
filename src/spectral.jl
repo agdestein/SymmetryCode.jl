@@ -817,6 +817,18 @@ function get_errors(setup, data, files)
 end
 export get_errors
 
+function get_les_statistics(setup, data, files)
+    (; D, l, n_les, backend, visc) = setup
+    g = Grid{D}(; l, n = n_les, backend)
+    dissfield_les = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
+    stuff = Seneca.spectral_stuff(g)
+    map(files) do f
+        u_les = f |> load_object |> x -> x.u
+        map((u_les, u_ref) -> norm(u_les - u_ref) / norm(u_ref), u_les, u_ref)
+    end
+end
+export get_les_statistics
+
 # 2D basis
 @inline nbasis(::Grid{2}) = 2 # Number of entries below
 @inline getbasis(::Grid{2}, S, R) = (
