@@ -121,6 +121,7 @@ let
         horizontal = true,
         nbanks = 4,
     )
+    save(joinpath(setup.plotdir, "evolution_data.pdf"), fig)
     fig
 end
 
@@ -139,6 +140,7 @@ let
     lines!(ax, eta * k_dns, escale * s_dns)
     lines!(ax, eta * k_les, escale * s_les)
     lines!(ax, eta * k_dns, escale * s_kol)
+    save(joinpath(setup.plotdir, "spectrum_data.pdf"), fig)
     fig
 end
 
@@ -194,10 +196,11 @@ m_tbnn, train_tbnn = let
             dataloader = create_dataloader_tbnn(
                 setup,
                 data;
+                nsample = 50, # Don't use all the snapshots
                 batchsize = 20,
                 rng = Xoshiro(0),
             ),
-            nepoch = 10,
+            nepoch = 5,
             learning_rate = 1e-3,
             net_stuff = (; net, ps, st),
         )
@@ -228,7 +231,7 @@ m_equi, train_equi = let
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
             setup,
-            dataloader = create_dataloader(setup, data; batchsize = 20),
+            dataloader = create_dataloader(setup, data; nsample = 50, batchsize = 20),
             nepoch = 5,
             learning_rate = 1e-3,
             net_stuff,
@@ -269,7 +272,7 @@ m_conv, train_conv = let
         (; ps, st, losses_train, losses_valid) = train(;
             loss = create_loss(net_stuff.project),
             setup,
-            dataloader = create_dataloader(setup, data; batchsize = 20),
+            dataloader = create_dataloader(setup, data; nsample = 50, batchsize = 20),
             nepoch = 5,
             learning_rate = 1e-3,
             net_stuff,

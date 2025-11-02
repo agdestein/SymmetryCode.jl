@@ -240,6 +240,9 @@ function create_data(setup)
     (; l, visc, D, n_dns, n_les, cfl, backend, outdir, datagen, Δ) = setup
     (; nstep, nsubstep) = datagen
 
+    @info "Creating data"
+    flush(stderr)
+
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
 
@@ -284,6 +287,9 @@ function create_data(setup)
     # # Compute force factor from DNS
     # forceval = get_forcing_constant(g_dns, u, dissfield_dns, visc)
 
+    @info "Starting time stepping"
+    flush(stderr)
+
     # Time stepping
     t = 0.0
     timing = time()
@@ -306,7 +312,8 @@ function create_data(setup)
             end
 
             # Log
-            if j == nsubstep && i % 1 == 0
+            # if j == nsubstep && i % 1 == 0
+            if i % 1 == 0
                 e = energy(u)
                 @info join(
                     [
@@ -318,6 +325,7 @@ function create_data(setup)
                     ],
                     ",\t",
                 )
+                flush(stderr)
             end
         end
 
@@ -361,6 +369,9 @@ function create_data(setup)
             timing,
         ),
     )
+
+    @info "Finished data generation after $(timing) seconds"
+    flush(stderr)
 
     nothing
 end
@@ -407,7 +418,7 @@ function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, 
     end
 end
 
-function create_dataloader(setup, data; batchsize)
+function create_dataloader(setup, data; nsample, batchsize)
     (; D, Δ) = setup
     g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
     G = tensorfield_nonsym(g)
@@ -417,7 +428,9 @@ function create_dataloader(setup, data; batchsize)
     ττ = spacetensorfield(g)
     plan = plan_rfft(GG.xx)
     T = typeof(setup.l)
-    snaps = map(zip(data.inputs, data.outputs)) do (ucpu, τcpu)
+    nsample_use = min(nsample, length(data.inputs))
+    snaps = map(1:nsample_use) do j
+        ucpu, τcpu = data.inputs[j], data.outputs[j]
         foreach(copyto!, u, ucpu)
         apply!(vectorgradient!, g, (G, u, g))
         for (GG, G) in zip(GG, G)
@@ -648,6 +661,8 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
                 ],
                 ",\t",
             )
+            flush(stderr)
+
             push!(losses_train, l_train)
             push!(losses_valid, l_valid)
 
@@ -722,6 +737,7 @@ function inference_post(; data, setup, models, files)
     u_model = vectorfield(grid)
     for key in keys(models)
         @info "Solving LES with $(key)"
+        flush(stderr)
         model = models[key]
 
         # Do a short model warmup (so that compilation does not get included in timing)
@@ -785,7 +801,7 @@ function solve_les!(u; times, grid, visc, model, cfl)
                 foreach(u -> (view(u, s.inds) .*= sqrt(s.eref / eshell)), u)
             end
 
-            if j % 5 == 0
+            if j % 1 == 0
                 energy = Seneca.energy(u)
                 @info join(
                     [
@@ -796,6 +812,15 @@ function solve_les!(u; times, grid, visc, model, cfl)
                     ],
                     ",\t",
                 )
+                flush(stderr)
+                forever = Δt < 1e-8
+                boom = energy > 1e5
+                if forever || boom
+                    forever && @warn "This will never finish"
+                    boom && @warn "Boom!"
+                    flush(stderr)
+                    return states
+                end
             end
             j += 1
         end
@@ -978,7 +1003,7 @@ tbnn(net, ps, st, Δ, g) = function model(A)
     reshape(m, nx..., nt)
 end
 
-function create_dataloader_tbnn(setup, data; batchsize, rng)
+function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
     (; D, Δ) = setup
     g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
     nx = space_ndrange(g)
@@ -986,7 +1011,9 @@ function create_dataloader_tbnn(setup, data; batchsize, rng)
     τ = scalarfield(g)
     ττ = spacetensorfield(g)
     plan = plan_rfft(ττ.xx)
-    snaps = map(zip(data.inputs, data.outputs)) do (ucpu, τcpu)
+    nsample_use = min(nsample, length(data.inputs))
+    snaps = map(1:nsample_use) do j
+        ucpu, τcpu = data.inputs[j], data.outputs[j]
         foreach(copyto!, u, ucpu)
         G = getgradient(u, g)
         for (ττ, τcpu) in zip(ττ, τcpu)
