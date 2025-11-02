@@ -833,23 +833,25 @@ function solve_les!(u; times, grid, visc, model, cfl)
     states
 end
 
-function get_errors(setup, data, files)
-    u_ref = map(stack, data.inputs)
-    map(files) do f
-        u_les = f |> load_object |> x -> map(stack, x.u)
-        map((u_les, u_ref) -> norm(u_les - u_ref) / norm(u_ref), u_les, u_ref)
-    end
-end
-export get_errors
-
 function get_les_statistics(setup, data, files)
     (; D, l, n_les, backend, visc) = setup
     g = Grid{D}(; l, n = n_les, backend)
     dissfield_les = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
     stuff = Seneca.spectral_stuff(g)
+    u_ref = data.inputs
+    u_gpu = vectorfield(g)
     map(files) do f
         u_les = f |> load_object |> x -> x.u
-        map((u_les, u_ref) -> norm(u_les - u_ref) / norm(u_ref), u_les, u_ref)
+        e_post = map(u_les, u_ref) do u_les, u_ref
+            u_les = stack(u_les)
+            u_ref = stack(u_ref)
+            norm(u_les - u_ref) / norm(u_ref)
+        end
+        s = map(u_les) do u_les
+            foreach(copyto!, u_gpu, u_les)
+            spectrum(u_gpu, g, stuff).s
+        end
+        (; e_post, s)
     end
 end
 export get_les_statistics
@@ -1145,149 +1147,183 @@ function test_equivariance_post(; ustart, setup, grid, model, groupindex, tstop,
     norm(rsu - sru) / norm(sru)
 end
 
-export plot_densities
-function plot_densities(; u_dns, setup, models, dolog)
-    (; plotdir, name, D, l, n_dns, n_les, backend, Δ) = setup
-    g_dns = Grid{D}(; l, n = n_dns, backend)
-    g_les = Grid{D}(; l, n = n_les, backend)
-    u_ref = vectorfield(g_les)
-    for (u_ref, u_dns) in zip(u_ref, u_dns)
-        apply!(cutoff!, g_les, (u_ref, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, nshell + 1, g_les))
-    end
-    τhat = sfs(u_dns, g_dns, g_les, Δ)
-    τ = spacetensorfield(g_les)
-    plan = Seneca.getplan(g_les)
-    for (τ, τhat) in zip(τ, τhat)
-        apply!(twothirds!, g_les, (τhat, g_les))
-        ldiv!(τ, plan, τhat)
-        τ .*= g_les.n^D
-    end
-    G = getgradient(u_ref, g_les)
-    if D == 2
-        S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
-    elseif D == 3
-        S = (;
-            G.xx,
-            G.yy,
-            G.zz,
-            xy = (G.xy .+ G.yx) ./ 2,
-            yz = (G.yz .+ G.zy) ./ 2,
-            zx = (G.zx .+ G.xz) ./ 2,
-        )
-    end
-    τ_les = map(models) do m
-        y = m(G)
-        if D == 2
-            xx, yy, xy = 1, 2, 3
-            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
+"Compute distribution of tensor components and dissipation coefficients."
+function compute_densities(setup, data, models)
+    (; outdir, name, D, l, n_les, backend, Δ) = setup
+    g = Grid{D}(; l, n = n_les, backend)
+    u = vectorfield(g)
+    τ = spacetensorfield(g)
+    τhat = scalarfield(g)
+    plan = plan_rfft(τ.xx)
+
+    @info "Computing tensor components and dissipation coefficients"
+    flush(stderr)
+    fields = map(zip(data.inputs, data.outputs)) do (ucpu, τcpu)
+        # Reference stress
+        for (τ, τcpu) in zip(τ, τcpu)
+            copyto!(τhat, τcpu)
+            apply!(twothirds!, g, (τhat, g))
+            ldiv!(τ, plan, τhat)
+            τ .*= g.n^D # FFT factor
+        end
+
+        # Gradient and strain-rate
+        foreach(copyto!, u, ucpu)
+        G = getgradient(u, g)
+        S = if D == 2
+            (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
         elseif D == 3
-            xx, yy, zz = 1, 2, 3
-            xy, yz, zx = 4, 5, 6
             (;
-                xx = view(y,:,:,:,xx),
-                yy = view(y,:,:,:,yy),
-                zz = view(y,:,:,:,zz),
-                xy = view(y,:,:,:,xy),
-                yz = view(y,:,:,:,yz),
-                zx = view(y,:,:,:,zx),
+                G.xx,
+                G.yy,
+                G.zz,
+                xy = (G.xy .+ G.yx) ./ 2,
+                yz = (G.yz .+ G.zy) ./ 2,
+                zx = (G.zx .+ G.xz) ./ 2,
             )
         end
-    end
-    τ_all = (; ref = τ, τ_les...)
-    for τ in τ_all
-        for τ in τ
-            plan = plan_rfft(τ)
-            temp = plan * τ
-            apply!(twothirds!, g_les, (temp, g_les))
-            ldiv!(τ, plan, temp)
+
+        # Prediction by LES models
+        τ_les = map(models) do m
+            y = m(G)
+            τ_les = if D == 2
+                xx, yy, xy = 1, 2, 3
+                (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
+            elseif D == 3
+                xx, yy, zz = 1, 2, 3
+                xy, yz, zx = 4, 5, 6
+                (;
+                    xx = view(y,:,:,:,xx),
+                    yy = view(y,:,:,:,yy),
+                    zz = view(y,:,:,:,zz),
+                    xy = view(y,:,:,:,xy),
+                    yz = view(y,:,:,:,yz),
+                    zx = view(y,:,:,:,zx),
+                )
+            end
         end
-        traces = @. (τ[1] + τ[2] + τ[3]) / 3
-        τ[1] .-= traces
-        τ[2] .-= traces
-        τ[3] .-= traces
-    end
-    # for S in S
-    #     plan = plan_rfft(S)
-    #     temp = plan * S
-    #     apply!(twothirds!, g_les, (temp, g_les))
-    #     ldiv!(S, plan, temp)
-    # end
-    τxx = map(τ -> τ.xx, τ_all)
-    τxy = map(τ -> τ.xy, τ_all)
-    diss = map(τ_all) do τ
-        d = if D == 2
-            @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
-        else
-            @. τ.xx * S.xx +
-               τ.yy * S.yy +
-               τ.zz * S.zz +
-               2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+
+        # All stresses
+        τ_all = (; ref = τ, τ_les...)
+
+        # Remove ghost modes and make trace-free
+        for τ in τ_all
+            for τ in τ
+                plan = plan_rfft(τ)
+                mul!(τhat, plan, τ)
+                apply!(twothirds!, g, (τhat, g))
+                ldiv!(τ, plan, τhat)
+            end
+            traces = @. (τ[1] + τ[2] + τ[3]) / 3
+            τ[1] .-= traces
+            τ[2] .-= traces
+            τ[3] .-= traces
         end
-        d
+        # for S in S
+        #     plan = plan_rfft(S)
+        #     temp = plan * S
+        #     apply!(twothirds!, g, (temp, g))
+        #     ldiv!(S, plan, temp)
+        # end
+
+        # Extract components and dissipation
+        τxx = map(τ -> τ.xx |> cpu_device(), τ_all)
+        τxy = map(τ -> τ.xy |> cpu_device(), τ_all)
+        diss = map(τ_all) do τ
+            d = if D == 2
+                @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
+            else
+                @. τ.xx * S.xx +
+                   τ.yy * S.yy +
+                   τ.zz * S.zz +
+                   2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+            end
+            d |> cpu_device()
+        end
+
+        (; xx = τxx, xy = τxy, diss)
     end
 
+    # Compute kernel density estimates and save
+    for mkey in keys(fields[1].xx), fkey in [:xx, :xy, :diss]
+        @info "Computing $(fkey)-density for $(mkey)"
+        flush(stderr)
+        samples = stack(fields) do f
+            f[fkey][mkey]
+        end
+        estimate = samples |> vec |> kde
+        save_object("$(outdir)/kde_$(mkey)_$(fkey).jld2", (; estimate.x, estimate.density))
+    end
+    nothing
+end
+export compute_densities
+
+export plot_densities
+function plot_densities(setup; dolog)
+    (; outdir, plotdir, name) = setup
     yscale = dolog ? log10 : identity
+
+    mkeys = [:ref, :smag, :clar, :tbnn, :equi, :conv]
 
     fig = Figure(; size = (800, 300))
     labels = getlabels()
 
-    # XX-component
-    ax_xx = Makie.Axis(fig[1, 1]; xlabel = "xx-component", ylabel = "Density", yscale)
-    for (key, val) in pairs(τxx)
-        # val = key == :ref ? val : 1.4 * val .- 0.02
-        k = val |> vec |> Array |> kde
-        lines!(ax_xx, k.x, k.density; label = labels[key])
+    # Axes
+    ax = (;
+        xx = Axis(
+            fig[1, 1];
+            xlabel = L"\tau_{1 1}",
+            ylabel = "Density",
+            xlabelsize = 20,
+            yscale,
+        ),
+        xy = Axis(fig[1, 2]; xlabel = L"\tau_{1 2}", xlabelsize = 20, yscale),
+        diss = Axis(fig[1, 3]; xlabel = L"\tau_{i j} S_{i j}", xlabelsize = 20, yscale),
+    )
+
+    for fkey in [:xx, :xy, :diss], mkey in mkeys
+        dens = "$(outdir)/kde_$(mkey)_$(fkey).jld2" |> load_object
+        lines!(ax[fkey], dens.x, dens.density; label = labels[mkey])
     end
+
     if name == "laptop"
-        xlims!(ax_xx, -0.1, 0.3)
-        ylims!(ax_xx, 2e-2, 3e2)
+        xlims!(ax.xx, -0.1, 0.3)
+        ylims!(ax.xx, 2e-2, 3e2)
     elseif name == "turbulator"
-        xlims!(ax_xx, -0.2, 0.2)
-        ylims!(ax_xx, 2e-3, 2e1)
+        xlims!(ax.xx, -0.1, 0.2)
+        ylims!(ax.xx, 2e-4, 3e2)
     elseif name == "snellius"
-        xlims!(ax_xx, -0.2, 0.3)
-        ylims!(ax_xx, 1e-3, 2e2)
+        xlims!(ax.xx, -0.2, 0.3)
+        ylims!(ax.xx, 1e-3, 2e2)
     end
-    # dx ux + dy ux
 
     # XY-component
-    ax_xy = Makie.Axis(fig[1, 2]; xlabel = "xy-component", yscale)
-    for val in τxy
-        k = val |> vec |> Array |> kde
-        lines!(ax_xy, k.x, k.density)
-    end
     if name == "laptop"
-        xlims!(ax_xy, -0.1, 0.1)
-        ylims!(ax_xy, 1e-1, 5e2)
+        xlims!(ax.xy, -0.1, 0.1)
+        ylims!(ax.xy, 1e-1, 5e2)
     elseif name == "turbulator"
-        xlims!(ax_xy, -0.2, 0.2)
-        ylims!(ax_xy, 4e-3, 2.5e1)
+        xlims!(ax.xy, -0.1, 0.1)
+        ylims!(ax.xy, 1e-3, 3e2)
     elseif name == "snellius"
-        xlims!(ax_xy, -0.17, 0.2)
-        ylims!(ax_xy, 1e-3, 2e2)
+        xlims!(ax.xy, -0.17, 0.2)
+        ylims!(ax.xy, 1e-3, 2e2)
     end
 
     # Dissipation
-    ax_diss = Makie.Axis(fig[1, 3]; xlabel = "Dissipation", yscale)
-    for val in diss
-        k = val |> vec |> Array |> kde
-        lines!(ax_diss, k.x, k.density)
-    end
     if name == "laptop"
-        xlims!(ax_diss, -0.3, 0.3)
-        ylims!(ax_diss, 1e-1, 1e2)
+        xlims!(ax.diss, -0.3, 0.3)
+        ylims!(ax.diss, 1e-1, 1e2)
     elseif name == "turbulator"
-        xlims!(ax_diss, -6, 2)
-        ylims!(ax_diss, 1e-3, 3e0)
+        xlims!(ax.diss, -0.4, 0.1)
+        ylims!(ax.diss, 1e-3, 1e2)
     elseif name == "snellius"
-        xlims!(ax_diss, -5.6, 1.3)
-        ylims!(ax_diss, 1e-3, 7e0)
+        xlims!(ax.diss, -5.6, 1.3)
+        ylims!(ax.diss, 1e-3, 7e0)
     end
 
     Legend(
         fig[0, :],
-        ax_xx;
+        ax.xx;
         tellwidth = false,
         tellheight = true,
         framevisible = false,
@@ -1972,9 +2008,8 @@ function plot_spectrum_dns(setup)
         xscale = log10,
         yscale = log10,
         xlabel = L"\kappa \eta",
-        xlabelsize = 20,
-        # ylabel = "Normalized spectrum",
         ylabel = L"\epsilon^{-2 / 3} \eta^{5 / 3} E(\kappa)",
+        xlabelsize = 20,
         ylabelsize = 20,
     )
     if D == 2
@@ -2037,43 +2072,39 @@ function plot_spectrum_dns(setup)
 end
 
 export plot_spectrum_les
-function plot_spectrum_les(setup, u)
-    (; D, l, n_dns, n_les, backend, visc) = setup
-    g_dns = Grid{D}(; l, n = n_dns, backend)
-    g_les = Grid{D}(; l, n = n_les, backend)
+function plot_spectrum_les(setup, data, les_stat)
+    (; D) = setup
+    s_ref = mean(data.spectra_les)
+    s_les = map(stat -> mean(stat.s), les_stat)
+    diss = mean(s -> s.diss, data.statistics_dns)
+    eta = mean(s -> s.l_kol, data.statistics_dns)
+    k = 2π / setup.l * eachindex(s_ref)
+    if D == 2
+        C = 1.6
+        s_kol = C * diss^(2/3) * k .^ (-3)
+        escale = C^(-1) * diss^(-2/3) * eta^(-3)
+    elseif D == 3
+        C = 1.6
+        s_kol = C * diss^(2/3) * k .^ (-5/3)
+        escale = C^(-1) * diss^(-2/3) * eta^(-5/3)
+    end
     labels = getlabels()
-    u_dns = u.dns
-    u_les = filter(!=(u.dns), u)
-    D = dim(g_dns)
-    stat = turbulence_statistics(u_dns |> adapt(backend), visc, g_dns)
-    stat |> pairs |> display
-    # s = spectrum(u_dns |> adapt(backend), g_dns)
-    s_les = map(u -> spectrum(u |> adapt(backend), g_les), u_les)
+
     fig = Figure(; size = (400, 360))
     ax = Axis(
         fig[1, 1];
         xscale = log10,
         yscale = log10,
-        xlabel = "Normalized wavenumber",
-        ylabel = "Normalized spectrum",
+        xlabel = L"\kappa \eta",
+        ylabel = L"\epsilon^{-2 / 3} \eta^{5 / 3} E(\kappa)",
+        xlabelsize = 20,
+        ylabelsize = 20,
     )
-    k = 2π / l * [2, g_dns.n / 8]
-    if D == 2
-        kolmo = @. 2e0 * stat.diss^(1 / 3) * k^(-3)
-        escale = stat.diss^(-2 / 3) * stat.l_kol^(-3)
-    elseif D == 3
-        kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
-        escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
+    lines!(ax, eta * k, escale * s_ref; label = "Reference")
+    for key in keys(s_les)
+        lines!(ax, eta * k, escale * s_les[key]; label = labels[key])
     end
-    kscale = stat.l_kol
-    # kscale = 1
-    # lines!(ax, kscale * s.k, escale * s.s; label = "DNS")
-    # lines!(kscale * k, escale * kolmo)
-    for (key, val) in pairs(s_les)
-        key == :vers && continue
-        lines!(ax, kscale * val.k, escale * val.s; label = labels[key])
-    end
-    # axislegend(ax; position = :lb)
+    # lines!(ax, eta * k, escale * s_kol; label = "Kolmogorov")
     Legend(
         fig[0, :],
         ax;
@@ -2084,11 +2115,10 @@ function plot_spectrum_les(setup, u)
         nbanks = 3,
     )
     rowgap!(fig.layout, 5)
-    # ylims!(1e-7, 1)
 
     # Save plot
     file = "$(setup.plotdir)/spectrum-les.pdf"
-    @info "Saving DNS time series to $file"
+    @info "Saving LES spectrum plot to $file"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
     fig

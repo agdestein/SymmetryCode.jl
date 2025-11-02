@@ -30,4 +30,8 @@ include("octahedral.jl")
 include("spectral.jl")
 include("setups.jl")
 
+if false
+    include("../testspectral.jl")
+end
+
 end

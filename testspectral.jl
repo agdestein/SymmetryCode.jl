@@ -1,9 +1,3 @@
-if false
-    include("src/SymmetryCode.jl")
-    using .SymmetryCode
-    using .SymmetryCode.Spectral
-end
-
 @info "Loading packages"
 flush(stderr)
 
@@ -30,10 +24,6 @@ setup = setup_turbulator()
 setup = setup_snellius()
 setup |> pairs
 
-setup = setup_turbulator();
-create_dns(setup);
-plot_spectrum_dns(setup)
-
 # Warmup simulation
 create_dns(setup)
 
@@ -43,8 +33,8 @@ plot_spectrum_dns(setup)
 # Plot time series
 plot_evolution_dns(setup)
 
-# Plot dissipation vs finite difference of energy
-plot_dissipation_finite_difference(setup)
+# # Plot dissipation vs finite difference of energy
+# plot_dissipation_finite_difference(setup)
 
 # set_theme!(;
 #     fonts = (;
@@ -53,8 +43,7 @@ plot_dissipation_finite_difference(setup)
 #     ),
 # )
 
-setup = setup_turbulator();
-create_data(setup)
+create_data(setup);
 
 data = joinpath(setup.outdir, "data.jld2") |> load_object;
 
@@ -81,8 +70,10 @@ let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     v = spacescalarfield(g)
     p = plan_rfft(v)
-    ldiv!(v, p, u.x)
-    v[:, :, end] |> Array |> heatmap
+    ldiv!(v, p, u.z)
+    v .*= g.n^3 # FFT factor
+    field = v[:, :, end] |> Array
+    image(field; colormap = :RdBu)
 end
 
 Base.summarysize(data) * 1e-9
@@ -121,7 +112,7 @@ let
         horizontal = true,
         nbanks = 4,
     )
-    save(joinpath(setup.plotdir, "evolution_data.pdf"), fig)
+    save(joinpath(setup.plotdir, "evolution_data.pdf"), fig; backend = CairoMakie)
     fig
 end
 
@@ -140,7 +131,7 @@ let
     lines!(ax, eta * k_dns, escale * s_dns)
     lines!(ax, eta * k_les, escale * s_les)
     lines!(ax, eta * k_dns, escale * s_kol)
-    save(joinpath(setup.plotdir, "spectrum_data.pdf"), fig)
+    save(joinpath(setup.plotdir, "spectrum_data.pdf"), fig; backend = CairoMakie)
     fig
 end
 
@@ -360,22 +351,23 @@ flush(stdout)
 
 # u = map(f -> load_object(f).u, upostfiles);
 
-e_post = compute_les_statistics(setup, data, upostfiles);
-
-e_post = SymmetryCode.get_errors(setup, data, upostfiles);
+les_stat = get_les_statistics(setup, data, upostfiles);
 
 map(e -> round(mean(e); sigdigits = 4), e_post) |> pairs
 
 let
     fig = Figure()
-    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity",
-            # yscale = log10,
-            # xscale = log10,
-              )
+    ax = Axis(
+        fig[1, 1];
+        xlabel = "Time",
+        ylabel = "Quantity",
+        # yscale = log10,
+        # xscale = log10,
+    )
     t = data.times
     labels = getlabels()
-    for k in keys(e_post)
-        e = e_post[k]
+    for k in keys(les_stat)
+        e = les_stat[k].e_post
         lines!(ax, t[2:end], e[2:end]; label = labels[k])
     end
     # eps = 0.1
@@ -393,13 +385,22 @@ let
 end
 
 # Plot LES spectrum
-plot_spectrum_les(setup, u)
+plot_spectrum_les(setup, data, les_stat)
 
-let
-    models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
-    u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    plot_densities(; u_dns, setup, models, dolog = true)
-end
+compute_densities(
+    setup,
+    data,
+    (;
+        #
+        smag = m_smag,
+        clar = m_clar,
+        tbnn = m_tbnn,
+        equi = m_equi,
+        conv = m_conv,
+    ),
+)
+
+plot_densities(setup; dolog = true)
 
 prediction_error_prior_file = joinpath(setup.outdir, "prediction-error-prior.jld2")
 
