@@ -727,7 +727,7 @@ function les!(du, u, grid, cache; model, visc)
     apply!(tensordivergence!, grid, (du, σ, grid))
 end
 
-function inference_post(; data, setup, models, files)
+function solve_les(; data, setup, models, files)
     (; D, l, n_les, backend, visc, Δ, cfl) = setup
     grid = Grid{D}(; l, n = n_les, backend)
 
@@ -1448,44 +1448,42 @@ function create_verstappen(C, Δ, g)
 end
 
 export apriori_error
-function apriori_error(; u_dns, setup, models)
-    (; D, l, n_dns, n_les, backend, Δ) = setup
-    g_dns = Grid{D}(; l, n = n_dns, backend)
-    g_les = Grid{D}(; l, n = n_les, backend)
+function apriori_error(setup, data, models)
+    (; D, l, n_les, backend, Δ) = setup
+    g = Grid{D}(; l, n = n_les, backend)
+    u_ref = vectorfield(g)
 
-    # Inputs
-    u_ref = vectorfield(g_les)
-    for (u_ref, u_dns) in zip(u_ref, u_dns)
-        apply!(cutoff!, g_les, (u_ref, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (u_ref, Δ, nshell + 1, g_les))
-    end
-    G = getgradient(u_ref, g_les)
+    errors = map(zip(data.inputs, data.outputs)) do (ucpu, τcpu)
+        # Inputs
+        copyto!(u_ref, ucpu)
+        G = getgradient(u_ref, g)
 
-    # Outputs
-    τhat = sfs(u_dns, g_dns, g_les, Δ)
-    τ = spacetensorfield(g_les)
-    plan = Seneca.getplan(g_les)
-    for (τ, τhat) in zip(τ, τhat)
-        apply!(twothirds!, g_les, (τhat, g_les))
-        ldiv!(τ, plan, τhat)
-        τ .*= g_les.n^dim(g_les)
-    end
-    τ = stack(τ)
+        # Outputs
+        τhat = sfs(u_dns, g_dns, g, Δ)
+        τ = spacetensorfield(g)
+        plan = Seneca.getplan(g)
+        for (τ, τhat) in zip(τ, τhat)
+            apply!(twothirds!, g, (τhat, g))
+            ldiv!(τ, plan, τhat)
+            τ .*= g.n^dim(g)
+        end
+        τ = stack(τ)
 
-    errors = map(models) do m
-        # Predict stress
-        y = m(G)
+        map(models) do m
+            # Predict stress
+            y = m(G)
 
-        # Make trace free
-        ydiag = selectdim(y, D + 1, 1:D)
-        trace = sum(ydiag; dims = D + 1)
-        @. ydiag -= trace / D
+            # Make trace free
+            ydiag = selectdim(y, D + 1, 1:D)
+            trace = sum(ydiag; dims = D + 1)
+            @. ydiag -= trace / D
 
-        # Metrics
-        yy, ττ = y .- mean(y), τ .- mean(τ)
-        relerr = norm(y - τ) / norm(τ)
-        crosscor = dot(yy, ττ) / sqrt(dot(yy, yy) * dot(ττ, ττ))
-        (; relerr, crosscor)
+            # Metrics
+            yy, ττ = y .- mean(y), τ .- mean(τ)
+            relerr = norm(y - τ) / norm(τ)
+            crosscor = dot(yy, ττ) / sqrt(dot(yy, yy) * dot(ττ, ττ))
+            (; relerr, crosscor)
+        end
     end
     errors
 end
@@ -2128,5 +2126,5 @@ export vectorfield_to_svector,
     svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield
 export transform_scalar, transform_vector, transform_tensor
 export getgradient
-export dns_aid, create_data, create_dataloader, train, fullchain, inference_post
+export dns_aid, create_data, create_dataloader, train, fullchain, solve_les
 export tbnn, ninvariant, nbasis, create_dataloader_tbnn, create_loss, create_loss_tbnn

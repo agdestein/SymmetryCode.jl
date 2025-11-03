@@ -320,8 +320,6 @@ flush(stdout)
 upostfiles = map(
     name -> joinpath(setup.outdir, "u-post-$(name).jld2"),
     (;
-        # dns = "dns",
-        # ref = "ref",
         nomo = "nomo",
         smag = "smag",
         # vers = "vers",
@@ -342,7 +340,7 @@ let
         equi = m_equi,
         conv = m_conv,
     )
-    inference_post(; data, setup, models, files = upostfiles)
+    solve_les(; data, setup, models, files = upostfiles)
 end
 
 map(f -> load_object(f).timing, upostfiles) |>
@@ -402,7 +400,7 @@ compute_densities(
 
 plot_densities(setup; dolog = true)
 
-prediction_error_prior_file = joinpath(setup.outdir, "prediction-error-prior.jld2")
+prediction_error_prior_file = joinpath(setup.outdir, "tensor_error.jld2")
 
 let
     models = (;
@@ -414,8 +412,7 @@ let
         equi = m_equi,
         conv = m_conv,
     )
-    u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    e = apriori_error(; u_dns, setup, models)
+    e = apriori_error(setup, data, models)
     save_object(prediction_error_prior_file, e)
 end
 
