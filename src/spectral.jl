@@ -1160,6 +1160,8 @@ function predict_sfs(setup, data, models)
     τ = spacetensorfield(g)
     τhat = scalarfield(g)
     plan = plan_rfft(τ.xx)
+    A = tensorfield_nonsym(g)
+    AA = spacetensorfield_nonsym(g)
 
     for (key, m) in pairs(models)
         @info "Computing SFS for $(key)"
@@ -1167,10 +1169,15 @@ function predict_sfs(setup, data, models)
         τ_series = map(data.inputs) do ucpu
             # Gradient and strain-rate
             foreach(copyto!, u, ucpu)
-            G = getgradient(u, g)
+            apply!(vectorgradient!, g, (A, u, g))
+            for (AA, A) in zip(AA, A)
+                apply!(twothirds!, g, (A, g))
+                ldiv!(AA, plan, A) # Inverse RFFT
+                AA .*= g.n^D # FFT factor
+            end
 
             # Prediction by LES model
-            y = m(G)
+            y = m(AA)
             τ_les = if D == 2
                 xx, yy, xy = 1, 2, 3
                 (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
