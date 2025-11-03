@@ -5,6 +5,7 @@ using Adapt
 using CairoMakie
 using CUDA, cuDNN
 using FFTW
+using JLD2
 using LinearAlgebra
 using Random
 using Seneca
@@ -51,13 +52,15 @@ let
     v .*= g.n^3 # FFT factor
     r = 5e-1
     field = v[:, :, end] |> Array
-    image(
+    fig, ax, im = image(
         field;
         # colorrange = (-r, r),
         # colormap = :balance,
         colormap = :RdBu,
         # colormap = :seaborn_icefire_gradient,
     )
+    save("$(setup.plotdir)/dnsfield.png", fig)
+    fig
 end
 
 let
@@ -68,7 +71,9 @@ let
     ldiv!(v, p, u.z)
     v .*= g.n^3 # FFT factor
     field = v[:, :, end] |> Array
-    image(field; colormap = :RdBu)
+    fig, ax, im = image(field; colormap = :RdBu)
+    save("$(setup.plotdir)/dnsfield_filtered.png", fig)
+    fig
 end
 
 Base.summarysize(data) * 1e-9
@@ -179,9 +184,10 @@ map(f -> load_object(f).timing, upostfiles) |>
 t -> map(x -> round(x; digits = 1), t) |> pairs |> display
 flush(stdout)
 
-# u = map(f -> load_object(f).u, upostfiles);
-
 les_stat = get_les_statistics(setup, data, upostfiles);
+save_object("$(setup.outdir)/les_stat.jld2", les_stat)
+
+les_stat = load_object("$(setup.outdir)/les_stat.jld2")
 
 map(s -> round(mean(s.e_post); sigdigits = 4), les_stat) |> pairs
 
@@ -196,10 +202,10 @@ let
     )
     t = data.times
     labels = getlabels()
-    start = 1
     for k in keys(les_stat)
         e = les_stat[k].e_post
-        lines!(ax, t[start:end], e[start:end]; label = labels[k])
+        ntime = length(e)
+        lines!(ax, t[1:ntime], e; label = labels[k])
     end
     # eps = 0.1
     # ylims!(ax, -eps, 1 + eps)
@@ -243,8 +249,6 @@ compute_densities(setup, data, [
 ])
 
 plot_densities(setup, data; dolog = true)
-
-prediction_error_prior_file = joinpath(setup.outdir, "tensor_error.jld2")
 
 prediction_error_prior = let
     modelkeys = [

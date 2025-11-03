@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_h100
-#SBATCH --time=04:30:00
+#SBATCH --time=12:00:00
 #SBATCH --mail-user=sda@cwi.nl
 # #SBATCH --array=1-6
 # #SBATCH -o toto
@@ -20,4 +20,4 @@
 echo "Slurm job ID: $SLURM_JOB_ID"
 echo "Slurm array task ID: $SLURM_ARRAY_TASK_ID"
 
-julia -t 8 --project testspectral.jl
+julia --project testspectral.jl

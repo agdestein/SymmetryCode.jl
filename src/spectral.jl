@@ -840,21 +840,26 @@ function get_les_statistics(setup, data, files)
     dissfield_les = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
     stuff = Seneca.spectral_stuff(g)
     u_ref = data.inputs
-    u_gpu = vectorfield(g)
+    u_les_gpu = vectorfield(g)
+    u_ref_gpu = vectorfield(g)
     map(files) do f
+        @info "Reading $(f)"
+        flush(stderr)
         u_les = f |> load_object |> x -> x.u
         e_post = map(u_les, u_ref) do u_les, u_ref
-            u_les = u_les |> adapt(backend)
-            u_ref = u_ref |> adapt(backend)
-            foreach(u -> apply!(twothirds!, g, (u, g)), u_les)
-            foreach(u -> apply!(twothirds!, g, (u, g)), u_ref)
+            foreach(copyto!, u_les_gpu, u_les)
+            foreach(copyto!, u_ref_gpu, u_ref)
+            foreach(u -> apply!(twothirds!, g, (u, g)), u_les_gpu)
+            foreach(u -> apply!(twothirds!, g, (u, g)), u_ref_gpu)
+            foreach(copyto!, u_les, u_les_gpu)
+            foreach(copyto!, u_ref, u_ref_gpu)
             u_les = stack(u_les)
             u_ref = stack(u_ref)
             norm(u_les - u_ref) / norm(u_ref)
         end
         s = map(u_les) do u_les
-            foreach(copyto!, u_gpu, u_les)
-            spectrum(u_gpu, g, stuff).s
+            foreach(copyto!, u_les_gpu, u_les)
+            spectrum(u_les_gpu, g, stuff).s
         end
         (; e_post, s)
     end
@@ -1167,6 +1172,9 @@ function predict_sfs(setup, data, models)
         @info "Computing SFS for $(key)"
         flush(stderr)
         τ_series = map(data.inputs) do ucpu
+            GC.gc()
+            CUDA.reclaim()
+
             # Gradient and strain-rate
             foreach(copyto!, u, ucpu)
             apply!(vectorgradient!, g, (A, u, g))
@@ -1206,8 +1214,11 @@ function compute_densities(setup, data, modelkeys)
     g = Grid{D}(; l, n = n_les, backend)
     u = vectorfield(g)
     τ = spacetensorfield(g)
+    dissfield = spacescalarfield(g)
     τhat = scalarfield(g)
     plan = plan_rfft(τ.xx)
+    A = tensorfield_nonsym(g)
+    AA = spacetensorfield_nonsym(g)
 
     for mkey in [:ref, modelkeys...]
         @info "Computing SFS quantities for $(mkey)"
@@ -1231,10 +1242,21 @@ function compute_densities(setup, data, modelkeys)
         end
 
         # Get series of the three fields of interest
-        fields = map(zip(data.inputs, τ_series)) do (ucpu, τcpu)
+        fields = map(eachindex(τ_series)) do i
+            @info "Snapshot $(i) of $(length(τ_series))"
+            ucpu = data.inputs[i]
+            τcpu = τ_series[i]
+
             # Gradient and strain-rate
             foreach(copyto!, u, ucpu)
-            G = getgradient(u, g)
+            apply!(vectorgradient!, g, (A, u, g))
+            for (AA, A) in zip(AA, A)
+                apply!(twothirds!, g, (A, g))
+                ldiv!(AA, plan, A) # Inverse RFFT
+                AA .*= g.n^D # FFT factor
+            end
+            G = AA
+
             S = if D == 2
                 (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
             elseif D == 3
@@ -1273,15 +1295,16 @@ function compute_densities(setup, data, modelkeys)
             # Extract components and dissipation
             τxx = τ.xx |> cpu_device()
             τxy = τ.xy |> cpu_device()
-            diss =
-                if D == 2
-                    @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
-                else
-                    @. τ.xx * S.xx +
-                       τ.yy * S.yy +
-                       τ.zz * S.zz +
-                       2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
-                end |> cpu_device()
+            if D == 2
+                @. dissfield = τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
+            else
+                @. dissfield =
+                    τ.xx * S.xx +
+                    τ.yy * S.yy +
+                    τ.zz * S.zz +
+                    2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+            end
+            diss = dissfield |> cpu_device()
 
             (; xx = τxx, xy = τxy, diss)
         end
@@ -1310,6 +1333,7 @@ function plot_densities(setup; dolog)
     yscale = dolog ? log10 : identity
 
     mkeys = [:ref, :smag, :clar, :tbnn, :equi, :conv]
+    # t_kol = mean(x -> x.t_kol, data.statistics_les)
 
     fig = Figure(; size = (800, 300))
     labels = getlabels()
@@ -1323,13 +1347,25 @@ function plot_densities(setup; dolog)
             xlabelsize = 20,
             yscale,
         ),
-        xy = Axis(fig[1, 2]; xlabel = L"\tau_{1 2}", xlabelsize = 20, yscale),
-        diss = Axis(fig[1, 3]; xlabel = L"\tau_{i j} S_{i j}", xlabelsize = 20, yscale),
+        xy = Axis(fig[1, 2]; xlabel = L"\tau_{1 2}", xlabelsize = 20, yscale,
+                  yticksvisible = false,
+                  yticklabelsvisible = false,
+                 ),
+        diss = Axis(fig[1, 3]; xlabel = L"\tau_{i j} S_{i j}", xlabelsize = 20, yscale,
+                  yticksvisible = false,
+                  yticklabelsvisible = false,
+                   ),
     )
 
     for fkey in [:xx, :xy, :diss], mkey in mkeys
         dens = "$(outdir)/kde_$(mkey)_$(fkey).jld2" |> load_object
-        lines!(ax[fkey], dens.x, dens.density; label = labels[mkey])
+        # if fkey == :diss && mkey == :smag
+        #     @info "Hi"
+        #     # The line at 0 is not visible for smagorinsky, append a zero
+        #     lines!(ax[fkey], [dens.x; 2 * dens.x[end]], [dens.density; 1e-10]; label = labels[mkey])
+        # else
+            lines!(ax[fkey], dens.x, max.(dens.density, 1e-16); label = labels[mkey])
+        # end
     end
 
     if name == "laptop"
@@ -1339,8 +1375,8 @@ function plot_densities(setup; dolog)
         xlims!(ax.xx, -0.1, 0.2)
         ylims!(ax.xx, 2e-4, 3e2)
     elseif name == "snellius"
-        xlims!(ax.xx, -0.2, 0.3)
-        ylims!(ax.xx, 1e-3, 2e2)
+        xlims!(ax.xx, -0.1, 0.12)
+        ylims!(ax.xx, 4e-4, 4e2)
     end
 
     # XY-component
@@ -1351,8 +1387,8 @@ function plot_densities(setup; dolog)
         xlims!(ax.xy, -0.1, 0.1)
         ylims!(ax.xy, 1e-3, 3e2)
     elseif name == "snellius"
-        xlims!(ax.xy, -0.17, 0.2)
-        ylims!(ax.xy, 1e-3, 2e2)
+        xlims!(ax.xy, -0.12, 0.12)
+        ylims!(ax.xy, 4e-4, 4e2)
     end
 
     # Dissipation
@@ -1363,8 +1399,8 @@ function plot_densities(setup; dolog)
         xlims!(ax.diss, -0.4, 0.1)
         ylims!(ax.diss, 1e-3, 1e2)
     elseif name == "snellius"
-        xlims!(ax.diss, -5.6, 1.3)
-        ylims!(ax.diss, 1e-3, 7e0)
+        xlims!(ax.diss, -0.5, 0.12)
+        ylims!(ax.diss, 4e-4, 4e2)
     end
 
     Legend(
@@ -1376,7 +1412,7 @@ function plot_densities(setup; dolog)
         orientation = :horizontal,
         # nbanks = 5,
     )
-    # rowgap!(fig.layout, 5)
+    rowgap!(fig.layout, 5)
 
     # Save plot
     file = "$(plotdir)/tensor-distributions.pdf"
@@ -1590,7 +1626,7 @@ end
 export plot_velocities
 function plot_velocities(setup, data, upostfiles, comp)
     (; D, l, n_les, backend) = setup
-    fig = Figure(; size = (800, 180))
+    fig = Figure(; size = (800, 400))
     g = Grid{D}(; l, n = n_les, backend)
     ui = scalarfield(g)
     ui_space = spacescalarfield(g)
@@ -1605,40 +1641,42 @@ function plot_velocities(setup, data, upostfiles, comp)
         :equi,
         :conv,
     ]
-    t = 50
+    t = 20
+    @info "Plotting at t = $(data.times[t])"
     for (k, key) in enumerate(modelkeys)
+        @info "Plotting velocity for $(key)"
+        flush(stderr)
         title = labels[key]
-        j, i = CartesianIndices((6, 2))[k].I
-        ax = Axis(
-            fig[i, j];
-            xlabelvisible = false,
-            xticksvisible = false,
-            xticklabelsvisible = false,
-            ylabelvisible = false,
-            yticksvisible = false,
-            yticklabelsvisible = false,
-            aspect = DataAspect(),
-            title,
-        )
-        if key == :dns
-            error()
-            # copyto!(ui, u[key][comp])
-        elseif key == :ref
-            ui = data.inputs[t][comp] |> adapt(backend)
-            apply!(twothirds!, g, (ui, g))
+        useries = if key == :ref
+            data.inputs
         else
             upost = load_object(upostfiles[key])
-            ui = upost.u[t][comp] |> adapt(backend)
-            apply!(twothirds!, g, (ui, g))
+            upost.u
         end
-        ldiv!(ui_space, plan, ui) # Make copy, ldiv! overwrites...
-        ui_space .*= g.n^3 # FFT factor
-        data = ui_space[:, :, end] |> Array
-        range = (:, :)
-        # range = (40:60, 40:60)
-        data = ui_space[range..., end] |> Array
-        # @show typeof(data); error()
-        image!(ax, data; colormap = :RdBu, interpolate = false)
+        for (i, t) in enumerate([20, 50, 100])
+            ax = Axis(
+                fig[i, k];
+                xlabel = "t = $(round(data.times[t]; sigdigits = 1))",
+                xlabelvisible = k == 1,
+                xticksvisible = false,
+                xticklabelsvisible = false,
+                ylabelvisible = false,
+                yticksvisible = false,
+                yticklabelsvisible = false,
+                aspect = DataAspect(),
+                title,
+                titlevisible = i == 1,
+            )
+            t > length(useries) && continue # Clark series exploded and stop early
+            ui = useries[t][comp] |> adapt(backend)
+            apply!(twothirds!, g, (ui, g))
+            ldiv!(ui_space, plan, ui) # Make copy, ldiv! overwrites...
+            ui_space .*= g.n^3 # FFT factor
+            range = (:, :)
+            # range = (40:60, 40:60)
+            slice = ui_space[range..., end] |> Array
+            image!(ax, slice; colormap = :RdBu, interpolate = false)
+        end
     end
     save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
     fig
