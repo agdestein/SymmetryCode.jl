@@ -2053,6 +2053,73 @@ function plot_dissipation_finite_difference(setup)
     fig
 end
 
+function plot_spectrum_data(setup, data)
+    (; D, l, n_dns, backend) = setup
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+
+    s_dns = mean(data.spectra_dns)
+    s_les = mean(data.spectra_les)
+    diss = mean(s -> s.diss, data.statistics_dns)
+    eta = mean(s -> s.l_kol, data.statistics_dns)
+
+    k_dns = 2π / setup.l * eachindex(s_dns)
+    k_les = 2π / setup.l * eachindex(s_les)
+    C = 1.6
+    s_kol = C * diss^(2/3) * k_dns .^ (-5/3)
+    escale = C^(-1) * diss^(-2/3) * eta^(-5/3)
+
+    fig = Figure(; size = (400, 340))
+    ax = Axis(
+        fig[1, 1];
+        xscale = log10,
+        yscale = log10,
+        xlabel = L"\kappa \eta",
+        ylabel = L"\epsilon^{-2 / 3} \eta^{5 / 3} E(\kappa)",
+        xlabelsize = 20,
+        ylabelsize = 20,
+    )
+
+    # Banded force stuff
+    band = getband(g_dns, 3)
+    k2min = minimum(band.k2)
+    k2max = maximum(band.k2)
+    kforce = 2π / l * [sqrt(k2min), sqrt(k2max)]
+    span = kforce * eta
+    forcecolor = Makie.wong_colors()[4]
+    b = sqrt(prod(extrema(escale * s_dns)))
+    a = 1.1 * span[2]
+    c = sqrt(prod(span))
+    w = D == 2 ? 1 : 1.5
+    arr = D == 2 ? 100 : 5
+    vspan!(ax, span...; alpha = 0.3, color = forcecolor)
+    text!(ax, a, b / w; color = forcecolor, text = "Force")
+    arrows2d!(
+        ax,
+        Point2(c, b / arr),
+        Point2(c, b * arr) - Point2(c, b / arr);
+        color = forcecolor,
+    )
+
+    lines!(ax, eta * k_dns, escale * s_dns; label = "DNS")
+    lines!(ax, eta * k_les, escale * s_les; label = "Filtered DNS")
+    lines!(ax, eta * k_dns, escale * s_kol; label = "Kolmogorov")
+
+    Legend(
+        fig[0, 1],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 3,
+    )
+    rowgap!(fig.layout, 5)
+
+    save(joinpath(setup.plotdir, "spectrum_data.pdf"), fig; backend = CairoMakie)
+    fig
+end
+export plot_spectrum_data
+
 export plot_spectrum_dns
 function plot_spectrum_dns(setup)
     (; outdir, plotdir, D, l, n_dns, n_les, backend, visc) = setup

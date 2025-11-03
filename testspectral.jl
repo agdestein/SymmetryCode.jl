@@ -111,24 +111,7 @@ let
     fig
 end
 
-let
-    s_dns = mean(data.spectra_dns)
-    s_les = mean(data.spectra_les)
-    diss = mean(s -> s.diss, data.statistics_dns)
-    eta = mean(s -> s.l_kol, data.statistics_dns)
-    fig = Figure()
-    ax = Axis(fig[1, 1]; xscale = log10, yscale = log10)
-    k_dns = 2π / setup.l * eachindex(s_dns)
-    k_les = 2π / setup.l * eachindex(s_les)
-    C = 1.6
-    s_kol = C * diss^(2/3) * k_dns .^ (-5/3)
-    escale = C^(-1) * diss^(-2/3) * eta^(-5/3)
-    lines!(ax, eta * k_dns, escale * s_dns)
-    lines!(ax, eta * k_les, escale * s_les)
-    lines!(ax, eta * k_dns, escale * s_kol)
-    save(joinpath(setup.plotdir, "spectrum_data.pdf"), fig; backend = CairoMakie)
-    fig
-end
+plot_spectrum_data(setup, data)
 
 m_nomo = let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
