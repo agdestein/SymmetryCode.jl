@@ -2034,14 +2034,14 @@ export plot_evolution_dns
 function plot_evolution_dns(setup)
     times, energies, dissipations =
         load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
-    a = @. dissipations / 2 / energies
+    # a = @. dissipations / 2 / energies
 
     # Create plot
     fig = Figure(; size = (400, 340))
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Normalized quantity")
     lines!(ax, times, energies / maximum(energies); label = "Energy")
     lines!(ax, times, dissipations / maximum(dissipations); label = "Dissipation")
-    lines!(ax, times, a / maximum(a); linestyle = :dash, label = "Forcing")
+    # lines!(ax, times, a / maximum(a); linestyle = :dash, label = "Forcing")
     Legend(
         fig[0, 1],
         ax;
@@ -2056,6 +2056,50 @@ function plot_evolution_dns(setup)
     # Save plot
     file = joinpath(setup.plotdir, "evolution-dns.pdf")
     @info "Saving DNS time series plot to $(file)"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
+    fig
+end
+
+export plot_evolution_data
+function plot_evolution_data(setup, data)
+    times_warmup, energies_warmup, dissipations_warmup =
+        load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
+    times_warmup .-= times_warmup[end] # Use negative times for warmup
+
+    times = data.times
+    energies = getindex.(data.statistics_dns, :uavg) .^ 2 / 2 * 3
+    dissipations = getindex.(data.statistics_dns, :diss)
+
+    emax = max(maximum(energies), maximum(energies_warmup))
+    dmax = max(maximum(dissipations), maximum(dissipations_warmup))
+
+    # Create plot
+    fig = Figure(; size = (400, 340))
+
+    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Normalized quantity")
+    lines!(ax, times, energies / emax; label = "Energy", color = Cycled(1))
+    lines!(ax, times_warmup, energies_warmup / emax; linestyle = :dash, color = Cycled(1))
+    lines!(ax, times, dissipations / dmax; label = "Dissipation", color = Cycled(2))
+    lines!(ax, times_warmup, dissipations_warmup / dmax; linestyle = :dash, color = Cycled(2))
+    eps = 0.1
+    ylims!(ax, -eps, 1 + eps)
+
+    Legend(
+        fig[0, 1],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 2,
+    )
+
+    rowgap!(fig.layout, 10)
+
+    # Save plot
+    file = joinpath(setup.plotdir, "evolution_data.pdf")
+    @info "Saving energy and dissipation time series plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
     fig

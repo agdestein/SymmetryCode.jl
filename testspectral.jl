@@ -87,6 +87,8 @@ getindex.(data.statistics_dns, :t_int)
 getindex.(data.statistics_dns, :l_int)
 getindex.(data.statistics_dns, :l_kol)
 
+plot_evolution_data(setup, data)
+
 let
     fig = Figure()
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity")
