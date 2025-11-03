@@ -196,7 +196,7 @@ let
     ax = Axis(
         fig[1, 1];
         xlabel = "Time",
-        ylabel = "Error",
+        ylabel = "Relative error",
         # yscale = log10,
         # xscale = log10,
     )
@@ -218,6 +218,7 @@ let
         horizontal = true,
         nbanks = 3,
     )
+    ylims!(ax, -0.03, 0.5)
     rowgap!(fig.layout, 5)
     save("$(setup.plotdir)/error_post.pdf", fig; backend = CairoMakie)
     fig
