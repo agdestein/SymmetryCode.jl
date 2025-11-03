@@ -1148,43 +1148,23 @@ function test_equivariance_post(; ustart, setup, grid, model, groupindex, tstop,
 end
 
 "Compute distribution of tensor components and dissipation coefficients."
-function compute_densities(setup, data, models)
-    (; outdir, name, D, l, n_les, backend, Δ) = setup
+function predict_sfs(setup, data, models)
+    (; outdir, D, l, n_les, backend, Δ) = setup
     g = Grid{D}(; l, n = n_les, backend)
     u = vectorfield(g)
     τ = spacetensorfield(g)
     τhat = scalarfield(g)
     plan = plan_rfft(τ.xx)
 
-    @info "Computing tensor components and dissipation coefficients"
-    flush(stderr)
-    fields = map(zip(data.inputs, data.outputs)) do (ucpu, τcpu)
-        # Reference stress
-        for (τ, τcpu) in zip(τ, τcpu)
-            copyto!(τhat, τcpu)
-            apply!(twothirds!, g, (τhat, g))
-            ldiv!(τ, plan, τhat)
-            τ .*= g.n^D # FFT factor
-        end
+    for (key, m) in pairs(models)
+        @info "Computing SFS for $(key)"
+        flush(stderr)
+        τ_series = map(data.inputs) do ucpu
+            # Gradient and strain-rate
+            foreach(copyto!, u, ucpu)
+            G = getgradient(u, g)
 
-        # Gradient and strain-rate
-        foreach(copyto!, u, ucpu)
-        G = getgradient(u, g)
-        S = if D == 2
-            (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
-        elseif D == 3
-            (;
-                G.xx,
-                G.yy,
-                G.zz,
-                xy = (G.xy .+ G.yx) ./ 2,
-                yz = (G.yz .+ G.zy) ./ 2,
-                zx = (G.zx .+ G.xz) ./ 2,
-            )
-        end
-
-        # Prediction by LES models
-        τ_les = map(models) do m
+            # Prediction by LES model
             y = m(G)
             τ_les = if D == 2
                 xx, yy, xy = 1, 2, 3
@@ -1201,13 +1181,65 @@ function compute_densities(setup, data, models)
                     zx = view(y,:,:,:,zx),
                 )
             end
+            τ_les |> cpu_device()
+        end
+        save_object("$(outdir)/sfs_$(key).jld2", τ_series)
+    end
+end
+export predict_sfs
+
+"Compute distribution of tensor components and dissipation coefficients."
+function compute_densities(setup, data, modelkeys)
+    (; outdir, name, D, l, n_les, backend, Δ) = setup
+    g = Grid{D}(; l, n = n_les, backend)
+    u = vectorfield(g)
+    τ = spacetensorfield(g)
+    τhat = scalarfield(g)
+    plan = plan_rfft(τ.xx)
+
+    for mkey in [:ref, modelkeys...]
+        @info "Computing SFS quantities for $(mkey)"
+        flush(stderr)
+
+        # Get SFS series
+        τ_series = if mkey == :ref
+            # Reference is still in spectral space
+            map(data.outputs) do τcpu
+                for (τ, τcpu) in zip(τ, τcpu)
+                    copyto!(τhat, τcpu)
+                    apply!(twothirds!, g, (τhat, g))
+                    ldiv!(τ, plan, τhat)
+                    τ .*= g.n^D # FFT factor
+                end
+                τ |> cpu_device()
+            end
+        else
+            # LES SFS are already in physical space
+            load_object("$(outdir)/sfs_$(mkey).jld2")
         end
 
-        # All stresses
-        τ_all = (; ref = τ, τ_les...)
+        # Get series of the three fields of interest
+        fields = map(zip(data.inputs, τ_series)) do (ucpu, τcpu)
+            # Gradient and strain-rate
+            foreach(copyto!, u, ucpu)
+            G = getgradient(u, g)
+            S = if D == 2
+                (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
+            elseif D == 3
+                (;
+                    G.xx,
+                    G.yy,
+                    G.zz,
+                    xy = (G.xy .+ G.yx) ./ 2,
+                    yz = (G.yz .+ G.zy) ./ 2,
+                    zx = (G.zx .+ G.xz) ./ 2,
+                )
+            end
 
-        # Remove ghost modes and make trace-free
-        for τ in τ_all
+            # SFS
+            foreach(copyto!, τ, τcpu)
+
+            # Remove ghost modes and make trace-free
             for τ in τ
                 plan = plan_rfft(τ)
                 mul!(τhat, plan, τ)
@@ -1218,41 +1250,43 @@ function compute_densities(setup, data, models)
             τ[1] .-= traces
             τ[2] .-= traces
             τ[3] .-= traces
-        end
-        # for S in S
-        #     plan = plan_rfft(S)
-        #     temp = plan * S
-        #     apply!(twothirds!, g, (temp, g))
-        #     ldiv!(S, plan, temp)
-        # end
 
-        # Extract components and dissipation
-        τxx = map(τ -> τ.xx |> cpu_device(), τ_all)
-        τxy = map(τ -> τ.xy |> cpu_device(), τ_all)
-        diss = map(τ_all) do τ
-            d = if D == 2
-                @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
-            else
-                @. τ.xx * S.xx +
-                   τ.yy * S.yy +
-                   τ.zz * S.zz +
-                   2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+            # for S in S
+            #     plan = plan_rfft(S)
+            #     temp = plan * S
+            #     apply!(twothirds!, g, (temp, g))
+            #     ldiv!(S, plan, temp)
+            # end
+
+            # Extract components and dissipation
+            τxx = τ.xx |> cpu_device()
+            τxy = τ.xy |> cpu_device()
+            diss =
+                if D == 2
+                    @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
+                else
+                    @. τ.xx * S.xx +
+                       τ.yy * S.yy +
+                       τ.zz * S.zz +
+                       2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+                end |> cpu_device()
+
+            (; xx = τxx, xy = τxy, diss)
+        end
+
+        # Compute kernel density estimates and save
+        for fkey in [:xx, :xy, :diss]
+            @info "Computing $(fkey)-density for $(mkey)"
+            flush(stderr)
+            samples = stack(fields) do f
+                f[fkey]
             end
-            d |> cpu_device()
+            estimate = samples |> vec |> kde
+            save_object(
+                "$(outdir)/kde_$(mkey)_$(fkey).jld2",
+                (; estimate.x, estimate.density),
+            )
         end
-
-        (; xx = τxx, xy = τxy, diss)
-    end
-
-    # Compute kernel density estimates and save
-    for mkey in keys(fields[1].xx), fkey in [:xx, :xy, :diss]
-        @info "Computing $(fkey)-density for $(mkey)"
-        flush(stderr)
-        samples = stack(fields) do f
-            f[fkey][mkey]
-        end
-        estimate = samples |> vec |> kde
-        save_object("$(outdir)/kde_$(mkey)_$(fkey).jld2", (; estimate.x, estimate.density))
     end
     nothing
 end
@@ -1448,44 +1482,53 @@ function create_verstappen(C, Δ, g)
 end
 
 export apriori_error
-function apriori_error(setup, data, models)
-    (; D, l, n_les, backend, Δ) = setup
+function apriori_error(setup, data, modelkeys)
+    (; D, l, n_les, backend) = setup
     g = Grid{D}(; l, n = n_les, backend)
-    u_ref = vectorfield(g)
 
-    errors = map(zip(data.inputs, data.outputs)) do (ucpu, τcpu)
-        # Inputs
-        copyto!(u_ref, ucpu)
-        G = getgradient(u_ref, g)
+    τ = spacetensorfield(g)
+    τhat = scalarfield(g)
+    plan = plan_rfft(τ.xx)
 
-        # Outputs
-        τhat = sfs(u_dns, g_dns, g, Δ)
-        τ = spacetensorfield(g)
-        plan = Seneca.getplan(g)
-        for (τ, τhat) in zip(τ, τhat)
+    τ_ref = map(data.outputs) do τcpu
+        for (τ, τcpu) in zip(τ, τcpu)
+            copyto!(τhat, τcpu)
             apply!(twothirds!, g, (τhat, g))
             ldiv!(τ, plan, τhat)
-            τ .*= g.n^dim(g)
+            τ .*= g.n^D # FFT factor
         end
-        τ = stack(τ)
+        τ |> cpu_device()
+    end
 
-        map(models) do m
-            # Predict stress
-            y = m(G)
+    map(modelkeys) do key
+        @info "Computing a-priori errors for $(key)"
+        flush(stderr)
+
+        # For no-model, the SFS is zero
+        key == :nomo && return :nomo => (; relerr = 1.0, crosscor = 0.0)
+
+        # Otherwise, load LES SFS
+        τ_les = load_object("$(setup.outdir)/sfs_$(key).jld2")
+        series = map(zip(τ_les, τ_ref)) do (τ_les, τ_ref)
+            a = stack(τ_ref)
+            b = stack(τ_les)
 
             # Make trace free
-            ydiag = selectdim(y, D + 1, 1:D)
-            trace = sum(ydiag; dims = D + 1)
-            @. ydiag -= trace / D
+            bdiag = selectdim(b, D + 1, 1:D)
+            trace = sum(bdiag; dims = D + 1)
+            @. bdiag -= trace / D
 
             # Metrics
-            yy, ττ = y .- mean(y), τ .- mean(τ)
-            relerr = norm(y - τ) / norm(τ)
-            crosscor = dot(yy, ττ) / sqrt(dot(yy, yy) * dot(ττ, ττ))
+            bb, aa = b .- mean(b), a .- mean(a)
+            relerr = norm(b - a) / norm(a)
+            crosscor = dot(bb, aa) / sqrt(dot(bb, bb) * dot(aa, aa))
             (; relerr, crosscor)
         end
-    end
-    errors
+        key => (;
+            relerr = mean(s -> s.relerr, series),
+            crosscor = mean(s -> s.crosscor, series),
+        )
+    end |> NamedTuple
 end
 
 export apriori_equivariance_error
@@ -1533,7 +1576,7 @@ function apriori_equivariance_error(; u, setup, models)
 end
 
 export plot_velocities
-function plot_velocities(setup, u, comp)
+function plot_velocities(setup, data, upostfiles, comp)
     (; D, l, n_dns, n_les, backend) = setup
     fig = Figure(; size = (800, 440))
     g_dns = Grid{D}(; l, n = n_dns, backend)
@@ -1542,7 +1585,17 @@ function plot_velocities(setup, u, comp)
     ui_space = spacescalarfield(g_dns)
     plan = plan_rfft(ui_space)
     labels = getlabels()
-    for (k, key) in u |> keys |> enumerate
+    modelkeys = [
+        # :dns,
+        :ref,
+        :smag,
+        :clar,
+        :tbnn,
+        :equi,
+        :conv,
+    ]
+    t = 50
+    for (k, key) in enumerate(modelkeys)
         title = labels[key]
         j, i = CartesianIndices((4, 2))[k].I
         ax = Axis(
@@ -1557,9 +1610,15 @@ function plot_velocities(setup, u, comp)
             title,
         )
         if key == :dns
-            copyto!(ui, u[key][comp])
+            error()
+            # copyto!(ui, u[key][comp])
+        elseif key == :ref
+            ubar_i = data.inputs[t][comp] |> adapt(backend)
+            fill!(ui, 0)
+            apply!(inverse_cutoff!, g_les, (ui, ubar_i))
         else
-            ubar_i = u[key][comp] |> adapt(backend)
+            upost = load_object(upostfiles[key])
+            ubar_i = upost.u[t][comp] |> adapt(backend)
             fill!(ui, 0)
             apply!(inverse_cutoff!, g_les, (ui, ubar_i))
         end
@@ -1572,6 +1631,7 @@ function plot_velocities(setup, u, comp)
         # @show typeof(data); error()
         image!(ax, data; colormap = :seaborn_icefire_gradient, interpolate = false)
     end
+    save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
     fig
 end
 
@@ -1659,52 +1719,63 @@ export qr_kernel!
 end
 
 export compute_qr
-function compute_qr(velocities, setup)
-    (; D, l, n_dns, n_les, backend) = setup
-    g = Grid{D}(; l, n = n_dns, backend)
-    g_les = Grid{D}(; l, n = n_les, backend)
+function compute_qr(setup, data, upostfiles)
+    (; D, l, n_les, backend) = setup
+    g = Grid{D}(; l, n = n_les, backend)
     Ghat = scalarfield(g)
     G = spacetensorfield_nonsym(g)
     q = spacescalarfield(g)
     r = spacescalarfield(g)
     u = vectorfield(g)
-    ubar = vectorfield(g_les)
     plan = plan_rfft(G.xx)
 
-    dens = map(keys(velocities)) do k
+    t_kol = mean(x -> x.t_kol, data.statistics_les)
+
+    modelkeys = [:ref, keys(upostfiles)...]
+
+    for k in modelkeys
         @info "Computing Q-R for $(k)"
-        if k == :dns
-            foreach(copyto!, u, velocities[k])
+        u_series = if k == :ref
+            data.inputs
         else
-            for i = 1:D
-                copyto!(ubar[i], velocities[k][i])
-                fill!(u[i], 0)
-                apply!(inverse_cutoff!, g_les, (u[i], ubar[i]))
+            load_object(upostfiles[k]).u
+        end
+
+        qr = map(u_series) do ucpu
+            foreach(copyto!, u, ucpu)
+            for j = 1:D, i = 1:D
+                s = [:x, :y, :z]
+                ij = Symbol(s[i], s[j])
+                apply!(derivative!, g, (Ghat, u[i], j, g))
+                apply!(twothirds!, g, (Ghat, g))
+                ldiv!(G[ij], plan, Ghat) # Inverse RFFT
+                G[ij] .*= g.n^D # FFT factor
             end
+            apply!(qr_kernel!, g, (q, r, G, g); ndrange = space_ndrange(g))
+            qvec = q |> cpu_device() |> vec
+            rvec = r |> cpu_device() |> vec
+            qvec .*= t_kol^2
+            rvec .*= t_kol^3
+            qvec, rvec
         end
-        for j = 1:D, i = 1:D
-            s = [:x, :y, :z]
-            ij = Symbol(s[i], s[j])
-            apply!(derivative!, g, (Ghat, u[i], j, g))
-            apply!(twothirds!, g, (Ghat, g))
-            ldiv!(G[ij], plan, Ghat) # Inverse RFFT
-            G[ij] .*= g.n^D # FFT factor
-        end
-        t_kol = 1 / sum(G -> sum(abs2, G) * (g.l / g.n)^3, G) |> sqrt
-        apply!(qr_kernel!, g, (q, r, G, g); ndrange = space_ndrange(g))
-        qvec = q |> cpu_device() |> vec
-        rvec = r |> cpu_device() |> vec
-        qvec .*= t_kol^2
-        rvec .*= t_kol^3
-        args = k == :dns ? (; npoints = (1000, 1000)) : (;)
-        k => kde((rvec, qvec); args...)
+        qstack = stack(qr -> qr[1], qr) |> vec
+        rstack = stack(qr -> qr[2], qr) |> vec
+        dens = kde((rstack, qstack);
+        # npoints = (1000, 1000),
+        )
+        file = "$(setup.outdir)/qr_$(k).jld2"
+        @info "Saving Q-R density to $(file)"
+        save_object(file, (; dens.x, dens.y, dens.density))
     end
-    NamedTuple(dens)
+    nothing
 end
 
 export plot_qr
-function plot_qr(setup, qr)
+function plot_qr(setup)
     (; name) = setup
+    modelkeys = [:ref, :nomo, :smag, :clar, :tbnn, :equi, :conv]
+    qr = map(key -> key => load_object("$(setup.outdir)/qr_$(key).jld2"), modelkeys) |> NamedTuple
+
     fig = Figure(; size = (800, 440))
     labels = getlabels()
     colorvec = Makie.wong_colors()
@@ -1721,7 +1792,8 @@ function plot_qr(setup, qr)
         conv = colorvec[lescolor],
         equi = colorvec[lescolor],
     )
-    for (k, key) in qr |> keys |> enumerate
+
+    for (k, key) in modelkeys |> enumerate
         title = labels[key]
         j, i = CartesianIndices((4, 2))[k].I
         ax = Axis(
@@ -1737,13 +1809,13 @@ function plot_qr(setup, qr)
             title,
         )
         if name == "turbulator"
-            ran = 1e-3, 1e2
+            ran = 1e-3, 1e1
             ncat = 6
         elseif name == "snellius"
             ran = 1e-4, 1e1
             ncat = 7
         end
-        # key => extrema(qr[key].density) |> display
+        # key => extrema(qr.density) |> display
         isref = key == :dns || key == :ref
         isref || contour!(
             ax,
@@ -1774,6 +1846,7 @@ function plot_qr(setup, qr)
             ylims!(ax, -3, 4)
         end
     end
+    save("$(setup.plotdir)/qr.pdf", fig; backend = CairoMakie)
     fig
 end
 
@@ -1833,52 +1906,41 @@ function plot_equivariance_errors(errs)
 end
 
 export plot_sfs
-function plot_sfs(setup, u_dns, models)
-    (; D, l, n_dns, n_les, backend, Δ) = setup
-    g_dns = Grid{D}(; l, n = n_dns, backend)
-    g_les = Grid{D}(; l, n = n_les, backend)
-    ubar = vectorfield(g_les)
-    for (ubar, u_dns) in zip(ubar, u_dns)
-        apply!(cutoff!, g_les, (ubar, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, nshell + 1, g_les))
-    end
-    τhat = sfs(u_dns, g_dns, g_les, Δ)
-    τ = spacetensorfield(g_les)
-    plan = Seneca.getplan(g_les)
-    for (τ, τhat) in zip(τ, τhat)
-        # apply!(twothirds!, g_les, (τhat, g_les))
+function plot_sfs(setup, data)
+    (; D, l, n_les, backend) = setup
+    g = Grid{D}(; l, n = n_les, backend)
+
+    τ = spacetensorfield(g)
+    τhat = scalarfield(g)
+    plan = plan_rfft(τ.xx)
+
+    # Time index
+    t = 100
+
+    τcpu = data.outputs[t]
+    for (τ, τcpu) in zip(τ, τcpu)
+        copyto!(τhat, τcpu)
+        apply!(twothirds!, g, (τhat, g))
         ldiv!(τ, plan, τhat)
-        τ .*= g_les.n^dim(g_les)
+        τ .*= g.n^D # FFT factor
     end
-    τ = τ |> cpu_device()
-    G = getgradient(ubar, g_les)
-    τ_les = map(models) do m
-        # Predict SFS
-        y = m(G)
+    τ_ref = τ |> cpu_device()
 
-        # Make tensor trace-free
-        ydiag = selectdim(y, D + 1, 1:D)
-        trace = sum(ydiag; dims = D + 1)
-        @. ydiag -= trace / D
+    modelkeys = [:smag, :clar, :tbnn, :equi, :conv]
+    τ_les = map(modelkeys) do key
+        τ_les = load_object("$(setup.outdir)/sfs_$(key).jld2")
+        τ_les = τ_les[t]
 
-        # Extract components
-        if D == 2
-            xx, yy, xy = 1, 2, 3
-            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
-        elseif D == 3
-            xx, yy, zz = 1, 2, 3
-            xy, yz, zx = 4, 5, 6
-            (;
-                xx = view(y,:,:,:,xx),
-                yy = view(y,:,:,:,yy),
-                zz = view(y,:,:,:,zz),
-                xy = view(y,:,:,:,xy),
-                yz = view(y,:,:,:,yz),
-                zx = view(y,:,:,:,zx),
-            )
-        end |> cpu_device()
-    end
-    τ_all = (; ref = τ, τ_les...)
+        # Make trace free
+        trace = @. τ.xx + τ.yy + τ.zz
+        @. τ.xx -= trace / D
+        @. τ.yy -= trace / D
+        @. τ.zz -= trace / D
+
+        key => τ_les
+    end |> NamedTuple
+
+    τ_all = (; ref = τ_ref, τ_les...)
     labels = getlabels()
     fig = Figure(; size = (800, 550))
     for (i, comp) in enumerate([:xx, :xy, :zx, :zz])
@@ -1893,7 +1955,13 @@ function plot_sfs(setup, u_dns, models)
                 yticksvisible = false,
                 yticklabelsvisible = false,
                 aspect = DataAspect(),
-                ylabel = "$(comp)",
+                ylabel = (;
+                    xx = L"\tau_{1 1}",
+                    xy = L"\tau_{1 2}",
+                    zx = L"\tau_{3 1}",
+                    zz = L"\tau_{3 3}",
+                )[comp],
+                ylabelsize = 20,
                 title,
                 titlevisible = i == 1,
             )
@@ -1910,6 +1978,8 @@ function plot_sfs(setup, u_dns, models)
     end
     rowgap!(fig.layout, 10)
     colgap!(fig.layout, 10)
+
+    save("$(setup.plotdir)/sfs.png", fig; backend = CairoMakie)
     fig
 end
 

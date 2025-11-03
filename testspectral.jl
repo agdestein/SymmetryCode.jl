@@ -3,14 +3,9 @@ flush(stderr)
 
 using Adapt
 using CairoMakie
-using ComponentArrays: ComponentArray
 using CUDA, cuDNN
 using FFTW
-using JLD2
-using KernelDensity
 using LinearAlgebra
-using Lux
-using MLUtils
 using Random
 using Seneca
 using StaticArrays
@@ -155,159 +150,13 @@ m_smag = create_smagorinsky(
 
 m_clar = create_clark(setup.Δ, Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
 
-m_tbnn, train_tbnn = let
-    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    kern = ntuple(Returns(1), setup.D)
-    net = Chain(
-        Conv(kern, ninvariant(g) => 64, gelu),
-        Conv(kern, 64 => 64, gelu),
-        Conv(kern, 64 => 128, gelu),
-        Conv(kern, 128 => nbasis(g); use_bias = false),
-    ) # 13_888 parameters
-    # net = Chain(
-    #     Conv(kern, Spectral.ninvariant(g) => 16, gelu),
-    #     Conv(kern, 16 => 32, gelu),
-    #     Conv(kern, 32 => 64, gelu),
-    #     Conv(kern, 64 => Spectral.nbasis(g); use_bias = false),
-    # ) # 3_200 parameters
-    net |> display
-    flush(stdout)
-    ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
-    for l in ps
-        l.weight .*= 0.1
-    end
-    file = joinpath(setup.outdir, "ps-tbnn.jld2")
-    if false
-        @info "Training TBNN"
-        flush(stderr)
-        t = time()
-        (; ps, st, losses_train, losses_valid) = train(;
-            loss = create_loss_tbnn(g),
-            setup,
-            dataloader = create_dataloader_tbnn(
-                setup,
-                data;
-                nsample = 50, # Don't use all the snapshots
-                batchsize = 20,
-                rng = Xoshiro(0),
-            ),
-            nepoch = 5,
-            learning_rate = 1e-3,
-            net_stuff = (; net, ps, st),
-        )
-        t = time() - t
-        ps = ps |> cpu_device()
-        jldsave(file; ps, losses_train, losses_valid, timing = t)
-    end
-    ps, losses_train, losses_valid, timing =
-        load(file, "ps", "losses_train", "losses_valid", "timing")
-    ps = ps |> adapt(setup.backend)
-    chain = tbnn(net, ps, st, setup.Δ, g)
-    chain, (; losses_train, losses_valid, timing)
-end;
+m_tbnn, train_tbnn = create_tbnn(setup, data, false);
 
-m_equi, train_equi = let
-    net_stuff = equivariant_net(
-        setup,
-        # [12, 16, 16, 24], # 40_328 actual params
-        [8, 8, 8, 16], # 12_544 actual params
-        # [4, 4, 4, 8], # 3_200 actual params
-    )
-    st = net_stuff.st
-    file = joinpath(setup.outdir, "ps-equi.jld2")
-    if false
-        @info "Training G-conv"
-        flush(stderr)
-        t = time()
-        (; ps, st, losses_train, losses_valid) = train(;
-            loss = create_loss(net_stuff.project),
-            setup,
-            dataloader = create_dataloader(setup, data; nsample = 50, batchsize = 20),
-            nepoch = 5,
-            learning_rate = 1e-3,
-            net_stuff,
-        )
-        t = time() - t
-        ps = ps |> cpu_device()
-        jldsave(file; ps, losses_train, losses_valid, timing = t)
-    end
-    ps, losses_train, losses_valid, timing =
-        load(file, "ps", "losses_train", "losses_valid", "timing")
-    # ps = net_stuff.ps
-    ps = ps |> adapt(setup.backend)
-    ps |> cpu_device() |> ComponentArray |> length |> display
-    flush(stdout)
-    (; net, project) = net_stuff
-    chain = fullchain(setup, net, project, ps, st, setup.Δ)
-    chain, (; losses_train, losses_valid, timing)
-end;
+m_equi, train_equi = create_equi(setup, data, false);
 
-m_conv, train_conv = let
-    net_stuff = cnn(
-        setup,
-        # [48, 128, 128, 128]; # 40_550 parameters
-        [48, 64, 64, 64]; # 12_320 parameters
-        # [16, 32, 64]; # 3_200 parameters
-        same_as_equi = false,
-    )
-    for ps in net_stuff.ps
-        # Initialize weights are too large
-        hasfield(typeof(ps), :weight) && (ps.weight .*= 0.1)
-    end
-    st = net_stuff.st
-    file = joinpath(setup.outdir, "ps-conv.jld2")
-    if false
-        @info "Training Conv"
-        flush(stderr)
-        t = time()
-        (; ps, st, losses_train, losses_valid) = train(;
-            loss = create_loss(net_stuff.project),
-            setup,
-            dataloader = create_dataloader(setup, data; nsample = 50, batchsize = 20),
-            nepoch = 5,
-            learning_rate = 1e-3,
-            net_stuff,
-        )
-        ps = ps |> cpu_device()
-        t = time() - t
-        jldsave(file; ps, losses_train, losses_valid, timing = t)
-    end
-    # ps = net_stuff.ps
-    ps, losses_train, losses_valid, timing =
-        load(file, "ps", "losses_train", "losses_valid", "timing")
-    ps = ps |> adapt(setup.backend)
-    ps |> cpu_device() |> ComponentArray |> length |> display
-    flush(stdout)
-    (; net, project) = net_stuff
-    chain = fullchain(setup, net, project, ps, st, setup.Δ)
-    chain, (; losses_train, losses_valid, timing)
-end;
+m_conv, train_conv = create_conv(setup, data, false);
 
-let
-    fig = Figure(; size = (400, 340))
-    ax = Axis(
-        fig[1, 1];
-        # xscale = log10,
-        # yscale = log10,
-        xlabel = "Iteration",
-        ylabel = "Loss",
-    )
-    lines!(ax, train_tbnn.losses_valid; label = "TBNN")
-    lines!(ax, train_equi.losses_valid; label = "G-Conv")
-    lines!(ax, train_conv.losses_valid; label = "Conv")
-    Legend(
-        fig[0, 1],
-        ax;
-        tellwidth = false,
-        tellheight = true,
-        framevisible = false,
-        horizontal = true,
-        nbanks = 3,
-    )
-    rowgap!(fig.layout, 5)
-    save("$(setup.plotdir)/training.pdf", fig; backend = CairoMakie)
-    fig
-end
+plot_training(setup, train_tbnn, train_equi, train_conv)
 
 map(
     t -> round(t; digits = 1),
@@ -318,7 +167,7 @@ display
 flush(stdout)
 
 upostfiles = map(
-    name -> joinpath(setup.outdir, "u-post-$(name).jld2"),
+    name -> "$(setup.outdir)/u-post-$(name).jld2",
     (;
         nomo = "nomo",
         smag = "smag",
@@ -351,7 +200,7 @@ flush(stdout)
 
 les_stat = get_les_statistics(setup, data, upostfiles);
 
-map(e -> round(mean(e); sigdigits = 4), e_post) |> pairs
+map(s -> round(mean(s.e_post); sigdigits = 4), les_stat) |> pairs
 
 let
     fig = Figure()
@@ -385,7 +234,7 @@ end
 # Plot LES spectrum
 plot_spectrum_les(setup, data, les_stat)
 
-compute_densities(
+predict_sfs(
     setup,
     data,
     (;
@@ -398,25 +247,31 @@ compute_densities(
     ),
 )
 
+compute_densities(setup, data, [
+    #
+    :smag,
+    :clar,
+    :tbnn,
+    :equi,
+    :conv,
+])
+
 plot_densities(setup; dolog = true)
 
 prediction_error_prior_file = joinpath(setup.outdir, "tensor_error.jld2")
 
-let
-    models = (;
-        nomo = m_nomo,
-        smag = m_smag,
-        # vers = m_vers,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        equi = m_equi,
-        conv = m_conv,
-    )
-    e = apriori_error(setup, data, models)
-    save_object(prediction_error_prior_file, e)
+prediction_error_prior = let
+    modelkeys = [
+        :nomo,
+        :smag,
+        # :vers,
+        :clar,
+        :tbnn,
+        :equi,
+        :conv,
+    ]
+    apriori_error(setup, data, modelkeys)
 end
-
-prediction_error_prior = load_object(prediction_error_prior_file)
 
 prediction_error_prior |> e -> map(x -> round(x.relerr; sigdigits = 4), e) |> pairs
 prediction_error_prior |> e -> map(x -> round(x.crosscor; sigdigits = 4), e) |> pairs
@@ -519,16 +374,8 @@ end;
 
 dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
-let
-    # comp = :x
-    # comp = :z
-    for comp in [:z, :x]
-        uplot = filter(!=(u.vers), u)
-        fig = plot_velocities(setup, uplot, comp)
-        save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
-        fig
-    end
-end
+plot_velocities(setup, data, upostfiles, :x)
+plot_velocities(setup, data, upostfiles, :z)
 
 let
     models = (;
@@ -541,10 +388,11 @@ let
         conv = m_conv,
     )
     u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    fig = plot_sfs(setup, u, models)
     save("$(setup.plotdir)/sfs.png", fig; backend = CairoMakie)
     fig
 end
+
+plot_sfs(setup, data)
 
 let
     setup = setup_turbulator()
@@ -566,18 +414,6 @@ let
     @show diss1 diss2
 end;
 
-qr_file = joinpath(setup.outdir, "qr.jld2")
+compute_qr(setup, data, upostfiles)
 
-let
-    qr = compute_qr(u, setup)
-    save_object(qr_file, qr)
-end
-
-qr = load_object(qr_file);
-
-let
-    # fig = plot_qr(setup, qr)
-    fig = plot_qr(setup, filter(!=(qr.vers), qr))
-    save("$(setup.plotdir)/qr.pdf", fig; backend = CairoMakie)
-    fig
-end
+plot_qr(setup)

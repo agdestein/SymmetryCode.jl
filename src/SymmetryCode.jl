@@ -2,6 +2,7 @@ module SymmetryCode
 
 using Adapt
 using CairoMakie
+using ComponentArrays: ComponentArray
 using CUDA
 using FFTW
 using JLD2
@@ -28,6 +29,7 @@ export clean
 
 include("octahedral.jl")
 include("spectral.jl")
+include("training.jl")
 include("setups.jl")
 
 if false
