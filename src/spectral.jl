@@ -1626,7 +1626,7 @@ end
 export plot_velocities
 function plot_velocities(setup, data, upostfiles, comp)
     (; D, l, n_les, backend) = setup
-    fig = Figure(; size = (800, 400))
+    fig = Figure(; size = (800, 420))
     g = Grid{D}(; l, n = n_les, backend)
     ui = scalarfield(g)
     ui_space = spacescalarfield(g)
@@ -1656,11 +1656,10 @@ function plot_velocities(setup, data, upostfiles, comp)
         for (i, t) in enumerate([20, 50, 100])
             ax = Axis(
                 fig[i, k];
-                xlabel = "t = $(round(data.times[t]; sigdigits = 1))",
-                xlabelvisible = k == 1,
+                ylabel = "t = $(round(data.times[t]; sigdigits = 1))",
+                ylabelvisible = k == 1,
                 xticksvisible = false,
                 xticklabelsvisible = false,
-                ylabelvisible = false,
                 yticksvisible = false,
                 yticklabelsvisible = false,
                 aspect = DataAspect(),
@@ -1678,6 +1677,8 @@ function plot_velocities(setup, data, upostfiles, comp)
             image!(ax, slice; colormap = :RdBu, interpolate = false)
         end
     end
+    rowgap!(fig.layout, 10)
+    colgap!(fig.layout, 10)
     save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
     fig
 end
