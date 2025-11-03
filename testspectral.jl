@@ -150,7 +150,10 @@ plot_training(setup, train_tbnn, train_equi, train_conv)
 
 map(
     t -> round(t; digits = 1),
-    (; tbnn = train_tbnn.timing, conv = train_conv.timing, equi = train_equi.timing),
+    (; tbnn = train_tbnn.timing,
+     equi = train_equi.timing,
+     conv = train_conv.timing,
+    ),
 ) |>
 pairs |>
 display
@@ -181,6 +184,9 @@ let
     )
     solve_les(; data, setup, models, files = upostfiles)
 end
+
+
+round(data.timing; digits = 1)
 
 map(f -> load_object(f).timing, upostfiles) |>
 t -> map(x -> round(x; digits = 1), t) |> pairs |> display

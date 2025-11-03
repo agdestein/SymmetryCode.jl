@@ -23,8 +23,7 @@ function create_tbnn(setup, data, dotrain)
     if dotrain
         @info "Training TBNN"
         flush(stderr)
-        t = time()
-        (; ps, st, losses_train, losses_valid) = train(;
+        (; ps, st, losses_train, losses_valid, timing) = train(;
             loss = create_loss_tbnn(g),
             setup,
             dataloader = create_dataloader_tbnn(
@@ -38,9 +37,8 @@ function create_tbnn(setup, data, dotrain)
             learning_rate = 1e-3,
             net_stuff = (; net, ps, st),
         )
-        t = time() - t
         ps = ps |> cpu_device()
-        jldsave(file; ps, losses_train, losses_valid, timing = t)
+        jldsave(file; ps, losses_train, losses_valid, timing)
     end
     ps, losses_train, losses_valid, timing =
         load(file, "ps", "losses_train", "losses_valid", "timing")
@@ -62,8 +60,7 @@ function create_equi(setup, data, dotrain)
     if dotrain
         @info "Training G-conv"
         flush(stderr)
-        t = time()
-        (; ps, st, losses_train, losses_valid) = train(;
+        (; ps, st, losses_train, losses_valid, timing) = train(;
             loss = create_loss(net_stuff.project),
             setup,
             dataloader = create_dataloader(setup, data; nsample = 50, batchsize = 20),
@@ -71,9 +68,8 @@ function create_equi(setup, data, dotrain)
             learning_rate = 1e-3,
             net_stuff,
         )
-        t = time() - t
         ps = ps |> cpu_device()
-        jldsave(file; ps, losses_train, losses_valid, timing = t)
+        jldsave(file; ps, losses_train, losses_valid, timing)
     end
     ps, losses_train, losses_valid, timing =
         load(file, "ps", "losses_train", "losses_valid", "timing")
@@ -104,8 +100,7 @@ function create_conv(setup, data, dotrain)
     if dotrain
         @info "Training Conv"
         flush(stderr)
-        t = time()
-        (; ps, st, losses_train, losses_valid) = train(;
+        (; ps, st, losses_train, losses_valid, timing) = train(;
             loss = create_loss(net_stuff.project),
             setup,
             dataloader = create_dataloader(setup, data; nsample = 50, batchsize = 20),
@@ -114,8 +109,7 @@ function create_conv(setup, data, dotrain)
             net_stuff,
         )
         ps = ps |> cpu_device()
-        t = time() - t
-        jldsave(file; ps, losses_train, losses_valid, timing = t)
+        jldsave(file; ps, losses_train, losses_valid, timing)
     end
     # ps = net_stuff.ps
     ps, losses_train, losses_valid, timing =
@@ -150,6 +144,8 @@ function plot_training(setup, train_tbnn, train_equi, train_conv)
         horizontal = true,
         nbanks = 3,
     )
+    eps = 0.1
+    ylims!(ax, -eps, 1 + eps)
     rowgap!(fig.layout, 5)
     save("$(setup.plotdir)/training.pdf", fig; backend = CairoMakie)
     fig

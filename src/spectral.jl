@@ -641,6 +641,14 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
     l_best = Inf
     losses_train = zeros(0)
     losses_valid = zeros(0)
+
+    # Warmup step
+    x, y = first(dataloader) |> device
+    _, l_train, _, train_state =
+        Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
+    l_valid = loss(net, ps, st, b_valid) |> first
+
+    timing = time()
     i = 0
     for iepoch = 1:nepoch, (ibatch, batch) in enumerate(dataloader)
         i += 1
@@ -674,9 +682,11 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
             end
         end
     end
+    timing = time() - timing
+
     ps = ps_best # Retain best (not last) parameters
     st = train_state.states # Note: If st is non-empty, need to make "best"-mechanism for states
-    (; ps, st, losses_train, losses_valid)
+    (; ps, st, losses_train, losses_valid, timing)
 end
 
 function fullchain(setup, net, project, ps, st, Δ)
@@ -1808,7 +1818,7 @@ function compute_qr(setup, data, upostfiles)
         qstack = stack(qr -> qr[1], qr) |> vec
         rstack = stack(qr -> qr[2], qr) |> vec
         dens = kde((rstack, qstack);
-        # npoints = (1000, 1000),
+        npoints = (1000, 1000),
         )
         file = "$(setup.outdir)/qr_$(k).jld2"
         @info "Saving Q-R density to $(file)"
@@ -1820,11 +1830,13 @@ end
 export plot_qr
 function plot_qr(setup)
     (; name) = setup
-    modelkeys = [:ref, :nomo, :smag, :clar, :tbnn, :equi, :conv]
+    modelkeys = [:ref, :nomo, :smag,
+                 # :clar,
+                 :tbnn, :equi, :conv]
     qr = map(key -> key => load_object("$(setup.outdir)/qr_$(key).jld2"), modelkeys)
     qr = NamedTuple(qr)
 
-    fig = Figure(; size = (800, 440))
+    fig = Figure(; size = (600, 440))
     labels = getlabels()
     colorvec = Makie.wong_colors()
     lescolor = 2
@@ -1843,7 +1855,7 @@ function plot_qr(setup)
 
     for (k, key) in modelkeys |> enumerate
         title = labels[key]
-        j, i = CartesianIndices((4, 2))[k].I
+        j, i = CartesianIndices((3, 2))[k].I
         ax = Axis(
             fig[i, j];
             xlabelvisible = i == 2,
@@ -1852,8 +1864,10 @@ function plot_qr(setup)
             ylabelvisible = j == 1,
             yticksvisible = j == 1,
             yticklabelsvisible = j == 1,
-            xlabel = "R",
-            ylabel = "Q",
+            xlabel = L"r",
+            ylabel = L"q",
+            xlabelsize = 20,
+            ylabelsize = 20,
             title,
         )
         if name == "turbulator"
