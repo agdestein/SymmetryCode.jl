@@ -1626,7 +1626,7 @@ end
 export plot_velocities
 function plot_velocities(setup, data, upostfiles, comp)
     (; D, l, n_les, backend) = setup
-    fig = Figure(; size = (800, 550))
+    fig = Figure(; size = (800, 470))
     g = Grid{D}(; l, n = n_les, backend)
     ui = scalarfield(g)
     ui_space = spacescalarfield(g)
@@ -1635,6 +1635,7 @@ function plot_velocities(setup, data, upostfiles, comp)
     modelkeys = [
         # :dns,
         :ref,
+        :nomo,
         :smag,
         :clar,
         :tbnn,
@@ -1652,6 +1653,7 @@ function plot_velocities(setup, data, upostfiles, comp)
             upost.u
         end
         for (i, t) in enumerate([20, 30, 50, 100])
+            t > length(useries) && continue # Clark series exploded and stop early
             ax = Axis(
                 fig[i, k];
                 ylabel = "t = $(round(data.times[t]; sigdigits = 2))",
@@ -1664,7 +1666,6 @@ function plot_velocities(setup, data, upostfiles, comp)
                 title,
                 titlevisible = i == 1,
             )
-            t > length(useries) && continue # Clark series exploded and stop early
             ui = useries[t][comp] |> adapt(backend)
             apply!(twothirds!, g, (ui, g))
             ldiv!(ui_space, plan, ui) # Make copy, ldiv! overwrites...
