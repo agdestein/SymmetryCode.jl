@@ -396,6 +396,7 @@ function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, 
     for (ubar, u) in zip(ubar, u)
         apply!(cutoff!, g_les, (ubar, u))
         isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
+        apply!(twothirds!, g_les, (ubar, g_les))
     end
     for (σbar1, σ) in zip(σbar1, c_dns.σ)
         apply!(cutoff!, g_les, (σbar1, σ))
@@ -843,6 +844,10 @@ function get_les_statistics(setup, data, files)
     map(files) do f
         u_les = f |> load_object |> x -> x.u
         e_post = map(u_les, u_ref) do u_les, u_ref
+            u_les = u_les |> adapt(backend)
+            u_ref = u_ref |> adapt(backend)
+            foreach(u -> apply!(twothirds!, g, (u, g)), u_les)
+            foreach(u -> apply!(twothirds!, g, (u, g)), u_ref)
             u_les = stack(u_les)
             u_ref = stack(u_ref)
             norm(u_les - u_ref) / norm(u_ref)

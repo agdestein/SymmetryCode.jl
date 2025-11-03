@@ -203,19 +203,20 @@ les_stat = get_les_statistics(setup, data, upostfiles);
 map(s -> round(mean(s.e_post); sigdigits = 4), les_stat) |> pairs
 
 let
-    fig = Figure()
+    fig = Figure(; size = (400, 360))
     ax = Axis(
         fig[1, 1];
         xlabel = "Time",
-        ylabel = "Quantity",
+        ylabel = "Error",
         # yscale = log10,
         # xscale = log10,
     )
     t = data.times
     labels = getlabels()
+    start = 1
     for k in keys(les_stat)
         e = les_stat[k].e_post
-        lines!(ax, t[2:end], e[2:end]; label = labels[k])
+        lines!(ax, t[start:end], e[start:end]; label = labels[k])
     end
     # eps = 0.1
     # ylims!(ax, -eps, 1 + eps)
@@ -228,6 +229,8 @@ let
         horizontal = true,
         nbanks = 3,
     )
+    rowgap!(fig.layout, 5)
+    save("$(setup.plotdir)/error_post.pdf", fig; backend = CairoMakie)
     fig
 end
 
