@@ -242,7 +242,7 @@ compute_densities(setup, data, [
     :conv,
 ])
 
-plot_densities(setup; dolog = true)
+plot_densities(setup, data; dolog = true)
 
 prediction_error_prior_file = joinpath(setup.outdir, "tensor_error.jld2")
 

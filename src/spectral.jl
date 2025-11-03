@@ -1589,12 +1589,11 @@ end
 
 export plot_velocities
 function plot_velocities(setup, data, upostfiles, comp)
-    (; D, l, n_dns, n_les, backend) = setup
-    fig = Figure(; size = (800, 440))
-    g_dns = Grid{D}(; l, n = n_dns, backend)
-    g_les = Grid{D}(; l, n = n_les, backend)
-    ui = scalarfield(g_dns)
-    ui_space = spacescalarfield(g_dns)
+    (; D, l, n_les, backend) = setup
+    fig = Figure(; size = (800, 180))
+    g = Grid{D}(; l, n = n_les, backend)
+    ui = scalarfield(g)
+    ui_space = spacescalarfield(g)
     plan = plan_rfft(ui_space)
     labels = getlabels()
     modelkeys = [
@@ -1609,7 +1608,7 @@ function plot_velocities(setup, data, upostfiles, comp)
     t = 50
     for (k, key) in enumerate(modelkeys)
         title = labels[key]
-        j, i = CartesianIndices((4, 2))[k].I
+        j, i = CartesianIndices((6, 2))[k].I
         ax = Axis(
             fig[i, j];
             xlabelvisible = false,
@@ -1625,23 +1624,21 @@ function plot_velocities(setup, data, upostfiles, comp)
             error()
             # copyto!(ui, u[key][comp])
         elseif key == :ref
-            ubar_i = data.inputs[t][comp] |> adapt(backend)
-            fill!(ui, 0)
-            apply!(inverse_cutoff!, g_les, (ui, ubar_i))
+            ui = data.inputs[t][comp] |> adapt(backend)
+            apply!(twothirds!, g, (ui, g))
         else
             upost = load_object(upostfiles[key])
-            ubar_i = upost.u[t][comp] |> adapt(backend)
-            fill!(ui, 0)
-            apply!(inverse_cutoff!, g_les, (ui, ubar_i))
+            ui = upost.u[t][comp] |> adapt(backend)
+            apply!(twothirds!, g, (ui, g))
         end
         ldiv!(ui_space, plan, ui) # Make copy, ldiv! overwrites...
-        ui_space .*= g_dns.n^3 # FFT factor
+        ui_space .*= g.n^3 # FFT factor
         data = ui_space[:, :, end] |> Array
         range = (:, :)
         # range = (40:60, 40:60)
         data = ui_space[range..., end] |> Array
         # @show typeof(data); error()
-        image!(ax, data; colormap = :seaborn_icefire_gradient, interpolate = false)
+        image!(ax, data; colormap = :RdBu, interpolate = false)
     end
     save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
     fig
@@ -1786,7 +1783,8 @@ export plot_qr
 function plot_qr(setup)
     (; name) = setup
     modelkeys = [:ref, :nomo, :smag, :clar, :tbnn, :equi, :conv]
-    qr = map(key -> key => load_object("$(setup.outdir)/qr_$(key).jld2"), modelkeys) |> NamedTuple
+    qr = map(key -> key => load_object("$(setup.outdir)/qr_$(key).jld2"), modelkeys)
+    qr = NamedTuple(qr)
 
     fig = Figure(; size = (800, 440))
     labels = getlabels()
@@ -1982,7 +1980,7 @@ function plot_sfs(setup, data)
             image!(
                 ax,
                 data;
-                colormap = :seaborn_icefire_gradient,
+                colormap = :RdBu,
                 colorrange = extrema(τ_all.ref[comp][:, :, end]),
                 interpolate = false,
             )
