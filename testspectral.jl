@@ -44,33 +44,40 @@ create_data(setup);
 data = joinpath(setup.outdir, "data.jld2") |> load_object;
 
 let
+    (; D) = setup
     u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
     g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
     v = spacescalarfield(g)
     p = plan_rfft(v)
-    ldiv!(v, p, u.z)
-    v .*= g.n^3 # FFT factor
-    r = 5e-1
-    field = v[:, :, end] |> Array
-    fig, ax, im = image(
-        field;
-        # colorrange = (-r, r),
-        # colormap = :balance,
-        colormap = :RdBu,
-        # colormap = :seaborn_icefire_gradient,
-    )
+    if D == 2
+        ldiv!(v, p, u.x)
+        v .*= g.n^D # FFT factor
+        field = v |> Array
+    else
+        ldiv!(v, p, u.z)
+        v .*= g.n^D # FFT factor
+        field = v[:, :, end] |> Array
+    end
+    fig, ax, im = image(field; colormap = :RdBu)
     save("$(setup.plotdir)/dnsfield.png", fig)
     fig
 end
 
 let
+    (; D) = setup
     u = data.inputs[1] |> adapt(setup.backend)
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     v = spacescalarfield(g)
     p = plan_rfft(v)
-    ldiv!(v, p, u.z)
-    v .*= g.n^3 # FFT factor
-    field = v[:, :, end] |> Array
+    if D == 2
+        ldiv!(v, p, u.x)
+        v .*= g.n^D # FFT factor
+        field = v |> Array
+    else
+        ldiv!(v, p, u.z)
+        v .*= g.n^D # FFT factor
+        field = v[:, :, end] |> Array
+    end
     fig, ax, im = image(field; colormap = :RdBu)
     save("$(setup.plotdir)/dnsfield_filtered.png", fig)
     fig
@@ -127,6 +134,11 @@ end
 
 m_smag = create_smagorinsky(
     0.17,
+    setup.Δ,
+    Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
+)
+
+m_dynsmag = create_dynamic_smagorinsky(
     setup.Δ,
     Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
 )

@@ -148,7 +148,9 @@ function create_dns(setup)
     @info "Creating initial conditions"
     flush(stderr)
     clean()
-    u = randomfield(linear_profile, g; rng, totalenergy)#, kpeak)
+    profile = D == 2 ? peak_profile : linear_profile_3D
+    args = D == 2 ? (; kpeak = 10) : (;)
+    u = randomfield(profile, g; rng, totalenergy, args...)
     clean()
 
     # # Load previous DNS state
@@ -1469,7 +1471,7 @@ end
     I = @index(Global, Cartesian)
     G = @SMatrix [GG.xx[I] GG.xy[I]; GG.yx[I] GG.yy[I]]
     S = (G + G') / 2
-    nu = CS^2 * Δ^2 * sqrt(sum(abs2, S))
+    nu = CS^2 * Δ^2 * sqrt(2 * sum(abs2, S))
     τ = -2 * nu * S
     xx, yy, xy = 1, 2, 3
     ττ[I, xx] = τ[1, 1]
@@ -1485,7 +1487,7 @@ end
         GG.zx[I] GG.zy[I] GG.zz[I]
     ]
     S = (G + G') / 2
-    nu = CS^2 * Δ^2 * sqrt(sum(abs2, S))
+    nu = CS^2 * Δ^2 * sqrt(2 * sum(abs2, S))
     τ = -2 * nu * S
     xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
     ττ[I, xx] = τ[1, 1]
@@ -1537,6 +1539,30 @@ function create_verstappen(C, Δ, g)
         τ
     end
     verstappen
+end
+
+export create_dynamic_smagorinsky
+function create_dynamic_smagorinsky(Δ, g)
+    hat = scalarfield(g)
+    L =  spacetensorfield(g)
+    M =  spacetensorfield(g)
+    m1 = spacetensorfield(g)
+    m2 = spacetensorfield(g)
+    c =  spacescalarfield(g)
+    utilde = vectorfield(g)
+    v = spacevectorfield(g)
+    vi_vj = spacescalarfield(g)
+    σ = tensorfield(g)
+    plan = plan_rfft(c)
+    function model(u)
+        for (utilde, u) in zip(utilde, u)
+            copyto!(utilde, u)
+            apply!(gaussianfilter!, g, (utilde, setup.Δ, g))
+            apply!(twothirds!, g, (utilde, g))
+        end
+        nonlinearity!(σ, vi_vj, v, u, plan, g_dns)
+    end
+    model
 end
 
 export apriori_error
@@ -2253,18 +2279,16 @@ function plot_spectrum_dns(setup)
         ylabelsize = 20,
     )
     if D == 2
-        kkolmo = 2π / l * [3, g_dns.n / 10]
-        kolmo = @. stat.diss^(-1 / 3) * kkolmo^(-3)
-        escale = stat.diss^(-1 / 3) * stat.l_kol^(3)
+        C = 1.6
+        kkolmo = 2π / l * [3, g_dns.n / 4]
+        kolmo = @. 1e3 * C * stat.diss^(2 / 3) * kkolmo^(-4)
+        escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(4)
     elseif D == 3
         kkolmo = 2π / l * [1, g_dns.n / 8]
         C = 1.6
-        # C = (1 + sqrt(5)) / 2
         kolmo = @. C * stat.diss^(2 / 3) * kkolmo^(-5 / 3)
         escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
-        # escale = 1
     end
-    # escale = 1
     kscale = stat.l_kol
 
     # # Banded force stuff

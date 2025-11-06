@@ -23,7 +23,7 @@ using Zygote
 "Free up GPU memory."
 function clean()
     GC.gc()
-    CUDA.reclaim()
+    CUDA.functional() && CUDA.reclaim()
 end
 export clean
 

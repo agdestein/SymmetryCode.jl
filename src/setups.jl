@@ -1,23 +1,26 @@
 export setup_laptop
 function setup_laptop()
-    l = 1.0
-    n_les = 256
-    Δ = 4 * l / n_les
+    l = 2π
+    n_dns = 512
+    n_les = 64
+    visc = 1e-4
+    Δ = 3 * l / n_les
     outdir = joinpath(@__DIR__, "..", "output", "laptop") |> mkpath
     plotdir = joinpath(outdir, "plots") |> mkpath
     (;
         name = "laptop",
-        visc = 1e-5,
         outdir,
         plotdir,
         D = 2,
         l,
-        n_dns = 2048,
+        n_dns,
         n_les,
         Δ,
-        warmup = (; kpeak = 5, totalenergy = 1.0, tstop = 0.5, cfl = 0.35, seed = 0),
-        datagen = (; nstep = 1000, nsubstep = 25, cfl = 0.35),
-        backend = CUDABackend(),
+        visc,
+        cfl = 0.35,
+        warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
+        datagen = (; nstep = 100, nsubstep = 25),
+        backend = CPU(),
     )
 end
 
