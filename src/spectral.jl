@@ -1541,9 +1541,65 @@ function create_verstappen(C, Δ, g)
     verstappen
 end
 
+@kernel function smagorinsky_tensor!(τ, S, Δ, g::Grid{2})
+    I = @index(Global, Cartesian)
+    Sxx, Syy, Sxy = S.xx[I], S.yy[I], S.xy[I]
+    S2 =
+        Sxx^2 + 
+        Syy^2 + 
+        2 * Sxy^2
+    nu = Δ^2 * sqrt(2 * S2)
+    xx, yy, xy = 1, 2, 3
+    τ[I, xx] = -2 * nu * Sxx
+    τ[I, yy] = -2 * nu * Syy
+    τ[I, xy] = -2 * nu * Sxy
+end
+
+@kernel function smagorinsky_tensor!(τ, S, Δ, g::Grid{3})
+    I = @index(Global, Cartesian)
+    Sxx, Syy, Szz = S.xx[I], S.yy[I], S.zz[I]
+    Sxy, Syz, Szx = S.xy[I], S.yz[I], S.zx[I]
+    S2 =
+        Sxx^2 + 
+        Syy^2 + 
+        Szz^2 + 
+        2 * Sxy^2 + 
+        2 * Syz^2 + 
+        2 * Szx^2
+    nu = Δ^2 * sqrt(2 * S2)
+    xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
+    τ[I, xx] = -2 * nu * Sxx
+    τ[I, yy] = -2 * nu * Syy
+    τ[I, zz] = -2 * nu * Szz
+    τ[I, xy] = -2 * nu * Sxy
+    τ[I, yz] = -2 * nu * Syz
+    τ[I, zx] = -2 * nu * Szx
+end
+
+@kernel function smagorinsky_coefficient!(c, M, L, g::Grid{2})
+    I = @index(Global, Cartesian)
+    Mxx, Myy, Mxy  = M.xx[I], M.yy[I], M.xy[I]
+    Lxx, Lyy, Lxy  = L.xx[I], L.yy[I], L.xy[I]
+    ML = Mxx * Lxx + Myy * Lyy + 2 * Mxy * Lxy
+    MM = Mxx * Mxx + Myy * Myy + 2 * Mxy * Mxy
+    c[I] = ML / MM
+end
+
+@kernel function smagorinsky_coefficient!(c, M, L, g::Grid{3})
+    I = @index(Global, Cartesian)
+    Mxx, Myy, Mzz, Mxy, Myz, Mzx  = M.xx[I], M.yy[I], M.zz[I], M.xy[I], M.yz[I], M.zx[I]
+    Lxx, Lyy, Lzz, Lxy, Lyz, Lzx  = L.xx[I], L.yy[I], L.zz[I], L.xy[I], L.yz[I], L.zx[I]
+    ML = Mxx * Lxx + Myy * Lyy + Mzz * Lzz + 2 * Mxy * Lxy + 2 * Myz * Lyz + 2 * Mzx * Lzx
+    MM = Mxx * Mxx + Myy * Myy + Mzz * Mzz + 2 * Mxy * Mxy + 2 * Myz * Myz + 2 * Mzx * Mzx
+    c[I] = ML / MM
+end
+
 export create_dynamic_smagorinsky
 function create_dynamic_smagorinsky(Δ, g)
-    hat = scalarfield(g)
+    space = spacescalarfield(g)
+    spect = scalarfield(g)
+    A = tensorfield_nonsym(g)
+    AA = spacetensorfield_nonsym(g)
     L =  spacetensorfield(g)
     M =  spacetensorfield(g)
     m1 = spacetensorfield(g)
@@ -1551,16 +1607,82 @@ function create_dynamic_smagorinsky(Δ, g)
     c =  spacescalarfield(g)
     utilde = vectorfield(g)
     v = spacevectorfield(g)
-    vi_vj = spacescalarfield(g)
     σ = tensorfield(g)
+    σtilde = tensorfield(g)
     plan = plan_rfft(c)
+    Δtilde = 2 * Δ
+    Δdouble = sqrt(Δtilde^2 + Δ^2)
+    fac = g.n^3 # FFT factor
     function model(u)
+        # Test-filter u
         for (utilde, u) in zip(utilde, u)
             copyto!(utilde, u)
-            apply!(gaussianfilter!, g, (utilde, setup.Δ, g))
+            apply!(gaussianfilter!, g, (utilde, Δtilde, g))
             apply!(twothirds!, g, (utilde, g))
         end
+
+        # Nonlinearities and L
         nonlinearity!(σ, vi_vj, v, u, plan, g_dns)
+        nonlinearity!(σtilde, vi_vj, v, utilde, plan, g_dns)
+        for σ in σ
+            apply!(gaussianfilter!, g, (σ, Δtilde, g))
+            apply!(twothirds!, g, (σ, g))
+        end
+        for (L, σ, σtilde) in zip(L, σ, σtilde)
+            ldiv!(space, plan, σ)
+            space .*= fac
+            copyto!(L, space)
+            ldiv!(space, plan, σtilde)
+            space .*= fac
+            L .-= space
+            # Now L = tilde(σ) - σ(tilde)
+        end
+
+        # Smagorinsky tensors
+        apply!(strainrate!, g, (Shat, u, g))
+        for (S, Shat) in zip(S, Shat)
+            apply!(twothirds!, g, (Shat, g))
+            ldiv!(S, plan, Shat) # Inverse RFFT
+            S .*= fac # FFT factor
+        end
+
+        # Original tensor
+        apply!(smagorinsky_tensor!, g, (m1, S, Δ, g))
+
+        # Filter original tensor m1, put result in M because we need m1 for later
+        for (m1, M) in zip(m1, M)
+            mul!(hat, plan, m1) # RFFT
+            hat ./= fac
+            apply!(gaussianfilter!, g, (hat, Δtilde, g)) # Test filter
+            apply!(twothirds!, g, (hat, g))
+            ldiv!(M, plan, hat) # Inverse RFFT
+            M .*= fac # FFT factor
+        end
+
+        # Tensor applied to test filtered velocity
+        for (S, Shat) in zip(S, Shat)
+            apply!(gaussianfilter!, g, (Shat, Δtilde, g))
+            apply!(twothirds!, g, (Shat, g))
+            ldiv!(S, plan, Shat) # Inverse RFFT
+            S .*= fac # FFT factor
+        end
+        apply!(smagorinsky_tensor!, g, (m2, S, Δdouble, g)) # Note: width for double filter
+
+        # Compute commutator between smagtensor and test filter
+        for (M, m2) in zip(M, m2)
+            M .-= m2
+        end
+
+        # Compute Smagorinsky coefficients
+        apply!(smagorinsky_coefficient!, g, (c, M, L, g))
+
+        # Multiply original Smagorinsky tensor with coefficients
+        for m1 in m1
+            m1 .*= c
+        end
+
+        # This now contains the correctly weighted tensor
+        m1
     end
     model
 end
