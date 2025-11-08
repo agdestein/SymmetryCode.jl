@@ -1596,6 +1596,7 @@ end
 
 export create_dynamic_smagorinsky
 function create_dynamic_smagorinsky(Δ, g)
+    # Allocate arrays (these can probably be fewer with some clever re-use)
     space = spacescalarfield(g)
     spect = scalarfield(g)
     A = tensorfield_nonsym(g)
@@ -1610,9 +1611,13 @@ function create_dynamic_smagorinsky(Δ, g)
     σ = tensorfield(g)
     σtilde = tensorfield(g)
     plan = plan_rfft(c)
-    Δtilde = 2 * Δ
-    Δdouble = sqrt(Δtilde^2 + Δ^2)
-    fac = g.n^3 # FFT factor
+
+    D = dim(g)
+    Δtilde = 2 * Δ # Filter width of test filter (single Gaussian, twice the original width)
+    Δdouble = sqrt(Δtilde^2 + Δ^2) # Filter width of double-Gaussian (original + test)
+    fac = g.n^D # FFT factor
+
+    # Model takes spectral ubar as input
     function model(u)
         # Test-filter u
         for (utilde, u) in zip(utilde, u)
@@ -1638,7 +1643,7 @@ function create_dynamic_smagorinsky(Δ, g)
             # Now L = tilde(σ) - σ(tilde)
         end
 
-        # Smagorinsky tensors
+        # Original strainrate
         apply!(strainrate!, g, (Shat, u, g))
         for (S, Shat) in zip(S, Shat)
             apply!(twothirds!, g, (Shat, g))
@@ -1646,34 +1651,34 @@ function create_dynamic_smagorinsky(Δ, g)
             S .*= fac # FFT factor
         end
 
-        # Original tensor
+        # Original Smagorinsky tensor
         apply!(smagorinsky_tensor!, g, (m1, S, Δ, g))
 
-        # Filter original tensor m1, put result in M because we need m1 for later
+        # Filter original tensor m1, put result in M because we need unfiltered m1 for later
         for (m1, M) in zip(m1, M)
             mul!(hat, plan, m1) # RFFT
-            hat ./= fac
+            hat ./= fac # FFT factor
             apply!(gaussianfilter!, g, (hat, Δtilde, g)) # Test filter
             apply!(twothirds!, g, (hat, g))
             ldiv!(M, plan, hat) # Inverse RFFT
             M .*= fac # FFT factor
         end
 
-        # Tensor applied to test filtered velocity
+        # Tensor applied to test-filtered strainrate
         for (S, Shat) in zip(S, Shat)
-            apply!(gaussianfilter!, g, (Shat, Δtilde, g))
+            apply!(gaussianfilter!, g, (Shat, Δtilde, g)) # Test filter
             apply!(twothirds!, g, (Shat, g))
             ldiv!(S, plan, Shat) # Inverse RFFT
             S .*= fac # FFT factor
         end
-        apply!(smagorinsky_tensor!, g, (m2, S, Δdouble, g)) # Note: width for double filter
+        apply!(smagorinsky_tensor!, g, (m2, S, Δdouble, g)) # Note: width from double-filter
 
-        # Compute commutator between smagtensor and test filter
+        # Compute commutator between smagtensor and test filter, put result in M
         for (M, m2) in zip(M, m2)
             M .-= m2
         end
 
-        # Compute Smagorinsky coefficients
+        # Estimate Smagorinsky coefficients from smag-commutator M and nonlinearity-commutator L
         apply!(smagorinsky_coefficient!, g, (c, M, L, g))
 
         # Multiply original Smagorinsky tensor with coefficients
@@ -1681,7 +1686,7 @@ function create_dynamic_smagorinsky(Δ, g)
             m1 .*= c
         end
 
-        # This now contains the correctly weighted tensor
+        # This now contains the correctly weighted original Smagorinsky tensor
         m1
     end
     model
