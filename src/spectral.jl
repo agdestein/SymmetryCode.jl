@@ -1597,16 +1597,16 @@ end
 export create_dynamic_smagorinsky
 function create_dynamic_smagorinsky(Δ, g)
     # Allocate arrays (these can probably be fewer with some clever re-use)
-    space = spacescalarfield(g)
-    spect = scalarfield(g)
-    A = tensorfield_nonsym(g)
-    AA = spacetensorfield_nonsym(g)
-    L =  spacetensorfield(g)
-    M =  spacetensorfield(g)
-    m1 = spacetensorfield(g)
-    m2 = spacetensorfield(g)
-    c =  spacescalarfield(g)
-    utilde = vectorfield(g)
+    space = spacescalarfield(g) # Temporary spatial field
+    spect = scalarfield(g) # Temporary spectral field
+    S = tensorfield(g) # Strain-rate
+    SS = spacetensorfield(g) # Strain-rate
+    L =  spacetensorfield(g) # Non-linearity commutator
+    M =  spacetensorfield(g) # Smagorinsky-tensor commutator
+    m1 = spacetensorfield(g) # Original Smagorinsky-tensor
+    m2 = spacetensorfield(g) # Double-filter Smagorinsky tensor
+    c =  spacescalarfield(g) # Dynamic Smagorinsky coefficient field
+    utilde = vectorfield(g) # Test-filtered ubar (effectively double-filtered)
     v = spacevectorfield(g)
     σ = tensorfield(g)
     σtilde = tensorfield(g)
@@ -1627,8 +1627,8 @@ function create_dynamic_smagorinsky(Δ, g)
         end
 
         # Nonlinearities and L
-        nonlinearity!(σ, vi_vj, v, u, plan, g_dns)
-        nonlinearity!(σtilde, vi_vj, v, utilde, plan, g_dns)
+        nonlinearity!(σ, space, v, u, plan, g_dns)
+        nonlinearity!(σtilde, space, v, utilde, plan, g_dns)
         for σ in σ
             apply!(gaussianfilter!, g, (σ, Δtilde, g))
             apply!(twothirds!, g, (σ, g))
