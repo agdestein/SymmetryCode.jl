@@ -3,6 +3,7 @@ getlabels() = (;
     ref = "Filtered DNS",
     nomo = "No-model",
     smag = "Smagorinsky",
+    dynsmag = "Dynamic Smagorinsky",
     vers = "Verstappen",
     clar = "Clark",
     tbnn = "TBNN",
@@ -148,8 +149,10 @@ function create_dns(setup)
     @info "Creating initial conditions"
     flush(stderr)
     clean()
-    profile = D == 2 ? peak_profile : linear_profile_3D
-    args = D == 2 ? (; kpeak = 10) : (;)
+    # profile = D == 2 ? peak_profile : linear_profile_3D
+    # args = D == 2 ? (; kpeak = 10) : (;)
+    profile = D == 2 ? linear_profile_2D : linear_profile_3D
+    args = (;)
     u = randomfield(profile, g; rng, totalenergy, args...)
     clean()
 
@@ -718,15 +721,13 @@ function les!(du, u, grid, cache; model, visc)
 
     # Closure model stress (in physical space)
     apply!(vectorgradient!, grid, (G, u, grid))
-    x = map(G) do G
+    GG = map(G) do G
         apply!(twothirds!, grid, (G, grid))
         res = plan \ G
         res .*= grid.n^D # FFT factor
         res
     end
-    # x = stack(x)
-    # x = reshape(x, size(x)..., 1)
-    y = model(x)
+    y = model(u, GG)
 
     # Add closure stress to existing stress (in spectral space)
     for (i, σ) in enumerate(σ)
@@ -816,15 +817,15 @@ function solve_les!(u; times, grid, visc, model, cfl)
 
             if j % 1 == 0
                 energy = Seneca.energy(u)
-                @info join(
-                    [
-                        "j = $j",
-                        "t = $(round(t; sigdigits = 4))",
-                        "Δt = $(round(Δt; sigdigits = 4))",
-                        "energy = $(round(energy; sigdigits = 4))",
-                    ],
-                    ",\t",
-                )
+                # @info join(
+                #     [
+                #         "j = $j",
+                #         "t = $(round(t; sigdigits = 4))",
+                #         "Δt = $(round(Δt; sigdigits = 4))",
+                #         "energy = $(round(energy; sigdigits = 4))",
+                #     ],
+                #     ",\t",
+                # )
                 flush(stderr)
                 forever = Δt < 1e-8
                 boom = energy > 1e5
@@ -929,6 +930,11 @@ export get_les_statistics
 @inline ninvariant(::Grid{3}) = 5
 @inline getinvariants(::Grid{3}, S, R) =
     tr(S * S), tr(R * R), tr(S * S * S), tr(S * R * R), tr(S * S * R * R)
+
+# # 3D invariants
+# @inline ninvariant(::Grid{3}) = 6
+# @inline getinvariants(::Grid{3}, S, R) =
+#     tr(S * S), tr(R * R), tr(S * S * S), tr(S * R * R), tr(S * S * R * R), tr(S * S * R * R * S * R)
 
 "Compute deviatoric part of a tensor."
 @inline deviator(σ::SMatrix{2,2}) = σ - tr(σ) / 2 * one(σ)
@@ -1461,7 +1467,7 @@ end
 end
 
 export create_clark
-create_clark(Δ, g) = function clark(G)
+create_clark(Δ, g) = function clark(u, G)
     τ = stack(spacetensorfield(g))
     apply!(clark_kernel!, g, (τ, G, Δ, g); ndrange = space_ndrange(g))
     τ
@@ -1521,7 +1527,7 @@ end
 
 export create_smagorinsky
 function create_smagorinsky(CS, Δ, g)
-    function smagorinsky(G)
+    function smagorinsky(u, G)
         τ = stack(spacetensorfield(g))
         apply!(smagorinsky_kernel!, g, (τ, G, CS, Δ, g); ndrange = space_ndrange(g))
         τ
@@ -1533,7 +1539,7 @@ export create_verstappen
 function create_verstappen(C, Δ, g)
     D = dim(g)
     @assert D == 3 "Q-R model is only defined in 3D"
-    function verstappen(G)
+    function verstappen(u, G)
         τ = stack(spacetensorfield(g))
         apply!(verstappen_kernel!, g, (τ, G, C, Δ, g); ndrange = space_ndrange(g))
         τ
@@ -1550,9 +1556,9 @@ end
         2 * Sxy^2
     nu = Δ^2 * sqrt(2 * S2)
     xx, yy, xy = 1, 2, 3
-    τ[I, xx] = -2 * nu * Sxx
-    τ[I, yy] = -2 * nu * Syy
-    τ[I, xy] = -2 * nu * Sxy
+    τ[xx][I] = -2 * nu * Sxx
+    τ[yy][I] = -2 * nu * Syy
+    τ[xy][I] = -2 * nu * Sxy
 end
 
 @kernel function smagorinsky_tensor!(τ, S, Δ, g::Grid{3})
@@ -1568,12 +1574,12 @@ end
         2 * Szx^2
     nu = Δ^2 * sqrt(2 * S2)
     xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
-    τ[I, xx] = -2 * nu * Sxx
-    τ[I, yy] = -2 * nu * Syy
-    τ[I, zz] = -2 * nu * Szz
-    τ[I, xy] = -2 * nu * Sxy
-    τ[I, yz] = -2 * nu * Syz
-    τ[I, zx] = -2 * nu * Szx
+    τ[xx][I] = -2 * nu * Sxx
+    τ[yy][I] = -2 * nu * Syy
+    τ[zz][I] = -2 * nu * Szz
+    τ[xy][I] = -2 * nu * Sxy
+    τ[yz][I] = -2 * nu * Syz
+    τ[zx][I] = -2 * nu * Szx
 end
 
 @kernel function smagorinsky_coefficient!(c, M, L, g::Grid{2})
@@ -1582,7 +1588,8 @@ end
     Lxx, Lyy, Lxy  = L.xx[I], L.yy[I], L.xy[I]
     ML = Mxx * Lxx + Myy * Lyy + 2 * Mxy * Lxy
     MM = Mxx * Mxx + Myy * Myy + 2 * Mxy * Mxy
-    c[I] = ML / MM
+    # c[I] = -ML / MM
+    c[I] = max(-ML / MM, 0)
 end
 
 @kernel function smagorinsky_coefficient!(c, M, L, g::Grid{3})
@@ -1591,7 +1598,8 @@ end
     Lxx, Lyy, Lzz, Lxy, Lyz, Lzx  = L.xx[I], L.yy[I], L.zz[I], L.xy[I], L.yz[I], L.zx[I]
     ML = Mxx * Lxx + Myy * Lyy + Mzz * Lzz + 2 * Mxy * Lxy + 2 * Myz * Lyz + 2 * Mzx * Lzx
     MM = Mxx * Mxx + Myy * Myy + Mzz * Mzz + 2 * Mxy * Mxy + 2 * Myz * Myz + 2 * Mzx * Mzx
-    c[I] = ML / MM
+    # c[I] = -ML / MM
+    c[I] = max(-ML / MM, 0)
 end
 
 export create_dynamic_smagorinsky
@@ -1599,12 +1607,13 @@ function create_dynamic_smagorinsky(Δ, g)
     # Allocate arrays (these can probably be fewer with some clever re-use)
     space = spacescalarfield(g) # Temporary spatial field
     spect = scalarfield(g) # Temporary spectral field
-    S = tensorfield(g) # Strain-rate
-    SS = spacetensorfield(g) # Strain-rate
+    Shat = tensorfield(g) # Strain-rate
+    S = spacetensorfield(g) # Strain-rate
     L =  spacetensorfield(g) # Non-linearity commutator
     M =  spacetensorfield(g) # Smagorinsky-tensor commutator
     m1 = spacetensorfield(g) # Original Smagorinsky-tensor
     m2 = spacetensorfield(g) # Double-filter Smagorinsky tensor
+    τ = similar(space, space_ndrange(g)..., tensordim(g))
     c =  spacescalarfield(g) # Dynamic Smagorinsky coefficient field
     utilde = vectorfield(g) # Test-filtered ubar (effectively double-filtered)
     v = spacevectorfield(g)
@@ -1618,7 +1627,7 @@ function create_dynamic_smagorinsky(Δ, g)
     fac = g.n^D # FFT factor
 
     # Model takes spectral ubar as input
-    function model(u)
+    function model(u, G)
         # Test-filter u
         for (utilde, u) in zip(utilde, u)
             copyto!(utilde, u)
@@ -1627,15 +1636,15 @@ function create_dynamic_smagorinsky(Δ, g)
         end
 
         # Nonlinearities and L
-        nonlinearity!(σ, space, v, u, plan, g_dns)
-        nonlinearity!(σtilde, space, v, utilde, plan, g_dns)
+        nonlinearity!(σ, space, v, u, plan, g)
+        nonlinearity!(σtilde, space, v, utilde, plan, g)
         for σ in σ
             apply!(gaussianfilter!, g, (σ, Δtilde, g))
             apply!(twothirds!, g, (σ, g))
         end
         for (L, σ, σtilde) in zip(L, σ, σtilde)
             ldiv!(space, plan, σ)
-            space .*= fac
+            space ./= fac
             copyto!(L, space)
             ldiv!(space, plan, σtilde)
             space .*= fac
@@ -1656,12 +1665,13 @@ function create_dynamic_smagorinsky(Δ, g)
 
         # Filter original tensor m1, put result in M because we need unfiltered m1 for later
         for (m1, M) in zip(m1, M)
-            mul!(hat, plan, m1) # RFFT
-            hat ./= fac # FFT factor
-            apply!(gaussianfilter!, g, (hat, Δtilde, g)) # Test filter
-            apply!(twothirds!, g, (hat, g))
-            ldiv!(M, plan, hat) # Inverse RFFT
-            M .*= fac # FFT factor
+            mul!(spect, plan, m1) # RFFT
+            apply!(twothirds!, g, (spect, g))
+            ldiv!(m1, plan, spect) # Inverse RFFT
+            mul!(spect, plan, m1) # RFFT
+            apply!(gaussianfilter!, g, (spect, Δtilde, g)) # Test filter
+            apply!(twothirds!, g, (spect, g))
+            ldiv!(M, plan, spect) # Inverse RFFT
         end
 
         # Tensor applied to test-filtered strainrate
@@ -1681,13 +1691,18 @@ function create_dynamic_smagorinsky(Δ, g)
         # Estimate Smagorinsky coefficients from smag-commutator M and nonlinearity-commutator L
         apply!(smagorinsky_coefficient!, g, (c, M, L, g))
 
+        @show extrema(c), mean(c)
+
         # Multiply original Smagorinsky tensor with coefficients
         for m1 in m1
             m1 .*= c
         end
 
         # This now contains the correctly weighted original Smagorinsky tensor
-        m1
+        for (i, m1) in enumerate(m1)
+            copyto!(selectdim(τ, D + 1, i), m1)
+        end
+        τ
     end
     model
 end
@@ -2230,12 +2245,13 @@ end
 
 export plot_evolution_data
 function plot_evolution_data(setup, data)
+    (; D) = setup
     times_warmup, energies_warmup, dissipations_warmup =
         load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
     times_warmup .-= times_warmup[end] # Use negative times for warmup
 
     times = data.times
-    energies = getindex.(data.statistics_dns, :uavg) .^ 2 / 2 * 3
+    energies = getindex.(data.statistics_dns, :uavg) .^ 2 / 2 * D
     dissipations = getindex.(data.statistics_dns, :diss)
 
     emax = max(maximum(energies), maximum(energies_warmup))
@@ -2317,9 +2333,15 @@ function plot_spectrum_data(setup, data)
 
     k_dns = 2π / setup.l * eachindex(s_dns)
     k_les = 2π / setup.l * eachindex(s_les)
-    C = 1.6
-    s_kol = C * diss^(2/3) * k_dns .^ (-5/3)
-    escale = C^(-1) * diss^(-2/3) * eta^(-5/3)
+    if D == 2
+        C = 4e1
+        s_kol = C * diss^(2/3) * k_dns .^ (-3)
+        escale = C^(-1) * diss^(-2/3) * eta^(-3)
+    elseif D == 3
+        C = 1.6
+        s_kol = C * diss^(2/3) * k_dns .^ (-5/3)
+        escale = C^(-1) * diss^(-2/3) * eta^(-5/3)
+    end
 
     fig = Figure(; size = (400, 340))
     ax = Axis(
@@ -2407,9 +2429,9 @@ function plot_spectrum_dns(setup)
     )
     if D == 2
         C = 1.6
-        kkolmo = 2π / l * [3, g_dns.n / 4]
-        kolmo = @. 1e3 * C * stat.diss^(2 / 3) * kkolmo^(-4)
-        escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(4)
+        kkolmo = 2π / l * [1, g_dns.n / 2]
+        kolmo = @. 3e1 * C * stat.diss^(2 / 3) * kkolmo^(-3)
+        escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(3)
     elseif D == 3
         kkolmo = 2π / l * [1, g_dns.n / 8]
         C = 1.6

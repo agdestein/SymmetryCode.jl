@@ -129,7 +129,7 @@ plot_spectrum_data(setup, data)
 
 m_nomo = let
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    m_nomo(_) = fill!(stack(spacetensorfield(g)), 0)
+    m_nomo(_, _) = fill!(stack(spacetensorfield(g)), 0)
 end
 
 m_smag = create_smagorinsky(
@@ -176,27 +176,28 @@ upostfiles = map(
     (;
         nomo = "nomo",
         smag = "smag",
+        dynsmag = "dynsmag",
         # vers = "vers",
         clar = "clar",
-        tbnn = "tbnn",
-        equi = "equi",
-        conv = "conv",
+        # tbnn = "tbnn",
+        # equi = "equi",
+        # conv = "conv",
     ),
 )
 
 let
     models = (;
-        nomo = m_nomo,
-        smag = m_smag,
-        # vers = m_vers,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        equi = m_equi,
-        conv = m_conv,
+        # nomo = m_nomo,
+        # smag = m_smag,
+        dynsmag = m_dynsmag,
+        # # vers = m_vers,
+        # clar = m_clar,
+        # tbnn = m_tbnn,
+        # equi = m_equi,
+        # conv = m_conv,
     )
     solve_les(; data, setup, models, files = upostfiles)
 end
-
 
 round(data.timing; digits = 1)
 
@@ -207,7 +208,7 @@ flush(stdout)
 les_stat = get_les_statistics(setup, data, upostfiles);
 save_object("$(setup.outdir)/les_stat.jld2", les_stat)
 
-les_stat = load_object("$(setup.outdir)/les_stat.jld2")
+les_stat = load_object("$(setup.outdir)/les_stat.jld2");
 
 map(s -> round(mean(s.e_post); sigdigits = 4), les_stat) |> pairs
 

@@ -2,7 +2,7 @@ export setup_laptop
 function setup_laptop()
     l = 2π
     n_dns = 512
-    n_les = 64
+    n_les = 128
     visc = 1e-4
     Δ = 3 * l / n_les
     outdir = joinpath(@__DIR__, "..", "output", "laptop") |> mkpath
@@ -18,7 +18,7 @@ function setup_laptop()
         Δ,
         visc,
         cfl = 0.35,
-        warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
+        warmup = (; totalenergy = 0.2, tstop = 5.0, seed = 0),
         datagen = (; nstep = 100, nsubstep = 25),
         backend = CPU(),
     )
