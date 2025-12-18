@@ -1586,18 +1586,37 @@ end
     I = @index(Global, Cartesian)
     Mxx, Myy, Mxy  = M.xx[I], M.yy[I], M.xy[I]
     Lxx, Lyy, Lxy  = L.xx[I], L.yy[I], L.xy[I]
+
+    # Make L trace-free
+    trace = (Lxx + Lyy) / 2
+    Lxx -= trace
+    Lyy -= trace
+
+    # Dot products
     ML = Mxx * Lxx + Myy * Lyy + 2 * Mxy * Lxy
     MM = Mxx * Mxx + Myy * Myy + 2 * Mxy * Mxy
+
+    # Least squares fit
     # c[I] = -ML / MM
-    c[I] = max(-ML / MM, 0)
+    c[I] = max(-ML / MM, 0) # Clip
 end
 
 @kernel function smagorinsky_coefficient!(c, M, L, g::Grid{3})
     I = @index(Global, Cartesian)
     Mxx, Myy, Mzz, Mxy, Myz, Mzx  = M.xx[I], M.yy[I], M.zz[I], M.xy[I], M.yz[I], M.zx[I]
     Lxx, Lyy, Lzz, Lxy, Lyz, Lzx  = L.xx[I], L.yy[I], L.zz[I], L.xy[I], L.yz[I], L.zx[I]
+
+    # Make L trace-free
+    trace = (Lxx + Lyy + Lzz) / 3
+    Lxx -= trace
+    Lyy -= trace
+    Lzz -= trace
+
+    # Dot products
     ML = Mxx * Lxx + Myy * Lyy + Mzz * Lzz + 2 * Mxy * Lxy + 2 * Myz * Lyz + 2 * Mzx * Lzx
     MM = Mxx * Mxx + Myy * Myy + Mzz * Mzz + 2 * Mxy * Mxy + 2 * Myz * Myz + 2 * Mzx * Mzx
+
+    # Least squares fit
     # c[I] = -ML / MM
     c[I] = max(-ML / MM, 0)
 end
@@ -1609,12 +1628,12 @@ function create_dynamic_smagorinsky(Δ, g)
     spect = scalarfield(g) # Temporary spectral field
     Shat = tensorfield(g) # Strain-rate
     S = spacetensorfield(g) # Strain-rate
-    L =  spacetensorfield(g) # Non-linearity commutator
-    M =  spacetensorfield(g) # Smagorinsky-tensor commutator
+    L = spacetensorfield(g) # Non-linearity commutator
+    M = spacetensorfield(g) # Smagorinsky-tensor commutator
     m1 = spacetensorfield(g) # Original Smagorinsky-tensor
     m2 = spacetensorfield(g) # Double-filter Smagorinsky tensor
     τ = similar(space, space_ndrange(g)..., tensordim(g))
-    c =  spacescalarfield(g) # Dynamic Smagorinsky coefficient field
+    c = spacescalarfield(g) # Dynamic Smagorinsky coefficient field
     utilde = vectorfield(g) # Test-filtered ubar (effectively double-filtered)
     v = spacevectorfield(g)
     σ = tensorfield(g)
