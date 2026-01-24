@@ -4,11 +4,6 @@
 # [FZJ-JSC/tutorial-multi-gpu: Efficient Distributed GPU Programming for Exascale, an SC/ISC Tutorial](https://github.com/FZJ-JSC/tutorial-multi-gpu)
 # [Cayley table - Wikipedia](https://en.wikipedia.org/wiki/Cayley_table)
 
-if false
-    include("src/SymmetryCode.jl")
-    using .SymmetryCode
-end
-
 # using KernelAbstractions
 using LinearAlgebra
 using Lux

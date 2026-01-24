@@ -1,9 +1,3 @@
-if false
-    include("src/SymmetryCode.jl")
-    using .SymmetryCode
-    using .SymmetryCode.Spectral
-end
-
 let
     s = group_stuff(3)
     # map(display, s.mats)
