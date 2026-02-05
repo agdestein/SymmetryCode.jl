@@ -8,11 +8,10 @@ using FFTW
 using JLD2
 using LinearAlgebra
 using Random
-using Seneca
 using StaticArrays
 using Statistics
 using SymmetryCode
-using WGLMakie
+using GLMakie
 lines([1, 2, 3])
 
 setup = setup_laptop()

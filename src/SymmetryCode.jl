@@ -27,10 +27,6 @@ end
 export clean
 
 include("Seneca.jl")
-export Seneca
-
-using .Seneca
-
 include("octahedral.jl")
 include("spectral.jl")
 include("training.jl")

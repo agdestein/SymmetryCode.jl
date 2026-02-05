@@ -1,5 +1,5 @@
-"Pseudo-spectral solver for the 3D incompressible Navier-Stokes equations."
-module Seneca
+# "Pseudo-spectral solver for the 3D incompressible Navier-Stokes equations."
+# module Seneca
 
 using AbstractFFTs
 using Adapt
@@ -81,6 +81,8 @@ ndrange((; n)::Grid{3}) = div(n, 2) + 1, n, n
 
 "Range for physical space arrays."
 space_ndrange(g::Grid) = ntuple(Returns(g.n), dim(g))
+
+get_fft_fac(g::Grid) = (g.n / g.l)^dim(g)
 
 """
 Apply KernelAbstractions kernel over given ndrange
@@ -214,7 +216,7 @@ getplan(grid) = plan_rfft(spacescalarfield(grid))
 function nonlinearity!(σ, vi_vj, v, u, plan, g::Grid)
     D = dim(g)
     temp = σ.xx # Use σ.xx as temporary complex storage
-    fac = g.n^D
+    fac = get_fft_fac(g)
     for i = 1:D
         copyto!(temp, u[i])
         apply!(twothirds!, g, (temp, g)) # Zero out high wavenumbers
@@ -239,17 +241,17 @@ end
     I = @index(Global, Cartesian)
     kx, ky = wavenumber_full(g, I)
     ux, uy = u.x[I], u.y[I]
-    σ.xx[I] -= visc * im * kx * ux
-    σ.yy[I] -= visc * im * ky * uy
+    σ.xx[I] -= 2 * visc * im * kx * ux
+    σ.yy[I] -= 2 * visc * im * ky * uy
     σ.xy[I] -= visc * im * (ky * ux + kx * uy)
 end
 @kernel function viscosity!(σ, u, visc, g::Grid{3})
     I = @index(Global, Cartesian)
     kx, ky, kz = wavenumber_full(g, I)
     ux, uy, uz = u.x[I], u.y[I], u.z[I]
-    σ.xx[I] -= visc * im * kx * ux
-    σ.yy[I] -= visc * im * ky * uy
-    σ.zz[I] -= visc * im * kz * uz
+    σ.xx[I] -= 2 * visc * im * kx * ux
+    σ.yy[I] -= 2 * visc * im * ky * uy
+    σ.zz[I] -= 2 * visc * im * kz * uz
     σ.xy[I] -= visc * im * (ky * ux + kx * uy)
     σ.yz[I] -= visc * im * (kz * uy + ky * uz)
     σ.zx[I] -= visc * im * (kx * uz + kz * ux)
@@ -288,33 +290,32 @@ end
 
 peak_profile(k; kpeak) = k^4 * exp(-2 * (k / kpeak)^2)
 linear_profile(k) = (k > 0) * k^(-5 / 3)
-export peak_profile, linear_profile
 
 "Taylor-Green vortex."
-function taylorgreen(g::Grid{2}, plan)
+function taylorgreen(g::Grid{2}, plan; doproject = true)
     (; l, n, backend) = g
     h = l / n
-    x = range(h / 2, 1 - h / 2, n) |> Array |> adapt(backend)
+    x = range(h / 2, l - h / 2, n) |> Array |> adapt(backend)
     y = reshape(x, 1, :)
     v = spacescalarfield(g)
-    fac = n^2
+    fac = get_fft_fac(g)
     #! format: off
-    @. v =  sinpi(2x / l) * cospi(2y / l); ux = plan * v; ux ./= fac
-    @. v = -cospi(2x / l) * sinpi(2y / l); uy = plan * v; uy ./= fac
+    @. v =  -sinpi(2x / l) * cospi(2y / l); ux = plan * v; ux ./= fac
+    @. v = cospi(2x / l) * sinpi(2y / l); uy = plan * v; uy ./= fac
     #! format: on
     v = nothing
     u = (; x = ux, y = uy)
-    apply!(project!, g, (u, g))
+    doproject && apply!(project!, g, (u, g))
     u
 end
-function taylorgreen(g::Grid{3}, plan)
+function taylorgreen(g::Grid{3}, plan; doproject)
     (; l, n, backend) = g
     h = l / n
-    x = range(h / 2, 1 - h / 2, n) |> Array |> adapt(backend)
+    x = range(h / 2, l - h / 2, n) |> Array |> adapt(backend)
     y = reshape(x, 1, :)
     z = reshape(x, 1, 1, :)
     v = spacescalarfield(g)
-    fac = n^3
+    fac = get_ffc_fac(g)
     #! format: off
     @. v =  sinpi(2x / l) * cospi(2y / l) * sinpi(2z / l) / 2; ux = plan * v; ux ./= fac
     @. v = -cospi(2x / l) * sinpi(2y / l) * sinpi(2z / l) / 2; uy = plan * v; uy ./= fac
@@ -322,7 +323,7 @@ function taylorgreen(g::Grid{3}, plan)
     v = nothing
     uz = zero(ux)
     u = (; x = ux, y = uy, z = uz)
-    apply!(project!, g, (u, g))
+    doproject && apply!(project!, g, (u, g))
     u
 end
 
@@ -410,7 +411,7 @@ function z_vort!(spacevort, vort, u, plan, grid)
     apply!(z_vort_kernel!, grid, (vort, u, grid))
     apply!(twothirds!, grid, (vort, grid)) # Zero out high wavenumbers
     ldiv!(spacevort, plan, vort)
-    spacevort .*= grid.n^dim(grid) # FFT factor
+    spacevort .*= get_fft_fac(grid) # FFT factor
     nothing
 end
 
@@ -456,12 +457,10 @@ getenergy(u) = sum(abs2, u) + sum(abs2, selectdim(u, 1, 2:(size(u, 1)-1)))
 
 "Sum of that also accounts for missing modes in RFFT."
 spectralsum(f, u) = sum(f, u) + sum(f, selectdim(u, 1, 2:(size(u, 1)-1)))
-export spectralsum
 
 "Dot product of that also accounts for missing modes in RFFT."
 spectraldot(u, v) =
     dot(u, v) + dot(selectdim(u, 1, 2:(size(u, 1)-1)), selectdim(v, 1, 2:(size(v, 1)-1)))
-export spectraldot
 
 @kernel function vectorgradient!(G, u, g::Grid{2})
     I = @index(Global, Cartesian)
@@ -487,7 +486,6 @@ end
     G.zz[I] = im * kz * uz
 end
 
-export derivative!
 @kernel function derivative!(du, u, j, g::Grid)
     I = @index(Global, Cartesian)
     kj = wavenumber_full(g, I)[j]
@@ -530,7 +528,6 @@ function get_dissipation!(diss, u, visc, g)
     apply!(dissipation_kernel!, g, (diss, u, visc, g))
     d = sum(diss) + sum(selectdim(diss, 1, 2:(size(diss, 1)-1)))
 end
-export get_dissipation!
 
 function turbulence_statistics(u, visc, g, dissfield = similar(u.x, typeof(g.l)))
     D = dim(g)
@@ -594,7 +591,7 @@ function propose_timestep(u, grid, visc, cache)
         copyto!(du[i], u[i])
         apply!(twothirds!, grid, (du[i], grid)) # Zero out ghost modes
         ldiv!(v[i], plan, du[i]) # ldiv! overwrites input...
-        v[i] .*= grid.n^D # FFT factor
+        v[i] .*= get_fft_fac(grid) # FFT factor
     end
     D == 2 && @. vi_vj = sqrt(v.x^2 + v.y^2)
     D == 3 && @. vi_vj = sqrt(v.x^2 + v.y^2 + v.z^2)
@@ -732,7 +729,6 @@ function getband(grid, kband)
 
     (; inds, conjinds, k2 = k2[inds])
 end
-export getband
 
 "Get indices and wavenumbers for the `i`-th shell (`k` such that `i ≤ |k| < i + 1`)."
 function getshells(grid, shells)
@@ -785,7 +781,6 @@ function getshells(grid, shells)
         (; shell = i, inds = (inds, conjinds), k2 = (k2[inds], k2[conjinds]))
     end
 end
-export getshells
 
 # @kernel function vectorgradient!(Gij, u, grid::Grid{3}, i, j)
 #     I = @index(Global, Cartesian)
@@ -799,14 +794,4 @@ export getshells
 #     g = G.xx[I]
 # end
 
-export Grid, apply!, dim, tensordim, spacing, volume, wavenumber_full
-export scalarfield, vectorfield, tensorfield, tensorfield_nonsym, randomfield, taylorgreen
-export spacescalarfield, spacevectorfield, spacetensorfield, spacetensorfield_nonsym
-export vectorgradient!, strainrate!, turbulence_statistics, z_vort!, energy, getenergy
-export getcache, propose_timestep, project!, nonlinearity!, stress!, tensordivergence!
-export forwardeuler!, wray3!, abcn!, convectiondiffusion!
-export ouforcer
-export spectrum, twothirds!
-export ndrange, space_ndrange
-
-end
+# end
