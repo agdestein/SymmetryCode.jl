@@ -15,7 +15,6 @@ using Makie
 using MLUtils
 using Optimisers
 using Random
-using Seneca
 using StaticArrays
 using Statistics
 using Zygote
@@ -26,6 +25,11 @@ function clean()
     CUDA.functional() && CUDA.reclaim()
 end
 export clean
+
+include("Seneca.jl")
+export Seneca
+
+using .Seneca
 
 include("octahedral.jl")
 include("spectral.jl")
