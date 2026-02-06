@@ -10,23 +10,23 @@ using LinearAlgebra
 using Random
 using StaticArrays
 using Statistics
-using SymmetryCode
+using SymmetryCode: SymmetryCode as S
 using GLMakie
 lines([1, 2, 3])
 
-setup = setup_laptop()
-setup = setup_turbulator()
-setup = setup_snellius()
+setup = S.setup_laptop()
+setup = S.setup_turbulator()
+setup = S.setup_snellius()
 setup |> pairs
 
 # Warmup simulation
-create_dns(setup)
+S.create_dns(setup)
 
 # Plot DNS spectrum
-plot_spectrum_dns(setup)
+S.plot_spectrum_dns(setup)
 
 # Plot time series
-plot_evolution_dns(setup)
+S.plot_evolution_dns(setup)
 
 # # Plot dissipation vs finite difference of energy
 # plot_dissipation_finite_difference(setup)
@@ -38,23 +38,24 @@ plot_evolution_dns(setup)
 #     ),
 # )
 
-create_data(setup);
+S.create_data(setup);
 
 data = joinpath(setup.outdir, "data.jld2") |> load_object;
 
 let
     (; D) = setup
     u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    g = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    v = spacescalarfield(g)
+    g = S.Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+    v = S.spacescalarfield(g)
     p = plan_rfft(v)
+    fac = S.get_fft_factor(g)
     if D == 2
         ldiv!(v, p, u.x)
-        v .*= g.n^D # FFT factor
+        v .*= fac
         field = v |> Array
     else
         ldiv!(v, p, u.z)
-        v .*= g.n^D # FFT factor
+        v .*= fac
         field = v[:, :, end] |> Array
     end
     fig, ax, im = image(field; colormap = :RdBu)
@@ -65,16 +66,17 @@ end
 let
     (; D) = setup
     u = data.inputs[1] |> adapt(setup.backend)
-    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    v = spacescalarfield(g)
+    g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    v = S.spacescalarfield(g)
     p = plan_rfft(v)
+    fac = S.get_fft_factor(g)
     if D == 2
         ldiv!(v, p, u.x)
-        v .*= g.n^D # FFT factor
+        v .*= fac
         field = v |> Array
     else
         ldiv!(v, p, u.z)
-        v .*= g.n^D # FFT factor
+        v .*= fac
         field = v[:, :, end] |> Array
     end
     fig, ax, im = image(field; colormap = :RdBu)
@@ -93,7 +95,7 @@ getindex.(data.statistics_dns, :t_int)
 getindex.(data.statistics_dns, :l_int)
 getindex.(data.statistics_dns, :l_kol)
 
-plot_evolution_data(setup, data)
+S.plot_evolution_data(setup, data)
 
 let
     fig = Figure()
@@ -124,22 +126,22 @@ let
     fig
 end
 
-plot_spectrum_data(setup, data)
+S.plot_spectrum_data(setup, data)
 
 m_nomo = let
-    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    m_nomo(_, _) = fill!(stack(spacetensorfield(g)), 0)
+    g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    m_nomo(_, _) = fill!(stack(S.spacetensorfield(g)), 0)
 end
 
-m_smag = create_smagorinsky(
+m_smag = S.create_smagorinsky(
     0.17,
     setup.Δ,
-    Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
+    S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
 )
 
-m_dynsmag = create_dynamic_smagorinsky(
+m_dynsmag = S.create_dynamic_smagorinsky(
     setup.Δ,
-    Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
+    S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
 )
 
 # m_vers = create_verstappen(
@@ -149,25 +151,24 @@ m_dynsmag = create_dynamic_smagorinsky(
 #     Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
 # )
 
-m_clar = create_clark(setup.Δ, Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
+m_clar = S.create_clark(setup.Δ, Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
 
-m_tbnn, train_tbnn = create_tbnn(setup, data, false);
+m_tbnn, train_tbnn = S.create_tbnn(setup, data, false);
 
-m_equi, train_equi = create_equi(setup, data, false);
+m_equi, train_equi = S.create_equi(setup, data, false);
 
-m_conv, train_conv = create_conv(setup, data, false);
+m_conv, train_conv = S.create_conv(setup, data, false);
 
-plot_training(setup, train_tbnn, train_equi, train_conv)
+S.plot_training(setup, train_tbnn, train_equi, train_conv)
 
 map(
     t -> round(t; digits = 1),
-    (; tbnn = train_tbnn.timing,
+    (;
+        tbnn = train_tbnn.timing,
      equi = train_equi.timing,
      conv = train_conv.timing,
     ),
-) |>
-pairs |>
-display
+) |> pairs |> display
 flush(stdout)
 
 upostfiles = map(
@@ -195,7 +196,7 @@ let
         # equi = m_equi,
         # conv = m_conv,
     )
-    solve_les(; data, setup, models, files = upostfiles)
+    S.solve_les(; data, setup, models, files = upostfiles)
 end
 
 round(data.timing; digits = 1)
@@ -204,10 +205,10 @@ map(f -> load_object(f).timing, upostfiles) |>
 t -> map(x -> round(x; digits = 1), t) |> pairs |> display
 flush(stdout)
 
-les_stat = get_les_statistics(setup, data, upostfiles);
+les_stat = S.get_les_statistics(setup, data, upostfiles);
 save_object("$(setup.outdir)/les_stat.jld2", les_stat)
 
-les_stat = load_object("$(setup.outdir)/les_stat.jld2");
+les_stat = S.load_object("$(setup.outdir)/les_stat.jld2");
 
 map(s -> round(mean(s.e_post); sigdigits = 4), les_stat) |> pairs
 
@@ -221,7 +222,7 @@ let
         # xscale = log10,
     )
     t = data.times
-    labels = getlabels()
+    labels = S.getlabels()
     for k in keys(les_stat)
         e = les_stat[k].e_post
         ntime = length(e)
@@ -245,9 +246,9 @@ let
 end
 
 # Plot LES spectrum
-plot_spectrum_les(setup, data, les_stat)
+S.plot_spectrum_les(setup, data, les_stat)
 
-predict_sfs(
+S.predict_sfs(
     setup,
     data,
     (;
@@ -260,7 +261,7 @@ predict_sfs(
     ),
 )
 
-compute_densities(setup, data, [
+S.compute_densities(setup, data, [
     #
     :smag,
     :clar,
@@ -269,7 +270,7 @@ compute_densities(setup, data, [
     :conv,
 ])
 
-plot_densities(setup, data; dolog = true)
+S.plot_densities(setup, data; dolog = true)
 
 prediction_error_prior = let
     modelkeys = [
@@ -281,7 +282,7 @@ prediction_error_prior = let
         :equi,
         :conv,
     ]
-    apriori_error(setup, data, modelkeys)
+    S.apriori_error(setup, data, modelkeys)
 end
 
 prediction_error_prior |> e -> map(x -> round(x.relerr; sigdigits = 4), e) |> pairs
@@ -295,7 +296,7 @@ equi_errors_prior_file = joinpath(setup.outdir, "equi-errors-prior.jld2")
 
 let
     models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
-    errors = apriori_equivariance_error(; u, setup, models)
+    errors = S.apriori_equivariance_error(; u, setup, models)
     save_object(equi_errors_prior_file, errors)
 end
 
@@ -311,7 +312,7 @@ flush(stdout)
 equi_errors_post_file = joinpath(setup.outdir, "equi-errors-post.jld2")
 
 let
-    grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    grid = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     models = (;
         nomo = m_nomo,
         smag = m_smag,
@@ -321,7 +322,7 @@ let
         conv = m_conv,
     )
     ustart = data[1][end] |> adapt(setup.backend)
-    (; elements) = group_stuff(setup.D)
+    (; elements) = S.group_stuff(setup.D)
     errors =
         map(keys(models)) do key
             model = models[key]
@@ -329,7 +330,7 @@ let
             e = map(eachindex(elements)) do i
                 @info "Element $(i) of $(length(elements))"
                 flush(stderr)
-                test_equivariance_post(;
+                S.test_equivariance_post(;
                     ustart,
                     setup,
                     grid,
@@ -355,7 +356,7 @@ let
         (equi_errors_prior, "equi-errors-prior.pdf"),
         (equi_errors_post, "equi-errors-post.pdf"),
     ]
-        fig = plot_equivariance_errors(errs)
+        fig = S.plot_equivariance_errors(errs)
         save("$(setup.plotdir)/$(name)", fig; backend = CairoMakie)
         display(fig)
     end
@@ -380,13 +381,13 @@ dissipation_errors = let
         conv = m_conv,
         equi = m_equi,
     )
-    get_dissipation_errors(; setup, u_dns, models)
+    S.get_dissipation_errors(; setup, u_dns, models)
 end;
 
 dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
-plot_velocities(setup, data, upostfiles, :x)
-plot_velocities(setup, data, upostfiles, :z)
+S.plot_velocities(setup, data, upostfiles, :x)
+S.plot_velocities(setup, data, upostfiles, :z)
 
 let
     models = (;
@@ -403,28 +404,28 @@ let
     fig
 end
 
-plot_sfs(setup, data)
+S.plot_sfs(setup, data)
 
 let
-    setup = setup_turbulator()
+    setup = S.setup_turbulator()
     (; D, l, n_dns, visc, backend) = setup
-    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_dns = S.Grid{D}(; l, n = n_dns, backend)
     u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    turbulence_statistics(u, visc, g_dns)
+    S.turbulence_statistics(u, visc, g_dns)
 end |> pairs |> display
 flush(stdout)
 
 let
     (; D, l, n_dns, visc, backend) = setup
-    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_dns = S.Grid{D}(; l, n = n_dns, backend)
     u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    stat = turbulence_statistics(u, visc, g_dns)
+    stat = S.turbulence_statistics(u, visc, g_dns)
     diss1 = stat.diss
     dd = similar(u.x, typeof(l))
-    diss2 = get_dissipation!(dd, u, visc, g_dns)
+    diss2 = S.get_dissipation!(dd, u, visc, g_dns)
     @show diss1 diss2
 end;
 
-compute_qr(setup, data, upostfiles)
+S.compute_qr(setup, data, upostfiles)
 
-plot_qr(setup)
+S.plot_qr(setup)
