@@ -289,7 +289,8 @@ end
 end
 
 peak_profile(k; kpeak) = k^4 * exp(-2 * (k / kpeak)^2)
-linear_profile(k) = (k > 0) * k^(-5 / 3)
+linear_profile_2D(k) = (k > 0) * k^(-3)
+linear_profile_3D(k) = (k > 0) * k^(-5 / 3)
 
 "Taylor-Green vortex."
 function taylorgreen(g::Grid{2}, plan; doproject = true)

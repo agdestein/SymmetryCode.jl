@@ -267,8 +267,8 @@ function create_data(setup)
     c_les = (; getcache(g_les)..., dissfield = dissfield_les)
 
     # Spectra
-    stuff_dns = Seneca.spectral_stuff(g_dns)
-    stuff_les = Seneca.spectral_stuff(g_les)
+    stuff_dns = spectral_stuff(g_dns)
+    stuff_les = spectral_stuff(g_les)
     spectra_dns = fill(zeros(0), 0)
     spectra_les = fill(zeros(0), 0)
 
@@ -811,7 +811,7 @@ function solve_les!(u; times, grid, visc, model, cfl)
             end
 
             if j % 1 == 0
-                energy = Seneca.energy(u)
+                energy = energy(u)
                 # @info join(
                 #     [
                 #         "j = $j",
@@ -846,7 +846,7 @@ function get_les_statistics(setup, data, files)
     (; D, l, n_les, backend, visc) = setup
     g = Grid{D}(; l, n = n_les, backend)
     dissfield_les = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
-    stuff = Seneca.spectral_stuff(g)
+    stuff = spectral_stuff(g)
     u_ref = data.inputs
     u_les_gpu = vectorfield(g)
     u_ref_gpu = vectorfield(g)
@@ -1875,7 +1875,7 @@ function get_dissipation_errors(; setup, u_dns, models)
     end
     τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
-    plan = Seneca.getplan(g_les)
+    plan = getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
         # apply!(twothirds!, g_les, (τhat, g_les))
         ldiv!(τ, plan, τhat)
@@ -2403,8 +2403,8 @@ function plot_spectrum_dns(setup)
         apply!(gaussianfilter!, g_les, (ubar, setup.Δ, g_les))
     end
     D = dim(g_dns)
-    stuff_dns = Seneca.spectral_stuff(g_dns)
-    stuff_les = Seneca.spectral_stuff(g_les)
+    stuff_dns = spectral_stuff(g_dns)
+    stuff_les = spectral_stuff(g_les)
     stat = turbulence_statistics(u, visc, g_dns)
     stat |> pairs |> display
     s_dns = spectrum(u, g_dns, stuff_dns)

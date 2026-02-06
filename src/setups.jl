@@ -1,6 +1,6 @@
 function setup_laptop()
     l = 2π
-    n_dns = 512
+    n_dns = 1024
     n_les = 128
     visc = 1.0e-4
     Δ = 3 * l / n_les

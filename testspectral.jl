@@ -11,7 +11,7 @@ using Random
 using StaticArrays
 using Statistics
 using SymmetryCode: SymmetryCode as S
-using GLMakie
+using WGLMakie
 lines([1, 2, 3])
 
 setup = S.setup_laptop()
