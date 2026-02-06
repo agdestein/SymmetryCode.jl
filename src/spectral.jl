@@ -432,6 +432,7 @@ function create_dataloader(setup, data; nsample, batchsize)
     plan = plan_rfft(GG.xx)
     T = typeof(setup.l)
     nsample_use = min(nsample, length(data.inputs))
+    fac = get_fft_factor(g)
     snaps = map(1:nsample_use) do j
         ucpu, τcpu = data.inputs[j], data.outputs[j]
         foreach(copyto!, u, ucpu)
@@ -439,13 +440,13 @@ function create_dataloader(setup, data; nsample, batchsize)
         for (GG, G) in zip(GG, G)
             apply!(twothirds!, g, (G, g))
             ldiv!(GG, plan, G) # Inverse RFFT
-            GG .*= g.n^D # FFT factor
+            GG .*= fac
         end
         for (ττ, τcpu) in zip(ττ, τcpu)
             copyto!(τ, τcpu)
             apply!(twothirds!, g, (τ, g))
             ldiv!(ττ, plan, τ) # Inverse RFFT
-            ττ .*= g.n^D # FFT factor
+            ττ .*= fac
         end
         x = stack(GG)
         y = stack(ττ)
@@ -522,9 +523,10 @@ function inverse_vector_fourier(u, g)
     uu = spacevectorfield(g)
     temp = scalarfield(g)
     plan = plan_rfft(uu.x)
+    fac = get_fft_factor(g)
     for (uu, u) in zip(uu, u)
         copyto!(temp, u)
-        temp .*= g.n^dim(g) # FFT factor
+        temp .*= fac
         apply!(twothirds!, g, (temp, g))
         ldiv!(uu, plan, temp)
     end
@@ -534,9 +536,10 @@ end
 function forward_vector_fourier(uu, g)
     u = vectorfield(g)
     plan = plan_rfft(uu.x)
+    fac = get_fft_factor(g)
     for (uu, u) in zip(uu, u)
         mul!(u, plan, uu)
-        u ./= g.n^dim(g) # FFT factor
+        u ./= fac
     end
     return u
 end
@@ -716,10 +719,11 @@ function les!(du, u, grid, cache; model, visc)
 
     # Closure model stress (in physical space)
     apply!(vectorgradient!, grid, (G, u, grid))
+    fac = get_fft_factor(grid)
     GG = map(G) do G
         apply!(twothirds!, grid, (G, grid))
         res = plan \ G
-        res .*= grid.n^D # FFT factor
+        res .*= fac
         res
     end
     y = model(u, GG)
@@ -729,7 +733,7 @@ function les!(du, u, grid, cache; model, visc)
         # Use vi_vj and du.x as temp storage
         copyto!(vi_vj, selectdim(y, D + 1, i))
         mul!(du.x, plan, vi_vj)
-        @. σ += du.x / grid.n^D # With FFT factor
+        @. σ += du.x / fac
     end
 
     # Final force
@@ -999,10 +1003,11 @@ function getgradient(u, g)
     AA = spacetensorfield_nonsym(g)
     apply!(vectorgradient!, g, (A, u, g))
     plan = plan_rfft(AA.xx)
+    fac = get_fft_factor(g)
     for (AA, A) in zip(AA, A)
         apply!(twothirds!, g, (A, g))
         ldiv!(AA, plan, A) # Inverse RFFT
-        AA .*= g.n^D # FFT factor
+        AA .*= fac
     end
     return AA
 end
@@ -1036,6 +1041,7 @@ function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
     ττ = spacetensorfield(g)
     plan = plan_rfft(ττ.xx)
     nsample_use = min(nsample, length(data.inputs))
+    fac = get_fft_factor(g)
     snaps = map(1:nsample_use) do j
         ucpu, τcpu = data.inputs[j], data.outputs[j]
         foreach(copyto!, u, ucpu)
@@ -1044,7 +1050,7 @@ function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
             copyto!(τ, τcpu)
             apply!(twothirds!, g, (τ, g))
             ldiv!(ττ, plan, τ) # Inverse RFFT
-            ττ .*= g.n^D # FFT factor
+            ττ .*= fac
         end
         i, b = build_tensorbasis(G, g, Δ)
         i = i |> cpu_device()
@@ -1178,6 +1184,7 @@ function predict_sfs(setup, data, models)
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
 
+    fac = get_fft_factor(g)
     for (key, m) in pairs(models)
         @info "Computing SFS for $(key)"
         flush(stderr)
@@ -1191,7 +1198,7 @@ function predict_sfs(setup, data, models)
             for (AA, A) in zip(AA, A)
                 apply!(twothirds!, g, (A, g))
                 ldiv!(AA, plan, A) # Inverse RFFT
-                AA .*= g.n^D # FFT factor
+                AA .*= fac
             end
 
             # Prediction by LES model
@@ -1230,6 +1237,7 @@ function compute_densities(setup, data, modelkeys)
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
 
+    fac = get_fft_factor(g)
     for mkey in [:ref, modelkeys...]
         @info "Computing SFS quantities for $(mkey)"
         flush(stderr)
@@ -1242,7 +1250,7 @@ function compute_densities(setup, data, modelkeys)
                     copyto!(τhat, τcpu)
                     apply!(twothirds!, g, (τhat, g))
                     ldiv!(τ, plan, τhat)
-                    τ .*= g.n^D # FFT factor
+                    τ .*= fac
                 end
                 τ |> cpu_device()
             end
@@ -1263,7 +1271,7 @@ function compute_densities(setup, data, modelkeys)
             for (AA, A) in zip(AA, A)
                 apply!(twothirds!, g, (A, g))
                 ldiv!(AA, plan, A) # Inverse RFFT
-                AA .*= g.n^D # FFT factor
+                AA .*= fac
             end
             G = AA
 
@@ -1631,7 +1639,7 @@ function create_dynamic_smagorinsky(Δ, g)
     D = dim(g)
     Δtilde = 2 * Δ # Filter width of test filter (single Gaussian, twice the original width)
     Δdouble = sqrt(Δtilde^2 + Δ^2) # Filter width of double-Gaussian (original + test)
-    fac = g.n^D # FFT factor
+    fac = get_fft_factor(g)
 
     # Model takes spectral ubar as input
     function model(u, G)
@@ -1722,12 +1730,14 @@ function apriori_error(setup, data, modelkeys)
     τhat = scalarfield(g)
     plan = plan_rfft(τ.xx)
 
+    fac = get_fft_factor(g)
+
     τ_ref = map(data.outputs) do τcpu
         for (τ, τcpu) in zip(τ, τcpu)
             copyto!(τhat, τcpu)
             apply!(twothirds!, g, (τhat, g))
             ldiv!(τ, plan, τhat)
-            τ .*= g.n^D # FFT factor
+            τ .*= fac
         end
         τ |> cpu_device()
     end
@@ -1824,6 +1834,7 @@ function plot_velocities(setup, data, upostfiles, comp)
         :equi,
         :conv,
     ]
+    fac = get_fft_factor(g)
     for (k, key) in enumerate(modelkeys)
         @info "Plotting velocity for $(key)"
         flush(stderr)
@@ -1851,7 +1862,7 @@ function plot_velocities(setup, data, upostfiles, comp)
             ui = useries[t][comp] |> adapt(backend)
             apply!(twothirds!, g, (ui, g))
             ldiv!(ui_space, plan, ui) # Make copy, ldiv! overwrites...
-            ui_space .*= g.n^3 # FFT factor
+            ui_space .*= fac
             range = (:, :)
             # range = (40:60, 40:60)
             slice = ui_space[range..., end] |> Array
@@ -1879,7 +1890,8 @@ function get_dissipation_errors(; setup, u_dns, models)
     for (τ, τhat) in zip(τ, τhat)
         # apply!(twothirds!, g_les, (τhat, g_les))
         ldiv!(τ, plan, τhat)
-        τ .*= g_les.n^dim(g_les)
+        fac = get_fft_factor(g_les)
+        τ .*= fac
     end
     G = getgradient(ubar, g_les)
     if D == 2
@@ -1959,6 +1971,8 @@ function compute_qr(setup, data, upostfiles)
 
     modelkeys = [:ref, keys(upostfiles)...]
 
+    fac = get_fft_factor(g)
+
     for k in modelkeys
         @info "Computing Q-R for $(k)"
         u_series = if k == :ref
@@ -1975,7 +1989,7 @@ function compute_qr(setup, data, upostfiles)
                 apply!(derivative!, g, (Ghat, u[i], j, g))
                 apply!(twothirds!, g, (Ghat, g))
                 ldiv!(G[ij], plan, Ghat) # Inverse RFFT
-                G[ij] .*= g.n^D # FFT factor
+                G[ij] .*= fac
             end
             apply!(qr_kernel!, g, (q, r, G, g); ndrange = space_ndrange(g))
             qvec = q |> cpu_device() |> vec
@@ -2148,12 +2162,13 @@ function plot_sfs(setup, data)
     # Time index
     t = 100
 
+    fac = get_fft_factor(g)
     τcpu = data.outputs[t]
     for (τ, τcpu) in zip(τ, τcpu)
         copyto!(τhat, τcpu)
         apply!(twothirds!, g, (τhat, g))
         ldiv!(τ, plan, τhat)
-        τ .*= g.n^D # FFT factor
+        τ .*= fac
     end
     τ_ref = τ |> cpu_device()
 
