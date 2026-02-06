@@ -1,4 +1,3 @@
-export setup_laptop
 function setup_laptop()
     l = 2π
     n_dns = 512
@@ -24,7 +23,6 @@ function setup_laptop()
     )
 end
 
-export setup_turbulator
 function setup_turbulator()
     # l = 1.0
     l = 2π
@@ -55,7 +53,6 @@ function setup_turbulator()
     )
 end
 
-export setup_snellius
 function setup_snellius()
     l = 2π
     n_dns = 810

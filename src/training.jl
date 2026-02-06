@@ -46,7 +46,6 @@ function create_tbnn(setup, data, dotrain)
     chain = tbnn(net, ps, st, setup.Δ, g)
     chain, (; losses_train, losses_valid, timing)
 end
-export create_tbnn
 
 function create_equi(setup, data, dotrain)
     net_stuff = equivariant_net(
@@ -81,7 +80,6 @@ function create_equi(setup, data, dotrain)
     chain = fullchain(setup, net, project, ps, st, setup.Δ)
     chain, (; losses_train, losses_valid, timing)
 end
-export create_equi
 
 function create_conv(setup, data, dotrain)
     net_stuff = cnn(
@@ -121,7 +119,6 @@ function create_conv(setup, data, dotrain)
     chain = fullchain(setup, net, project, ps, st, setup.Δ)
     chain, (; losses_train, losses_valid, timing)
 end
-export create_conv
 
 function plot_training(setup, train_tbnn, train_equi, train_conv)
     fig = Figure(; size = (400, 340))
@@ -150,4 +147,3 @@ function plot_training(setup, train_tbnn, train_equi, train_conv)
     save("$(setup.plotdir)/training.pdf", fig; backend = CairoMakie)
     fig
 end
-export plot_training

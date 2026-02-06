@@ -24,7 +24,6 @@ function clean()
     GC.gc()
     CUDA.functional() && CUDA.reclaim()
 end
-export clean
 
 include("Seneca.jl")
 include("octahedral.jl")

@@ -10,7 +10,6 @@ getlabels() = (;
     equi = "G-Conv",
     conv = "Conv",
 )
-export getlabels
 
 @inline function cutoff_index(nbar, n, i, is1)
     imax = div(nbar, 2) + is1
@@ -27,7 +26,6 @@ end
     cutoff_index(nbar, n, I.I[3], false),
 ))
 
-export cutoff!
 @kernel function cutoff!(ubar, u)
     nbar = size(ubar, 2)
     n = size(u, 2)
@@ -36,7 +34,6 @@ export cutoff!
     ubar[I] = u[J]
 end
 
-export inverse_cutoff!
 @kernel function inverse_cutoff!(u, ubar)
     nbar = size(ubar, 2)
     n = size(u, 2)
@@ -45,7 +42,6 @@ export inverse_cutoff!
     u[J] = ubar[I]
 end
 
-export gaussianfilter!
 @kernel function gaussianfilter!(u, Δ, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = wavenumber_full(g, I)
@@ -138,7 +134,6 @@ function forced_rhs!(du, u, grid, cache; forceval, visc)
     nothing
 end
 
-export create_dns
 function create_dns(setup)
     (; outdir, l, visc, D, n_dns, cfl, backend, warmup) = setup
     (; totalenergy, tstop, seed) = warmup
@@ -381,7 +376,6 @@ function create_data(setup)
     nothing
 end
 
-export sfs
 function sfs(u, g_dns, g_les, Δ)
     c_dns = getcache(g_dns)
     c_les = getcache(g_les)
@@ -394,7 +388,6 @@ function sfs(u, g_dns, g_les, Δ)
     τ
 end
 
-export sfs!
 function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     D = dim(g_dns)
     nonlinearity!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, g_dns)
@@ -521,7 +514,6 @@ function smatrix_to_tensorfield(t)
     end
 end
 
-export inverse_vector_fourier
 function inverse_vector_fourier(u, g)
     uu = spacevectorfield(g)
     temp = scalarfield(g)
@@ -535,7 +527,6 @@ function inverse_vector_fourier(u, g)
     uu
 end
 
-export forward_vector_fourier
 function forward_vector_fourier(uu, g)
     u = vectorfield(g)
     plan = plan_rfft(uu.x)
@@ -770,7 +761,6 @@ function solve_les(; data, setup, models, files)
     end
 end
 
-export solve_les!
 function solve_les!(u; times, grid, visc, model, cfl)
     backend = get_backend(u.x)
     cache = getcache(grid)
@@ -877,7 +867,6 @@ function get_les_statistics(setup, data, files)
         (; e_post, s)
     end
 end
-export get_les_statistics
 
 # 2D basis
 @inline nbasis(::Grid{2}) = 2 # Number of entries below
@@ -1100,7 +1089,6 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
     l, st, (;)
 end
 
-export getdissipation
 function getdissipation(g, u, m)
     D = dim(g)
     G = getgradient(u, g)
@@ -1119,7 +1107,6 @@ function getdissipation(g, u, m)
     end
 end
 
-export test_equivariance_post
 function test_equivariance_post(; ustart, setup, grid, model, groupindex, tstop, cfl, dolog)
     # Group element
     (; elements, permutations, signs) = group_stuff(setup.D)
@@ -1224,7 +1211,6 @@ function predict_sfs(setup, data, models)
         save_object("$(outdir)/sfs_$(key).jld2", τ_series)
     end
 end
-export predict_sfs
 
 "Compute distribution of tensor components and dissipation coefficients."
 function compute_densities(setup, data, modelkeys)
@@ -1343,9 +1329,7 @@ function compute_densities(setup, data, modelkeys)
     end
     nothing
 end
-export compute_densities
 
-export plot_densities
 function plot_densities(setup; dolog)
     (; outdir, plotdir, name) = setup
     yscale = dolog ? log10 : identity
@@ -1466,7 +1450,6 @@ end
     ττ[I, zx] = τ[3, 1]
 end
 
-export create_clark
 create_clark(Δ, g) = function clark(u, G)
     τ = stack(spacetensorfield(g))
     apply!(clark_kernel!, g, (τ, G, Δ, g); ndrange = space_ndrange(g))
@@ -1525,7 +1508,6 @@ end
     ττ[I, zx] = τ[3, 1]
 end
 
-export create_smagorinsky
 function create_smagorinsky(CS, Δ, g)
     function smagorinsky(u, G)
         τ = stack(spacetensorfield(g))
@@ -1535,7 +1517,6 @@ function create_smagorinsky(CS, Δ, g)
     smagorinsky
 end
 
-export create_verstappen
 function create_verstappen(C, Δ, g)
     D = dim(g)
     @assert D == 3 "Q-R model is only defined in 3D"
@@ -1621,7 +1602,6 @@ end
     c[I] = max(-ML / MM, 0)
 end
 
-export create_dynamic_smagorinsky
 function create_dynamic_smagorinsky(Δ, g)
     # Allocate arrays (these can probably be fewer with some clever re-use)
     space = spacescalarfield(g) # Temporary spatial field
@@ -1726,7 +1706,6 @@ function create_dynamic_smagorinsky(Δ, g)
     model
 end
 
-export apriori_error
 function apriori_error(setup, data, modelkeys)
     (; D, l, n_les, backend) = setup
     g = Grid{D}(; l, n = n_les, backend)
@@ -1776,7 +1755,6 @@ function apriori_error(setup, data, modelkeys)
     end |> NamedTuple
 end
 
-export apriori_equivariance_error
 function apriori_equivariance_error(; u, setup, models)
     (; D, l, n_les, backend) = setup
     (; elements, permutations, signs) = group_stuff(D)
@@ -1820,7 +1798,6 @@ function apriori_equivariance_error(; u, setup, models)
     errors |> NamedTuple
 end
 
-export plot_velocities
 function plot_velocities(setup, data, upostfiles, comp)
     (; D, l, n_les, backend) = setup
     fig = Figure(; size = (800, 470))
@@ -1879,7 +1856,6 @@ function plot_velocities(setup, data, upostfiles, comp)
     fig
 end
 
-export get_dissipation_errors
 function get_dissipation_errors(; setup, u_dns, models)
     (; D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
@@ -1943,7 +1919,6 @@ function get_dissipation_errors(; setup, u_dns, models)
     map(median, NamedTuple(diss))
 end
 
-export qr_kernel!
 @kernel function qr_kernel!(q, r, GG, g::Grid{3})
     T = eltype(q)
     I = @index(Global, Cartesian)
@@ -1962,7 +1937,6 @@ export qr_kernel!
     r[I] = -tr(G * G * G) / 3
 end
 
-export compute_qr
 function compute_qr(setup, data, upostfiles)
     (; D, l, n_les, backend) = setup
     g = Grid{D}(; l, n = n_les, backend)
@@ -2014,7 +1988,6 @@ function compute_qr(setup, data, upostfiles)
     nothing
 end
 
-export plot_qr
 function plot_qr(setup)
     (; name) = setup
     modelkeys = [:ref, :nomo, :smag,
@@ -2099,7 +2072,6 @@ function plot_qr(setup)
     fig
 end
 
-export plot_equivariance_errors
 function plot_equivariance_errors(errs)
     fig = Figure(; size = (400, 340))
     ax = Axis(
@@ -2154,7 +2126,6 @@ function plot_equivariance_errors(errs)
     fig
 end
 
-export plot_sfs
 function plot_sfs(setup, data)
     (; D, l, n_les, backend) = setup
     g = Grid{D}(; l, n = n_les, backend)
@@ -2231,7 +2202,6 @@ function plot_sfs(setup, data)
     fig
 end
 
-export plot_evolution_dns
 function plot_evolution_dns(setup)
     times, energies, dissipations =
         load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
@@ -2262,7 +2232,6 @@ function plot_evolution_dns(setup)
     fig
 end
 
-export plot_evolution_data
 function plot_evolution_data(setup, data)
     (; D) = setup
     times_warmup, energies_warmup, dissipations_warmup =
@@ -2307,7 +2276,6 @@ function plot_evolution_data(setup, data)
     fig
 end
 
-export plot_dissipation_finite_difference
 function plot_dissipation_finite_difference(setup)
     times, energies, dissipations =
         load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
@@ -2412,9 +2380,7 @@ function plot_spectrum_data(setup, data)
     save(joinpath(setup.plotdir, "spectrum_data.pdf"), fig; backend = CairoMakie)
     fig
 end
-export plot_spectrum_data
 
-export plot_spectrum_dns
 function plot_spectrum_dns(setup)
     (; outdir, plotdir, D, l, n_dns, n_les, backend, visc) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
@@ -2503,7 +2469,6 @@ function plot_spectrum_dns(setup)
     fig
 end
 
-export plot_spectrum_les
 function plot_spectrum_les(setup, data, les_stat)
     (; D) = setup
     s_ref = mean(data.spectra_les)
@@ -2555,10 +2520,3 @@ function plot_spectrum_les(setup, data, les_stat)
     save(file, fig; backend = CairoMakie)
     fig
 end
-
-export vectorfield_to_svector,
-    svector_to_vectorfield, tensorfield_to_smatrix, smatrix_to_tensorfield
-export transform_scalar, transform_vector, transform_tensor
-export getgradient
-export dns_aid, create_data, create_dataloader, train, fullchain, solve_les
-export tbnn, ninvariant, nbasis, create_dataloader_tbnn, create_loss, create_loss_tbnn

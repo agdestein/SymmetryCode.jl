@@ -16,7 +16,6 @@ Rz(θ) = @SMatrix [
     0 0 1
 ]
 
-export Rx, Ry, Rz
 
 "Get roto-reflection matrix from permutation and sign-flip."
 @inline roto_reflection_matrix(p::NTuple{2}, s) =
@@ -79,7 +78,6 @@ function group_stuff(D)
     )
 end
 
-export roto_reflection_matrix, invtransform, group_stuff
 
 function get_weight_projectors(D)
     (; permutations, signs, elements, cayley) = group_stuff(D)
@@ -563,5 +561,3 @@ function cnn(setup, nchan; same_as_equi)
     project = identity # No projection
     (; project, net, ps, st)
 end
-
-export get_weight_projectors, equivariant_net, cnn
