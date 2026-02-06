@@ -84,7 +84,7 @@ let
     fig
 end
 
-Base.summarysize(data) * 1e-9
+Base.summarysize(data) * 1.0e-9
 
 data |> pairs
 
@@ -103,11 +103,11 @@ let
     s = data.statistics_dns
     t = data.times
     for (key, label) in [
-        (:diss, "Dissipation"),
-        (:uavg, "Kinetic Energy"),
-        (:Re_tay, "Taylor Reynolds"),
-        (:t_int, "Integral time"),
-    ]
+            (:diss, "Dissipation"),
+            (:uavg, "Kinetic Energy"),
+            (:Re_tay, "Taylor Reynolds"),
+            (:t_int, "Integral time"),
+        ]
         y = getindex.(s, key)
         lines!(ax, t, y ./ maximum(y); label)
     end
@@ -165,8 +165,8 @@ map(
     t -> round(t; digits = 1),
     (;
         tbnn = train_tbnn.timing,
-     equi = train_equi.timing,
-     conv = train_conv.timing,
+        equi = train_equi.timing,
+        conv = train_conv.timing,
     ),
 ) |> pairs |> display
 flush(stdout)
@@ -202,7 +202,7 @@ end
 round(data.timing; digits = 1)
 
 map(f -> load_object(f).timing, upostfiles) |>
-t -> map(x -> round(x; digits = 1), t) |> pairs |> display
+    t -> map(x -> round(x; digits = 1), t) |> pairs |> display
 flush(stdout)
 
 les_stat = S.get_les_statistics(setup, data, upostfiles);
@@ -261,14 +261,16 @@ S.predict_sfs(
     ),
 )
 
-S.compute_densities(setup, data, [
-    #
-    :smag,
-    :clar,
-    :tbnn,
-    :equi,
-    :conv,
-])
+S.compute_densities(
+    setup, data, [
+        #
+        :smag,
+        :clar,
+        :tbnn,
+        :equi,
+        :conv,
+    ]
+)
 
 S.plot_densities(setup, data; dolog = true)
 
@@ -325,24 +327,24 @@ let
     (; elements) = S.group_stuff(setup.D)
     errors =
         map(keys(models)) do key
-            model = models[key]
-            @info "Computing equivariance error for $(key)"
-            e = map(eachindex(elements)) do i
-                @info "Element $(i) of $(length(elements))"
-                flush(stderr)
-                S.test_equivariance_post(;
-                    ustart,
-                    setup,
-                    grid,
-                    model,
-                    groupindex = i,
-                    tstop = 1e-1,
-                    cfl = 0.35,
-                    dolog = false,
-                )
-            end
-            key => e
-        end |> NamedTuple
+        model = models[key]
+        @info "Computing equivariance error for $(key)"
+        e = map(eachindex(elements)) do i
+            @info "Element $(i) of $(length(elements))"
+            flush(stderr)
+            S.test_equivariance_post(;
+                ustart,
+                setup,
+                grid,
+                model,
+                groupindex = i,
+                tstop = 1.0e-1,
+                cfl = 0.35,
+                dolog = false,
+            )
+        end
+        key => e
+    end |> NamedTuple
     save_object(equi_errors_post_file, errors)
 end
 
@@ -353,9 +355,9 @@ flush(stdout)
 
 let
     for (errs, name) in [
-        (equi_errors_prior, "equi-errors-prior.pdf"),
-        (equi_errors_post, "equi-errors-post.pdf"),
-    ]
+            (equi_errors_prior, "equi-errors-prior.pdf"),
+            (equi_errors_post, "equi-errors-post.pdf"),
+        ]
         fig = S.plot_equivariance_errors(errs)
         save("$(setup.plotdir)/$(name)", fig; backend = CairoMakie)
         display(fig)

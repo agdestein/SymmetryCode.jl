@@ -34,7 +34,7 @@ function create_tbnn(setup, data, dotrain)
                 rng = Xoshiro(0),
             ),
             nepoch = 5,
-            learning_rate = 1e-3,
+            learning_rate = 1.0e-3,
             net_stuff = (; net, ps, st),
         )
         ps = ps |> cpu_device()
@@ -44,7 +44,7 @@ function create_tbnn(setup, data, dotrain)
         load(file, "ps", "losses_train", "losses_valid", "timing")
     ps = ps |> adapt(setup.backend)
     chain = tbnn(net, ps, st, setup.Δ, g)
-    chain, (; losses_train, losses_valid, timing)
+    return chain, (; losses_train, losses_valid, timing)
 end
 
 function create_equi(setup, data, dotrain)
@@ -64,7 +64,7 @@ function create_equi(setup, data, dotrain)
             setup,
             dataloader = create_dataloader(setup, data; nsample = 50, batchsize = 20),
             nepoch = 5,
-            learning_rate = 1e-3,
+            learning_rate = 1.0e-3,
             net_stuff,
         )
         ps = ps |> cpu_device()
@@ -78,7 +78,7 @@ function create_equi(setup, data, dotrain)
     flush(stdout)
     (; net, project) = net_stuff
     chain = fullchain(setup, net, project, ps, st, setup.Δ)
-    chain, (; losses_train, losses_valid, timing)
+    return chain, (; losses_train, losses_valid, timing)
 end
 
 function create_conv(setup, data, dotrain)
@@ -103,7 +103,7 @@ function create_conv(setup, data, dotrain)
             setup,
             dataloader = create_dataloader(setup, data; nsample = 50, batchsize = 20),
             nepoch = 5,
-            learning_rate = 1e-3,
+            learning_rate = 1.0e-3,
             net_stuff,
         )
         ps = ps |> cpu_device()
@@ -117,7 +117,7 @@ function create_conv(setup, data, dotrain)
     flush(stdout)
     (; net, project) = net_stuff
     chain = fullchain(setup, net, project, ps, st, setup.Δ)
-    chain, (; losses_train, losses_valid, timing)
+    return chain, (; losses_train, losses_valid, timing)
 end
 
 function plot_training(setup, train_tbnn, train_equi, train_conv)
@@ -145,5 +145,5 @@ function plot_training(setup, train_tbnn, train_equi, train_conv)
     ylims!(ax, -eps, 1 + eps)
     rowgap!(fig.layout, 5)
     save("$(setup.plotdir)/training.pdf", fig; backend = CairoMakie)
-    fig
+    return fig
 end

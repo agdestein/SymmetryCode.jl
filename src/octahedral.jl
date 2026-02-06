@@ -19,13 +19,13 @@ Rz(θ) = @SMatrix [
 
 "Get roto-reflection matrix from permutation and sign-flip."
 @inline roto_reflection_matrix(p::NTuple{2}, s) =
-    @SMatrix [s[i] * (p[i] == j) for i = 1:2, j = 1:2]
+    @SMatrix [s[i] * (p[i] == j) for i in 1:2, j in 1:2]
 @inline roto_reflection_matrix(p::NTuple{3}, s) =
-    @SMatrix [s[i] * (p[i] == j) for i = 1:3, j = 1:3]
+    @SMatrix [s[i] * (p[i] == j) for i in 1:3, j in 1:3]
 @inline function invtransform(p, s)
     pinv = invperm(p)
     sinv = map(p -> s[p], pinv)
-    pinv, sinv
+    return pinv, sinv
 end
 
 """
@@ -63,7 +63,7 @@ function group_stuff(D)
     cayley = map(m -> findfirst(==(m), reshape(mats, :)), products)
     inverse_indices = map(i -> findfirst(==(unitindex), cayley[i, :]), eachindex(elements))
     inverse_elements = elements[inverse_indices]
-    (;
+    return (;
         permutations,
         signs,
         indices,
@@ -112,7 +112,7 @@ function get_weight_projectors(D)
         end
     end
     r_sink = reshape(r_sink, D^2 * nelement, D^2 * nelement)
-    (; r_lift, r_mid, r_sink)
+    return (; r_lift, r_mid, r_sink)
 end
 
 function test_equivariant_dense(D)
@@ -142,7 +142,7 @@ function test_equivariant_dense(D)
         w = permutedims(w, (1, 3, 2, 4))
         weight = reshape(w, s_out, s_in)
         bias = fill(b, s_out)
-        (; weight, bias)
+        return (; weight, bias)
     end
     function project_mid(ps)
         w, b = ps.weight, ps.bias
@@ -156,7 +156,7 @@ function test_equivariant_dense(D)
         w = permutedims(w, (1, 3, 2, 4))
         weight = reshape(w, s_out, s_in)
         bias = fill(b, s_out)
-        (; weight, bias)
+        return (; weight, bias)
     end
     function project_sink(ps)
         w = ps.weight
@@ -169,7 +169,7 @@ function test_equivariant_dense(D)
         w = reshape(w, D^2, nelement, c_out, c_in)
         w = permutedims(w, (1, 3, 2, 4))
         weight = reshape(w, s_out, s_in)
-        (; weight)
+        return (; weight)
     end
     project(ps) = (;
         lift = project_lift(ps.lift),
@@ -203,13 +203,13 @@ function test_equivariant_dense(D)
     rx = mat * x * mat'
     nx =
         net(reshape(Array(x), D^2, 1), ps, st)[1] |>
-        x -> reshape(x, D, D) |> SMatrix{D,D,eltype(x),D^2}
+        x -> reshape(x, D, D) |> SMatrix{D, D, eltype(x), D^2}
     nrx =
         net(reshape(Array(rx), D^2, 1), ps, st)[1] |>
-        x -> reshape(x, D, D) |> SMatrix{D,D,eltype(x),D^2}
+        x -> reshape(x, D, D) |> SMatrix{D, D, eltype(x), D^2}
     rnx = mat * nx * mat'
     nrx - rnx |> display
-    nothing
+    return nothing
 end
 
 function test_equivariant_conv(D)
@@ -240,7 +240,7 @@ function test_equivariant_conv(D)
         w = permutedims(w, (2, 3, 1, 4))
         weight = reshape(w, 1, s_in, s_out)
         bias = fill(b, s_out)
-        (; weight, bias)
+        return (; weight, bias)
     end
     function project_mid(ps)
         w, b = ps.weight, ps.bias
@@ -254,7 +254,7 @@ function test_equivariant_conv(D)
         w = permutedims(w, (2, 3, 1, 4))
         weight = reshape(w, 1, s_in, s_out)
         bias = fill(b, s_out)
-        (; weight, bias)
+        return (; weight, bias)
     end
     function project_sink(ps)
         w = ps.weight
@@ -267,7 +267,7 @@ function test_equivariant_conv(D)
         w = reshape(w, nten, nreg, c_in, c_out)
         w = permutedims(w, (2, 3, 1, 4))
         weight = reshape(w, 1, s_in, s_out)
-        (; weight)
+        return (; weight)
     end
     project(ps) = (;
         lift = project_lift(ps.lift),
@@ -301,13 +301,13 @@ function test_equivariant_conv(D)
     rx = mat * x * mat'
     nx =
         net(reshape(Array(x), 1, nten, 1), ps, st)[1] |>
-        x -> reshape(x, D, D) |> SMatrix{D,D,eltype(x),nten}
+        x -> reshape(x, D, D) |> SMatrix{D, D, eltype(x), nten}
     nrx =
         net(reshape(Array(rx), 1, nten, 1), ps, st)[1] |>
-        x -> reshape(x, D, D) |> SMatrix{D,D,eltype(x),nten}
+        x -> reshape(x, D, D) |> SMatrix{D, D, eltype(x), nten}
     rnx = mat * nx * mat'
     nrx - rnx |> display
-    nothing
+    return nothing
 end
 
 function test_equivariant_conv_sparse(D)
@@ -337,7 +337,7 @@ function test_equivariant_conv_sparse(D)
         w = permutedims(w, (2, 1, 3))
         weight = reshape(w, 1, nten, nreg * c_out)
         bias = reshape(repeat(reshape(b, 1, :), nreg), :)
-        (; weight, bias)
+        return (; weight, bias)
     end
     function project_mid(ps)
         w, b = ps.weight, ps.bias
@@ -348,7 +348,7 @@ function test_equivariant_conv_sparse(D)
         w = permutedims(w, (2, 4, 1, 3))
         weight = reshape(w, 1, nreg * c_in, nreg * c_out)
         bias = reshape(repeat(reshape(b, 1, :), nreg), :)
-        (; weight, bias)
+        return (; weight, bias)
     end
     function project_sink(ps)
         w = ps.weight
@@ -357,7 +357,7 @@ function test_equivariant_conv_sparse(D)
         w = reshape(w, nten, nreg, c_in)
         w = permutedims(w, (2, 3, 1))
         weight = reshape(w, 1, nreg * c_in, nten)
-        (; weight)
+        return (; weight)
     end
     nchan = [10, 10, 20, 20]
     project(ps) = (;
@@ -371,9 +371,9 @@ function test_equivariant_conv_sparse(D)
         lift = Conv((1,), nten => nreg * nchan[1], gelu),
         map(
             i ->
-                Symbol(:mid_, i) =>
-                    Conv((1,), nreg * nchan[i] => nreg * nchan[i+1], gelu),
-            1:(length(nchan)-1),
+            Symbol(:mid_, i) =>
+                Conv((1,), nreg * nchan[i] => nreg * nchan[i + 1], gelu),
+            1:(length(nchan) - 1),
         )...,
         sink = Conv((1,), nreg * nchan[end] => nten),
     )
@@ -382,11 +382,11 @@ function test_equivariant_conv_sparse(D)
         lift = (; weight = randn(T, nten, nchan[1]), bias = randn(T, nchan[1])),
         map(
             i ->
-                Symbol(:mid_, i) => (;
-                    weight = randn(T, nreg, nchan[i+1], nchan[i]),
-                    bias = randn(T, nchan[i+1]),
-                ),
-            1:(length(nchan)-1),
+            Symbol(:mid_, i) => (;
+                weight = randn(T, nreg, nchan[i + 1], nchan[i]),
+                bias = randn(T, nchan[i + 1]),
+            ),
+            1:(length(nchan) - 1),
         )...,
         sink = (; weight = randn(T, nten, nchan[end])),
     )
@@ -404,19 +404,19 @@ function test_equivariant_conv_sparse(D)
     # Net on input
     nx = reshape(Array(x), 1, nten, 1)
     nx = net(nx, ps, st)[1]
-    nx = reshape(nx, D, D) |> SMatrix{D,D,T,nten}
+    nx = reshape(nx, D, D) |> SMatrix{D, D, T, nten}
 
     # Net on rotated input
     nrx = reshape(Array(rx), 1, nten, 1)
     nrx = net(nrx, ps, st) |> first
-    nrx = reshape(nrx, D, D) |> SMatrix{D,D,T,nten}
+    nrx = reshape(nrx, D, D) |> SMatrix{D, D, T, nten}
 
     # Rotated net'ed input
     rnx = mat * nx * mat'
 
     # Error in output tensor
     nrx - rnx |> display
-    nothing
+    return nothing
 end
 
 function equivariant_net(setup, nchan)
@@ -450,7 +450,7 @@ function equivariant_net(setup, nchan)
         w = permutedims(w, (2, 1, 3))
         weight = reshape(w, kern..., nten, nreg * c_out)
         bias = reshape(repeat(reshape(b, 1, :), nreg), :)
-        (; weight, bias)
+        return (; weight, bias)
     end
     function project_mid(ps)
         w, b = ps.weight, ps.bias
@@ -461,7 +461,7 @@ function equivariant_net(setup, nchan)
         w = permutedims(w, (2, 4, 1, 3))
         weight = reshape(w, kern..., nreg * c_in, nreg * c_out)
         bias = reshape(repeat(reshape(b, 1, :), nreg), :)
-        (; weight, bias)
+        return (; weight, bias)
     end
     function project_sink(ps)
         w = ps.weight
@@ -470,11 +470,11 @@ function equivariant_net(setup, nchan)
         w = reshape(w, nten, nreg, c_in)
         w = permutedims(w, (2, 3, 1))
         weight = reshape(w, kern..., nreg * c_in, nten)
-        (; weight)
+        return (; weight)
     end
     function project(ps)
         lift, mids..., sink, symm = ps
-        (;
+        return (;
             lift = project_lift(lift),
             map(project_mid, mids)...,
             sink = project_sink(sink),
@@ -485,9 +485,9 @@ function equivariant_net(setup, nchan)
         lift = Conv(kern, nten => nreg * nchan[1], gelu),
         map(
             i ->
-                Symbol(:mid_, i) =>
-                    Conv(kern, nreg * nchan[i] => nreg * nchan[i+1], gelu),
-            1:(length(nchan)-1),
+            Symbol(:mid_, i) =>
+                Conv(kern, nreg * nchan[i] => nreg * nchan[i + 1], gelu),
+            1:(length(nchan) - 1),
         )...,
         sink = Conv(kern, nreg * nchan[end] => nten; use_bias = false),
         symm = WrappedFunction() do σ
@@ -510,23 +510,23 @@ function equivariant_net(setup, nchan)
     net |> display
     ps =
         (;
-            lift = (;
-                weight = kaiming_uniform(rng, T, nten, nchan[1]),
-                bias = zeros(T, nchan[1]),
+        lift = (;
+            weight = kaiming_uniform(rng, T, nten, nchan[1]),
+            bias = zeros(T, nchan[1]),
+        ),
+        map(
+            i ->
+            Symbol(:mid_, i) => (;
+                weight = kaiming_uniform(rng, T, nreg, nchan[i + 1], nchan[i]),
+                bias = zeros(T, nchan[i + 1]),
             ),
-            map(
-                i ->
-                    Symbol(:mid_, i) => (;
-                        weight = kaiming_uniform(rng, T, nreg, nchan[i+1], nchan[i]),
-                        bias = zeros(T, nchan[i+1]),
-                    ),
-                1:(length(nchan)-1),
-            )...,
-            sink = (; weight = kaiming_uniform(rng, T, nten, nchan[end])),
-            symm = (;),
-        ) |> dev
+            1:(length(nchan) - 1),
+        )...,
+        sink = (; weight = kaiming_uniform(rng, T, nten, nchan[end])),
+        symm = (;),
+    ) |> dev
     st = map(Returns((;)), ps)
-    (; project, net, ps, st)
+    return (; project, net, ps, st)
 end
 
 "Same as `equivariant_net` but without the weight projection."
@@ -549,9 +549,9 @@ function cnn(setup, nchan; same_as_equi)
         lift = Conv(kern, nt_nonsym => nreg * nchan[1], gelu),
         map(
             i ->
-                Symbol(:mid_, i) =>
-                    Conv(kern, nreg * nchan[i] => nreg * nchan[i+1], gelu),
-            1:(length(nchan)-1),
+            Symbol(:mid_, i) =>
+                Conv(kern, nreg * nchan[i] => nreg * nchan[i + 1], gelu),
+            1:(length(nchan) - 1),
         )...,
         sink = Conv(kern, nreg * nchan[end] => nt; use_bias = false),
         symm = WrappedFunction(identity),
@@ -559,5 +559,5 @@ function cnn(setup, nchan; same_as_equi)
     net |> display
     ps, st = Lux.setup(rng, net) |> f |> dev
     project = identity # No projection
-    (; project, net, ps, st)
+    return (; project, net, ps, st)
 end

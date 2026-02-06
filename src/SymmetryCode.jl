@@ -22,7 +22,7 @@ using Zygote
 "Free up GPU memory."
 function clean()
     GC.gc()
-    CUDA.functional() && CUDA.reclaim()
+    return CUDA.functional() && CUDA.reclaim()
 end
 
 include("Seneca.jl")

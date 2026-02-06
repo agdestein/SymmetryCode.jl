@@ -9,7 +9,7 @@ using KernelAbstractions
 using Random
 
 "Cartesian grid of a squared/cubic periodic domain."
-struct Grid{D,T,B}
+struct Grid{D, T, B}
     "Domain side length."
     l::T
 
@@ -27,7 +27,7 @@ struct Grid{D,T,B}
 
     function Grid{D}(; l, n, backend = CPU(), workgroupsize = 64) where {D}
         @assert n % 2 == 0 "Only even number of grid points supported."
-        new{D,typeof(l),typeof(backend)}(l, n, backend, workgroupsize)
+        return new{D, typeof(l), typeof(backend)}(l, n, backend, workgroupsize)
     end
 end
 
@@ -66,11 +66,11 @@ where ``k \\ \\in \\mathbb{Z}^3`` is an integer-wavenumber-vector.
 
 @inline function squared_wavenumber_int(g::Grid{2}, I)
     kx, ky = wavenumber_int(g, I)
-    kx^2 + ky^2
+    return kx^2 + ky^2
 end
 @inline function squared_wavenumber_int(g::Grid{3}, I)
     kx, ky, kz = wavenumber_int(g, I)
-    kx^2 + ky^2 + kz^2
+    return kx^2 + ky^2 + kz^2
 end
 
 @inline squared_wavenumber_full(g, I) = (pi / g.l * 2)^2 * squared_wavenumber_int(g, I)
@@ -92,11 +92,11 @@ function apply!(kernel!, grid, args; ndrange = ndrange(grid))
     (; backend, workgroupsize) = grid
     kernel!(backend, workgroupsize)(args...; ndrange)
     KernelAbstractions.synchronize(backend)
-    nothing
+    return nothing
 end
 
 "Scalar-valued spectral field (RFFT-sized)."
-scalarfield(g::Grid{D,T}) where {D,T} =
+scalarfield(g::Grid{D, T}) where {D, T} =
     KernelAbstractions.zeros(g.backend, Complex{T}, ndrange(g))
 
 "Vector-valued spectral field."
@@ -130,7 +130,7 @@ tensorfield_nonsym(g::Grid{3}) = (;
 )
 
 "Scalar-valued physical-space field."
-spacescalarfield(g::Grid{D,T}) where {D,T} =
+spacescalarfield(g::Grid{D, T}) where {D, T} =
     KernelAbstractions.zeros(g.backend, T, ntuple(Returns(g.n), D))
 
 "Vector-valued physical-space field."
@@ -217,7 +217,7 @@ function nonlinearity!(σ, vi_vj, v, u, plan, g::Grid)
     D = dim(g)
     temp = σ.xx # Use σ.xx as temporary complex storage
     fac = get_fft_fac(g)
-    for i = 1:D
+    for i in 1:D
         copyto!(temp, u[i])
         apply!(twothirds!, g, (temp, g)) # Zero out high wavenumbers
         ldiv!(v[i], plan, temp) # Inverse transform
@@ -234,7 +234,7 @@ function nonlinearity!(σ, vi_vj, v, u, plan, g::Grid)
         mul!(σ[ij], plan, vi_vj)
         σ[ij] ./= fac
     end
-    nothing
+    return nothing
 end
 
 @kernel function viscosity!(σ, u, visc, g::Grid{2})
@@ -260,7 +260,7 @@ end
 function stress!(σ, vi_vj, v, u, plan, visc, g::Grid)
     # foreach(s -> fill!(s, 0), σ)
     nonlinearity!(σ, vi_vj, v, u, plan, g)
-    apply!(viscosity!, g, (σ, u, visc, g))
+    return apply!(viscosity!, g, (σ, u, visc, g))
 end
 
 @kernel function vectordivergence!(div, u, g::Grid{2})
@@ -306,7 +306,7 @@ function taylorgreen(g::Grid{2}, plan; doproject = true)
     v = nothing
     u = (; x = ux, y = uy)
     doproject && apply!(project!, g, (u, g))
-    u
+    return u
 end
 function taylorgreen(g::Grid{3}, plan; doproject)
     (; l, n, backend) = g
@@ -324,7 +324,7 @@ function taylorgreen(g::Grid{3}, plan; doproject)
     uz = zero(ux)
     u = (; x = ux, y = uy, z = uz)
     doproject && apply!(project!, g, (u, g))
-    u
+    return u
 end
 
 """
@@ -368,11 +368,11 @@ function randomfield(profile, grid; totalenergy = 1, rng = Random.default_rng(),
     kdiag = floor(Int, sqrt(3) * kmax)
     # k23 = round(Int, 2 / 3 * kmax)
 
-    # Sum of shell weights 
+    # Sum of shell weights
     totalprofile = sum(k -> profile(k; kwargs...), 0:kdiag)
 
     # Adjust energy in each partially resolved shell [k, k+1)
-    for k = 0:kdiag
+    for k in 0:kdiag
         apply!(mask!, grid, (mask, k, grid)) # Shell mask
         @. Emask = mask * E
         Eshell = sum(Emask) + sum(selectdim(Emask, 1, 2:kmax)) # Current energy in shell
@@ -389,14 +389,14 @@ function randomfield(profile, grid; totalenergy = 1, rng = Random.default_rng(),
     # The velocity now has
     # the correct spectrum,
     # random phase shifts,
-    # random orientations, 
+    # random orientations,
     # and is also divergence free.
-    u
+    return u
 end
 
 function energy(u)
     kmax = size(u.x, 1) - 1
-    sum(u -> sum(abs2, u) + sum(abs2, selectdim(u, 1, 2:kmax)), u) / 2
+    return sum(u -> sum(abs2, u) + sum(abs2, selectdim(u, 1, 2:kmax)), u) / 2
 end
 
 @kernel function z_vort_kernel!(vort, u, grid)
@@ -412,7 +412,7 @@ function z_vort!(spacevort, vort, u, plan, grid)
     apply!(twothirds!, grid, (vort, grid)) # Zero out high wavenumbers
     ldiv!(spacevort, plan, vort)
     spacevort .*= get_fft_fac(grid) # FFT factor
-    nothing
+    return nothing
 end
 
 function spectral_stuff(grid; npoint = nothing)
@@ -441,7 +441,7 @@ function spectral_stuff(grid; npoint = nothing)
     # Put indices on GPU
     inds = map(adapt(backend), inds)
 
-    (; shells = inds, k = 2π / l * kuse)
+    return (; shells = inds, k = 2π / l * kuse)
 end
 
 function spectrum(u, grid, stuff = spectral_stuff(grid))
@@ -449,18 +449,18 @@ function spectrum(u, grid, stuff = spectral_stuff(grid))
     s = map(shells) do shell
         sum(u -> sum(abs2, view(u, shell)) / 2, u)
     end
-    (; k, s)
+    return (; k, s)
 end
 
 "Sum of squared modulus that also accounts for missing modes in RFFT."
-getenergy(u) = sum(abs2, u) + sum(abs2, selectdim(u, 1, 2:(size(u, 1)-1)))
+getenergy(u) = sum(abs2, u) + sum(abs2, selectdim(u, 1, 2:(size(u, 1) - 1)))
 
 "Sum of that also accounts for missing modes in RFFT."
-spectralsum(f, u) = sum(f, u) + sum(f, selectdim(u, 1, 2:(size(u, 1)-1)))
+spectralsum(f, u) = sum(f, u) + sum(f, selectdim(u, 1, 2:(size(u, 1) - 1)))
 
 "Dot product of that also accounts for missing modes in RFFT."
 spectraldot(u, v) =
-    dot(u, v) + dot(selectdim(u, 1, 2:(size(u, 1)-1)), selectdim(v, 1, 2:(size(v, 1)-1)))
+    dot(u, v) + dot(selectdim(u, 1, 2:(size(u, 1) - 1)), selectdim(v, 1, 2:(size(v, 1) - 1)))
 
 @kernel function vectorgradient!(G, u, g::Grid{2})
     I = @index(Global, Cartesian)
@@ -526,7 +526,7 @@ end
 end
 function get_dissipation!(diss, u, visc, g)
     apply!(dissipation_kernel!, g, (diss, u, visc, g))
-    d = sum(diss) + sum(selectdim(diss, 1, 2:(size(diss, 1)-1)))
+    return d = sum(diss) + sum(selectdim(diss, 1, 2:(size(diss, 1) - 1)))
 end
 
 function turbulence_statistics(u, visc, g, dissfield = similar(u.x, typeof(g.l)))
@@ -544,16 +544,16 @@ function turbulence_statistics(u, visc, g, dissfield = similar(u.x, typeof(g.l))
     Re_int = l_int * uavg / visc
     Re_tay = l_tay * uavg / visc
     Re_kol = l_kol * uavg / visc
-    (; uavg, diss, l_int, l_tay, l_kol, t_int, t_tay, t_kol, Re_int, Re_tay, Re_kol)
+    return (; uavg, diss, l_int, l_tay, l_kol, t_int, t_tay, t_kol, Re_int, Re_tay, Re_kol)
 end
 
 function forwardeuler!(f!, u, cache, grid, Δt; args...)
     (; du) = cache
     f!(du, u, grid; args...)
-    for i = 1:dim(grid)
+    for i in 1:dim(grid)
         axpy!(Δt, du[i], u[i])
     end
-    apply!(project!, grid, (u, grid))
+    return apply!(project!, grid, (u, grid))
 end
 
 "Adams-Bashforth-Crank-Nicolson time stepping."
@@ -581,13 +581,13 @@ function abcn!(u, cache, Δt, visc, grid; firststep)
     firststep && foreach(copyto!, du_old, du) # Forward-Euler for first step
     apply!(abcn_kernel!, grid, (u, du, du_old, Δt, visc, grid))
     apply!(project!, grid, (u, grid))
-    foreach(copyto!, du_old, du)
+    return foreach(copyto!, du_old, du)
 end
 
 function propose_timestep(u, grid, visc, cache)
     (; vi_vj, du, v, plan) = cache
     D = dim(grid)
-    for i = 1:D
+    for i in 1:D
         copyto!(du[i], u[i])
         apply!(twothirds!, grid, (du[i], grid)) # Zero out ghost modes
         ldiv!(v[i], plan, du[i]) # ldiv! overwrites input...
@@ -599,13 +599,13 @@ function propose_timestep(u, grid, visc, cache)
     h = grid.l / grid.n
     Δt_conv = h / vmax
     Δt_diff = h^2 / D / 2 / visc
-    min(Δt_conv, Δt_diff)
+    return min(Δt_conv, Δt_diff)
 end
 
 function convectiondiffusion!(du, u, grid, cache; visc)
     (; plan, σ, vi_vj, v) = cache
     stress!(σ, vi_vj, v, u, plan, visc, grid)
-    apply!(tensordivergence!, grid, (du, σ, grid))
+    return apply!(tensordivergence!, grid, (du, σ, grid))
 end
 
 "Pre-allocate temporary arrays and RFFT plan for time stepping."
@@ -645,24 +645,24 @@ function wray3!(f!, u, Δt, grid, cache; args...)
     # Update current solution
     foreach(copyto!, ustart, u)
 
-    for i = 1:nstage
+    for i in 1:nstage
         f!(du, u, grid, cache; args...)
 
         # Compute u = project(ustart + Δt * a[i] * du)
         i == 1 || foreach(copyto!, u, ustart) # Skip first iter
-        for j = 1:D
+        for j in 1:D
             axpy!(a[i] * Δt, du[j], u[j])
         end
         apply!(project!, grid, (u, grid))
 
         # Compute ustart = ustart + Δt * b[i] * du
         # Skip last iter
-        i < nstage && for j = 1:D
+        i < nstage && for j in 1:D
             axpy!(b[i] * Δt, du[j], ustart[j])
         end
     end
 
-    u
+    return u
 end
 
 "Ornstein-Uhlenbeck forcing setup."
@@ -686,7 +686,7 @@ function ouforcer(grid, kcut)
     x = complex(grid.l)
     b = KernelAbstractions.zeros(grid.backend, typeof(x), nuse, D)
     bold = zero(b)
-    (; iuse, kuse, b, bold)
+    return (; iuse, kuse, b, bold)
 end
 
 "Get indices of wavenumbers with `|k| < kband`."
@@ -727,7 +727,7 @@ function getband(grid, kband)
     # We only keep i if (i % (kmax + 1) > 1).
     conjinds = filter(j -> j % (kmax + 1) > 1, inds)
 
-    (; inds, conjinds, k2 = k2[inds])
+    return (; inds, conjinds, k2 = k2[inds])
 end
 
 "Get indices and wavenumbers for the `i`-th shell (`k` such that `i ≤ |k| < i + 1`)."
@@ -745,7 +745,7 @@ function getshells(grid, shells)
     k2sort = k2[isort]
 
     # Get linear RFFT indices and corresponding waveumbers for each shell
-    map(shells) do i
+    return map(shells) do i
         # Since the wavenumbers are sorted, we just need to find the start and stop of each shell.
         # The linear indices for that shell is then given by the permutation in that range.
         jstart = findfirst(≥(i^2), k2sort)

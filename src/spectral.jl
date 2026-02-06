@@ -14,17 +14,21 @@ getlabels() = (;
 @inline function cutoff_index(nbar, n, i, is1)
     imax = div(nbar, 2) + is1
     isneg = i > imax
-    ifelse(isneg, n - nbar + i, i) # Negative wavenumbers count backwards
+    return ifelse(isneg, n - nbar + i, i) # Negative wavenumbers count backwards
 end
-@inline cutoff_index(nbar, n, I::CartesianIndex{2}) = CartesianIndex((
-    cutoff_index(nbar, n, I.I[1], true),
-    cutoff_index(nbar, n, I.I[2], false),
-))
-@inline cutoff_index(nbar, n, I::CartesianIndex{3}) = CartesianIndex((
-    cutoff_index(nbar, n, I.I[1], true),
-    cutoff_index(nbar, n, I.I[2], false),
-    cutoff_index(nbar, n, I.I[3], false),
-))
+@inline cutoff_index(nbar, n, I::CartesianIndex{2}) = CartesianIndex(
+    (
+        cutoff_index(nbar, n, I.I[1], true),
+        cutoff_index(nbar, n, I.I[2], false),
+    ),
+)
+@inline cutoff_index(nbar, n, I::CartesianIndex{3}) = CartesianIndex(
+    (
+        cutoff_index(nbar, n, I.I[1], true),
+        cutoff_index(nbar, n, I.I[2], false),
+        cutoff_index(nbar, n, I.I[3], false),
+    ),
+)
 
 @kernel function cutoff!(ubar, u)
     nbar = size(ubar, 2)
@@ -64,10 +68,10 @@ end
 
 "Verification with DNS-aided LES."
 function dns_aid()
-    visc = 4e-4
+    visc = 4.0e-4
     t = 0.0
     cfl = 0.85
-    tstop = 1e-1
+    tstop = 1.0e-1
     D = 3
     g = Grid{D}(; l = 1.0, n = 16)
     gbar = Grid{D}(; l = 1.0, n = 8)
@@ -99,7 +103,7 @@ function dns_aid()
         foreach(i -> (cbar.σ[i] .+= fσ[i] .- σf[i]), 1:tensordim(g))
         apply!(tensordivergence!, gbar, (cbar.du, cbar.σ, gbar))
         # Step
-        for i = 1:dim(g)
+        for i in 1:dim(g)
             axpy!(Δt, c.du[i], u[i])
             axpy!(Δt, cbar.du[i], v[i])
         end
@@ -107,7 +111,7 @@ function dns_aid()
         apply!(project!, gbar, (v, gbar))
     end
     foreach(i -> apply!(cutoff!, gbar, (ubar[i], u[i])), 1:D)
-    sum(i -> sum(abs2, v[i] - ubar[i]) / sum(abs2, ubar[i]), 1:D)
+    return sum(i -> sum(abs2, v[i] - ubar[i]) / sum(abs2, ubar[i]), 1:D)
 end
 
 function get_forcing_constant(g, u, diss, visc)
@@ -115,7 +119,7 @@ function get_forcing_constant(g, u, diss, visc)
     foreach(u -> apply!(twothirds!, g, (u, g)), u)
     u2 = sum(getenergy, u)
     d = get_dissipation!(diss, u, visc, g)
-    4 / 5 * d / u2
+    return 4 / 5 * d / u2
 end
 
 function forced_rhs!(du, u, grid, cache; forceval, visc)
@@ -131,7 +135,7 @@ function forced_rhs!(du, u, grid, cache; forceval, visc)
         # Add linear forcing to du
         @. du += forceval * u
     end
-    nothing
+    return nothing
 end
 
 function create_dns(setup)
@@ -233,7 +237,7 @@ function create_dns(setup)
     file = joinpath(outdir, "dns.jld2")
     @info "Saving final DNS snapshot to $(file)"
     flush(stderr)
-    jldsave(file; u = u |> cpu_device(), times, energies, dissipations, walltime)
+    return jldsave(file; u = u |> cpu_device(), times, energies, dissipations, walltime)
 end
 
 function create_data(setup)
@@ -293,10 +297,10 @@ function create_data(setup)
     # Time stepping
     t = 0.0
     timing = time()
-    for i = 1:nstep
+    for i in 1:nstep
         # Do multiple substeps before storing data
         # Skip first step to get initial statistics
-        i == 1 || for j = 1:nsubstep
+        i == 1 || for j in 1:nsubstep
             # Time step
             Δt = cfl * propose_timestep(u, g_dns, visc, c_dns)
             t += Δt
@@ -354,7 +358,7 @@ function create_data(setup)
 
     timing = time() - timing
 
-    # Save results 
+    # Save results
     filename = joinpath(setup.outdir, "data.jld2")
     save_object(
         filename,
@@ -373,7 +377,7 @@ function create_data(setup)
     @info "Finished data generation after $(timing) seconds"
     flush(stderr)
 
-    nothing
+    return nothing
 end
 
 function sfs(u, g_dns, g_les, Δ)
@@ -385,7 +389,7 @@ function sfs(u, g_dns, g_les, Δ)
     trace = scalarfield(g_les)
     τ = tensorfield(g_les)
     sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
-    τ
+    return τ
 end
 
 function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
@@ -405,7 +409,7 @@ function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, 
     foreach(τ -> apply!(twothirds!, g_les, (τ, g_les)), τ)
 
     # Make tensor trace-free
-    if D == 2
+    return if D == 2
         @. trace = (τ[1] + τ[2]) / 2
         τ[1] .-= trace
         τ[2] .-= trace
@@ -462,20 +466,20 @@ function create_dataloader(setup, data; nsample, batchsize)
         x = reshape(x, nx, nx, 1, size(x, 3), :)
         y = reshape(y, nx, nx, 1, size(y, 3), :)
     end
-    DataLoader((x, y); batchsize, shuffle = true, partial = false)
+    return DataLoader((x, y); batchsize, shuffle = true, partial = false)
 end
 
 function vectorfield_to_svector(u)
     D = ndims(u[1])
     T = eltype(u[1])
-    M = SVector{D,T}
-    M.(u...)
+    M = SVector{D, T}
+    return M.(u...)
 end
 function svector_to_vectorfield(u)
     V = eltype(u)
     z = zero(V)
     D = size(z, 1)
-    if D == 2
+    return if D == 2
         (; x = getindex.(u, 1), y = getindex.(u, 2))
     elseif D == 3
         (; x = getindex.(u, 1), y = getindex.(u, 2), z = getindex.(u, 3))
@@ -485,14 +489,14 @@ end
 function tensorfield_to_smatrix(t)
     D = ndims(t[1])
     T = eltype(t[1])
-    M = SMatrix{D,D,T,D^2}
-    M.(t...)
+    M = SMatrix{D, D, T, D^2}
+    return M.(t...)
 end
 function smatrix_to_tensorfield(t)
     M = eltype(t)
     z = zero(M)
     D = size(z, 1)
-    if D == 2
+    return if D == 2
         (;
             xx = getindex.(t, 1, 1),
             yx = getindex.(t, 2, 1),
@@ -524,7 +528,7 @@ function inverse_vector_fourier(u, g)
         apply!(twothirds!, g, (temp, g))
         ldiv!(uu, plan, temp)
     end
-    uu
+    return uu
 end
 
 function forward_vector_fourier(uu, g)
@@ -534,18 +538,18 @@ function forward_vector_fourier(uu, g)
         mul!(u, plan, uu)
         u ./= g.n^dim(g) # FFT factor
     end
-    u
+    return u
 end
 
 function transform_vector(u, g, (p, s))
     T, D = typeof(g.l), dim(g)
-    u_sa = SVector{D,T}.(u...)
+    u_sa = SVector{D, T}.(u...)
     u_sa = permutedims(u_sa, p)
     dims = (findall(==(-1), s)...,)
     u_sa = reverse(u_sa; dims)
     m = roto_reflection_matrix(p, s)
     ru_sa = map(u -> m * u, u_sa)
-    if D == 2
+    return if D == 2
         (; x = getindex.(ru_sa, 1), y = getindex.(ru_sa, 2))
     elseif D == 3
         (; x = getindex.(ru_sa, 1), y = getindex.(ru_sa, 2), z = getindex.(ru_sa, 3))
@@ -554,7 +558,7 @@ end
 
 function transform_tensor(t, g, (p, s))
     T, D = typeof(g.l), dim(g)
-    SM = SMatrix{D,D,T,D^2}
+    SM = SMatrix{D, D, T, D^2}
     t = if D == 2
         SM.(t.xx, t.xy, t.xy, t.yy)
     else
@@ -565,7 +569,7 @@ function transform_tensor(t, g, (p, s))
     t = reverse(t; dims)
     m = roto_reflection_matrix(p, s)
     t = map(t -> m * t * m', t)
-    if D == 2
+    return if D == 2
         (; xx = getindex.(t, 1, 1), yy = getindex.(t, 2, 2), xy = getindex.(t, 1, 2))
     elseif D == 3
         (;
@@ -581,7 +585,7 @@ end
 
 function transform_tensor_nonsym(t, g, (p, s))
     T, D = typeof(g.l), dim(g)
-    SM = SMatrix{D,D,T,D^2}
+    SM = SMatrix{D, D, T, D^2}
     t = SM.(t...)
     t = permutedims(t, p)
     dims = (findall(==(-1), s)...,)
@@ -594,7 +598,7 @@ function transform_tensor_nonsym(t, g, (p, s))
         val = getindex.(t, i, j)
         s => val
     end
-    NamedTuple(pairs)
+    return NamedTuple(pairs)
 end
 
 # function transform_scalar(f, (p, s))
@@ -622,7 +626,7 @@ create_loss(project) = function loss(net, ps, st, (x, y))
     yhat = net(x, ps, st) |> first
     # l = MSELoss()(yhat, y) # (x, y) pair is already normalized
     l = sum(abs2, yhat - y) / sum(abs2, y)
-    l, st, (;)
+    return l, st, (;)
 end
 
 function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
@@ -646,7 +650,7 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
 
     timing = time()
     i = 0
-    for iepoch = 1:nepoch, (ibatch, batch) in enumerate(dataloader)
+    for iepoch in 1:nepoch, (ibatch, batch) in enumerate(dataloader)
         i += 1
         x, y = batch |> device
         # loss(net, ps, st, (x, y)); error()
@@ -682,7 +686,7 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
 
     ps = ps_best # Retain best (not last) parameters
     st = train_state.states # Note: If st is non-empty, need to make "best"-mechanism for states
-    (; ps, st, losses_train, losses_valid, timing)
+    return (; ps, st, losses_train, losses_valid, timing)
 end
 
 function fullchain(setup, net, project, ps, st, Δ)
@@ -697,9 +701,9 @@ function fullchain(setup, net, project, ps, st, Δ)
         @. x /= (sqrt(A2) + eps(T)) # Normalize input gradient
         y = net(x, ps, st) |> first # Apply model
         @. y *= Δ^2 * A2 # Scale output with dimensional stuff
-        reshape(y, s[1:D]..., :) # Remove singleton sample dimension
+        return reshape(y, s[1:D]..., :) # Remove singleton sample dimension
     end
-    model
+    return model
 end
 
 "Compute LES right-hand side with closure model (put force in `du`)."
@@ -729,7 +733,7 @@ function les!(du, u, grid, cache; model, visc)
     end
 
     # Final force
-    apply!(tensordivergence!, grid, (du, σ, grid))
+    return apply!(tensordivergence!, grid, (du, σ, grid))
 end
 
 function solve_les(; data, setup, models, files)
@@ -746,7 +750,7 @@ function solve_les(; data, setup, models, files)
         model = models[key]
 
         # Do a short model warmup (so that compilation does not get included in timing)
-        twarm = [0.0, 1e-6]
+        twarm = [0.0, 1.0e-6]
         foreach(copyto!, u_model, u_les)
         solve_les!(u_model; times = twarm, grid, visc, model, cfl)
 
@@ -759,6 +763,7 @@ function solve_les(; data, setup, models, files)
         # Save results
         save_object(files[key], (; data.times, u = snapshots, timing = t))
     end
+    return
 end
 
 function solve_les!(u; times, grid, visc, model, cfl)
@@ -817,8 +822,8 @@ function solve_les!(u; times, grid, visc, model, cfl)
                 #     ",\t",
                 # )
                 flush(stderr)
-                forever = Δt < 1e-8
-                boom = energy > 1e5
+                forever = Δt < 1.0e-8
+                boom = energy > 1.0e5
                 if forever || boom
                     forever && @warn "This will never finish"
                     boom && @warn "Boom!"
@@ -834,7 +839,7 @@ function solve_les!(u; times, grid, visc, model, cfl)
         push!(states, map(Array, u))
     end
 
-    states
+    return states
 end
 
 function get_les_statistics(setup, data, files)
@@ -845,7 +850,7 @@ function get_les_statistics(setup, data, files)
     u_ref = data.inputs
     u_les_gpu = vectorfield(g)
     u_ref_gpu = vectorfield(g)
-    map(files) do f
+    return map(files) do f
         @info "Reading $(f)"
         flush(stderr)
         u_les = f |> load_object |> x -> x.u
@@ -926,8 +931,8 @@ end
 #     tr(S * S), tr(R * R), tr(S * S * S), tr(S * R * R), tr(S * S * R * R), tr(S * S * R * R * S * R)
 
 "Compute deviatoric part of a tensor."
-@inline deviator(σ::SMatrix{2,2}) = σ - tr(σ) / 2 * one(σ)
-@inline deviator(σ::SMatrix{3,3}) = σ - tr(σ) / 3 * one(σ)
+@inline deviator(σ::SMatrix{2, 2}) = σ - tr(σ) / 2 * one(σ)
+@inline deviator(σ::SMatrix{3, 3}) = σ - tr(σ) / 3 * one(σ)
 
 @kernel function tb_kernel!(invariants, basis, grads, Δ, g::Grid{2})
     nb, ni = nbasis(g), ninvariant(g)
@@ -985,7 +990,7 @@ function build_tensorbasis(grad, g, Δ)
     basis = KernelAbstractions.zeros(g.backend, T, nx..., nt, nb)
     invariants = KernelAbstractions.zeros(g.backend, T, nx..., ni)
     apply!(tb_kernel!, g, (invariants, basis, grad, Δ, g); ndrange = nx)
-    invariants, basis
+    return invariants, basis
 end
 
 function getgradient(u, g)
@@ -999,7 +1004,7 @@ function getgradient(u, g)
         ldiv!(AA, plan, A) # Inverse RFFT
         AA .*= g.n^D # FFT factor
     end
-    AA
+    return AA
 end
 
 tbnn(net, ps, st, Δ, g) = function model(A)
@@ -1019,7 +1024,7 @@ tbnn(net, ps, st, Δ, g) = function model(A)
     w = reshape(w, :, 1, nb)
     b .*= w
     m = sum(b; dims = 3)
-    reshape(m, nx..., nt)
+    return reshape(m, nx..., nt)
 end
 
 function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
@@ -1060,7 +1065,7 @@ function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
         x = reshape(x, nxx, nxx, 1, size(x, 3), :)
         y = reshape(y, nxx, nxx, 1, size(y, 3), :)
     end
-    DataLoader((x, y); batchsize, shuffle = true, partial = false, rng)
+    return DataLoader((x, y); batchsize, shuffle = true, partial = false, rng)
 end
 
 create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
@@ -1072,7 +1077,7 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
 
     # Destructure invariants and basis
     i = selectdim(x, D + 1, 1:ni)
-    b = selectdim(x, D + 1, (ni+1):size(x, D+1))
+    b = selectdim(x, D + 1, (ni + 1):size(x, D + 1))
 
     # Compute coefficients
     w = net(i, ps, st) |> first
@@ -1086,7 +1091,7 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
 
     # l = MSELoss()(m, y)
     l = sum(abs2, m - y) / sum(abs2, y)
-    l, st, (;)
+    return l, st, (;)
 end
 
 function getdissipation(g, u, m)
@@ -1094,7 +1099,7 @@ function getdissipation(g, u, m)
     G = getgradient(u, g)
     τ = m(G)
     S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
-    if D == 2
+    return if D == 2
         xx, yy, xy = 1, 2, 3
         τ = (;
             xx = selectdim(τ, D + 1, xx),
@@ -1159,7 +1164,7 @@ function test_equivariance_post(; ustart, setup, grid, model, groupindex, tstop,
     # Commutation error between rotation and time-stepping
     rsu = stack(rsu)
     sru = stack(ru)
-    norm(rsu - sru) / norm(sru)
+    return norm(rsu - sru) / norm(sru)
 end
 
 "Compute distribution of tensor components and dissipation coefficients."
@@ -1193,23 +1198,24 @@ function predict_sfs(setup, data, models)
             y = m(AA)
             τ_les = if D == 2
                 xx, yy, xy = 1, 2, 3
-                (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
+                (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
             elseif D == 3
                 xx, yy, zz = 1, 2, 3
                 xy, yz, zx = 4, 5, 6
                 (;
-                    xx = view(y,:,:,:,xx),
-                    yy = view(y,:,:,:,yy),
-                    zz = view(y,:,:,:,zz),
-                    xy = view(y,:,:,:,xy),
-                    yz = view(y,:,:,:,yz),
-                    zx = view(y,:,:,:,zx),
+                    xx = view(y, :, :, :, xx),
+                    yy = view(y, :, :, :, yy),
+                    zz = view(y, :, :, :, zz),
+                    xy = view(y, :, :, :, xy),
+                    yz = view(y, :, :, :, yz),
+                    zx = view(y, :, :, :, zx),
                 )
             end
             τ_les |> cpu_device()
         end
         save_object("$(outdir)/sfs_$(key).jld2", τ_series)
     end
+    return
 end
 
 "Compute distribution of tensor components and dissipation coefficients."
@@ -1327,7 +1333,7 @@ function compute_densities(setup, data, modelkeys)
             )
         end
     end
-    nothing
+    return nothing
 end
 
 function plot_densities(setup; dolog)
@@ -1349,14 +1355,16 @@ function plot_densities(setup; dolog)
             xlabelsize = 20,
             yscale,
         ),
-        xy = Axis(fig[1, 2]; xlabel = L"\tau_{1 2}", xlabelsize = 20, yscale,
-                  yticksvisible = false,
-                  yticklabelsvisible = false,
-                 ),
-        diss = Axis(fig[1, 3]; xlabel = L"\tau_{i j} S_{i j}", xlabelsize = 20, yscale,
-                  yticksvisible = false,
-                  yticklabelsvisible = false,
-                   ),
+        xy = Axis(
+            fig[1, 2]; xlabel = L"\tau_{1 2}", xlabelsize = 20, yscale,
+            yticksvisible = false,
+            yticklabelsvisible = false,
+        ),
+        diss = Axis(
+            fig[1, 3]; xlabel = L"\tau_{i j} S_{i j}", xlabelsize = 20, yscale,
+            yticksvisible = false,
+            yticklabelsvisible = false,
+        ),
     )
 
     for fkey in [:xx, :xy, :diss], mkey in mkeys
@@ -1366,43 +1374,43 @@ function plot_densities(setup; dolog)
         #     # The line at 0 is not visible for smagorinsky, append a zero
         #     lines!(ax[fkey], [dens.x; 2 * dens.x[end]], [dens.density; 1e-10]; label = labels[mkey])
         # else
-            lines!(ax[fkey], dens.x, max.(dens.density, 1e-16); label = labels[mkey])
+        lines!(ax[fkey], dens.x, max.(dens.density, 1.0e-16); label = labels[mkey])
         # end
     end
 
     if name == "laptop"
         xlims!(ax.xx, -0.1, 0.3)
-        ylims!(ax.xx, 2e-2, 3e2)
+        ylims!(ax.xx, 2.0e-2, 3.0e2)
     elseif name == "turbulator"
         xlims!(ax.xx, -0.1, 0.2)
-        ylims!(ax.xx, 2e-4, 3e2)
+        ylims!(ax.xx, 2.0e-4, 3.0e2)
     elseif name == "snellius"
         xlims!(ax.xx, -0.1, 0.12)
-        ylims!(ax.xx, 4e-4, 4e2)
+        ylims!(ax.xx, 4.0e-4, 4.0e2)
     end
 
     # XY-component
     if name == "laptop"
         xlims!(ax.xy, -0.1, 0.1)
-        ylims!(ax.xy, 1e-1, 5e2)
+        ylims!(ax.xy, 1.0e-1, 5.0e2)
     elseif name == "turbulator"
         xlims!(ax.xy, -0.1, 0.1)
-        ylims!(ax.xy, 1e-3, 3e2)
+        ylims!(ax.xy, 1.0e-3, 3.0e2)
     elseif name == "snellius"
         xlims!(ax.xy, -0.12, 0.12)
-        ylims!(ax.xy, 4e-4, 4e2)
+        ylims!(ax.xy, 4.0e-4, 4.0e2)
     end
 
     # Dissipation
     if name == "laptop"
         xlims!(ax.diss, -0.3, 0.3)
-        ylims!(ax.diss, 1e-1, 1e2)
+        ylims!(ax.diss, 1.0e-1, 1.0e2)
     elseif name == "turbulator"
         xlims!(ax.diss, -0.4, 0.1)
-        ylims!(ax.diss, 1e-3, 1e2)
+        ylims!(ax.diss, 1.0e-3, 1.0e2)
     elseif name == "snellius"
         xlims!(ax.diss, -0.5, 0.12)
-        ylims!(ax.diss, 4e-4, 4e2)
+        ylims!(ax.diss, 4.0e-4, 4.0e2)
     end
 
     Legend(
@@ -1420,7 +1428,7 @@ function plot_densities(setup; dolog)
     file = "$(plotdir)/tensor-distributions.pdf"
     @info "Saving density plot to $(file)"
     save(file, fig; backend = CairoMakie)
-    fig
+    return fig
 end
 
 @kernel function clark_kernel!(ττ, GG, Δ, g::Grid{2})
@@ -1453,7 +1461,7 @@ end
 create_clark(Δ, g) = function clark(u, G)
     τ = stack(spacetensorfield(g))
     apply!(clark_kernel!, g, (τ, G, Δ, g); ndrange = space_ndrange(g))
-    τ
+    return τ
 end
 
 @kernel function smagorinsky_kernel!(ττ, GG, CS, Δ, g::Grid{2})
@@ -1512,9 +1520,9 @@ function create_smagorinsky(CS, Δ, g)
     function smagorinsky(u, G)
         τ = stack(spacetensorfield(g))
         apply!(smagorinsky_kernel!, g, (τ, G, CS, Δ, g); ndrange = space_ndrange(g))
-        τ
+        return τ
     end
-    smagorinsky
+    return smagorinsky
 end
 
 function create_verstappen(C, Δ, g)
@@ -1523,17 +1531,17 @@ function create_verstappen(C, Δ, g)
     function verstappen(u, G)
         τ = stack(spacetensorfield(g))
         apply!(verstappen_kernel!, g, (τ, G, C, Δ, g); ndrange = space_ndrange(g))
-        τ
+        return τ
     end
-    verstappen
+    return verstappen
 end
 
 @kernel function smagorinsky_tensor!(τ, S, Δ, g::Grid{2})
     I = @index(Global, Cartesian)
     Sxx, Syy, Sxy = S.xx[I], S.yy[I], S.xy[I]
     S2 =
-        Sxx^2 + 
-        Syy^2 + 
+        Sxx^2 +
+        Syy^2 +
         2 * Sxy^2
     nu = Δ^2 * sqrt(2 * S2)
     xx, yy, xy = 1, 2, 3
@@ -1547,11 +1555,11 @@ end
     Sxx, Syy, Szz = S.xx[I], S.yy[I], S.zz[I]
     Sxy, Syz, Szx = S.xy[I], S.yz[I], S.zx[I]
     S2 =
-        Sxx^2 + 
-        Syy^2 + 
-        Szz^2 + 
-        2 * Sxy^2 + 
-        2 * Syz^2 + 
+        Sxx^2 +
+        Syy^2 +
+        Szz^2 +
+        2 * Sxy^2 +
+        2 * Syz^2 +
         2 * Szx^2
     nu = Δ^2 * sqrt(2 * S2)
     xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
@@ -1565,8 +1573,8 @@ end
 
 @kernel function smagorinsky_coefficient!(c, M, L, g::Grid{2})
     I = @index(Global, Cartesian)
-    Mxx, Myy, Mxy  = M.xx[I], M.yy[I], M.xy[I]
-    Lxx, Lyy, Lxy  = L.xx[I], L.yy[I], L.xy[I]
+    Mxx, Myy, Mxy = M.xx[I], M.yy[I], M.xy[I]
+    Lxx, Lyy, Lxy = L.xx[I], L.yy[I], L.xy[I]
 
     # Make L trace-free
     trace = (Lxx + Lyy) / 2
@@ -1584,8 +1592,8 @@ end
 
 @kernel function smagorinsky_coefficient!(c, M, L, g::Grid{3})
     I = @index(Global, Cartesian)
-    Mxx, Myy, Mzz, Mxy, Myz, Mzx  = M.xx[I], M.yy[I], M.zz[I], M.xy[I], M.yz[I], M.zx[I]
-    Lxx, Lyy, Lzz, Lxy, Lyz, Lzx  = L.xx[I], L.yy[I], L.zz[I], L.xy[I], L.yz[I], L.zx[I]
+    Mxx, Myy, Mzz, Mxy, Myz, Mzx = M.xx[I], M.yy[I], M.zz[I], M.xy[I], M.yz[I], M.zx[I]
+    Lxx, Lyy, Lzz, Lxy, Lyz, Lzx = L.xx[I], L.yy[I], L.zz[I], L.xy[I], L.yz[I], L.zx[I]
 
     # Make L trace-free
     trace = (Lxx + Lyy + Lzz) / 3
@@ -1701,9 +1709,9 @@ function create_dynamic_smagorinsky(Δ, g)
         for (i, m1) in enumerate(m1)
             copyto!(selectdim(τ, D + 1, i), m1)
         end
-        τ
+        return τ
     end
-    model
+    return model
 end
 
 function apriori_error(setup, data, modelkeys)
@@ -1853,7 +1861,7 @@ function plot_velocities(setup, data, upostfiles, comp)
     rowgap!(fig.layout, 10)
     colgap!(fig.layout, 10)
     save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
-    fig
+    return fig
 end
 
 function get_dissipation_errors(; setup, u_dns, models)
@@ -1890,17 +1898,17 @@ function get_dissipation_errors(; setup, u_dns, models)
         y = m(G)
         if D == 2
             xx, yy, xy = 1, 2, 3
-            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
+            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
         elseif D == 3
             xx, yy, zz = 1, 2, 3
             xy, yz, zx = 4, 5, 6
             (;
-                xx = view(y,:,:,:,xx),
-                yy = view(y,:,:,:,yy),
-                zz = view(y,:,:,:,zz),
-                xy = view(y,:,:,:,xy),
-                yz = view(y,:,:,:,yz),
-                zx = view(y,:,:,:,zx),
+                xx = view(y, :, :, :, xx),
+                yy = view(y, :, :, :, yy),
+                zz = view(y, :, :, :, zz),
+                xy = view(y, :, :, :, xy),
+                yz = view(y, :, :, :, yz),
+                zx = view(y, :, :, :, zx),
             )
         end
     end
@@ -1910,19 +1918,19 @@ function get_dissipation_errors(; setup, u_dns, models)
             @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
         else
             @. τ.xx * S.xx +
-               τ.yy * S.yy +
-               τ.zz * S.zz +
-               2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+                τ.yy * S.yy +
+                τ.zz * S.zz +
+                2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
         end
         d
     end
-    map(median, NamedTuple(diss))
+    return map(median, NamedTuple(diss))
 end
 
 @kernel function qr_kernel!(q, r, GG, g::Grid{3})
     T = eltype(q)
     I = @index(Global, Cartesian)
-    G = SMatrix{3,3,T,9}(
+    G = SMatrix{3, 3, T, 9}(
         GG.xx[I],
         GG.yx[I],
         GG.zx[I],
@@ -1961,7 +1969,7 @@ function compute_qr(setup, data, upostfiles)
 
         qr = map(u_series) do ucpu
             foreach(copyto!, u, ucpu)
-            for j = 1:D, i = 1:D
+            for j in 1:D, i in 1:D
                 s = [:x, :y, :z]
                 ij = Symbol(s[i], s[j])
                 apply!(derivative!, g, (Ghat, u[i], j, g))
@@ -1978,21 +1986,24 @@ function compute_qr(setup, data, upostfiles)
         end
         qstack = stack(qr -> qr[1], qr) |> vec
         rstack = stack(qr -> qr[2], qr) |> vec
-        dens = kde((rstack, qstack);
-        npoints = (1000, 1000),
+        dens = kde(
+            (rstack, qstack);
+            npoints = (1000, 1000),
         )
         file = "$(setup.outdir)/qr_$(k).jld2"
         @info "Saving Q-R density to $(file)"
         save_object(file, (; dens.x, dens.y, dens.density))
     end
-    nothing
+    return nothing
 end
 
 function plot_qr(setup)
     (; name) = setup
-    modelkeys = [:ref, :nomo, :smag,
-                 # :clar,
-                 :tbnn, :equi, :conv]
+    modelkeys = [
+        :ref, :nomo, :smag,
+        # :clar,
+        :tbnn, :equi, :conv,
+    ]
     qr = map(key -> key => load_object("$(setup.outdir)/qr_$(key).jld2"), modelkeys)
     qr = NamedTuple(qr)
 
@@ -2031,10 +2042,10 @@ function plot_qr(setup)
             title,
         )
         if name == "turbulator"
-            ran = 1e-3, 1e1
+            ran = 1.0e-3, 1.0e1
             ncat = 6
         elseif name == "snellius"
-            ran = 1e-4, 1e1
+            ran = 1.0e-4, 1.0e1
             ncat = 7
         end
         # key => extrema(qr.density) |> display
@@ -2043,7 +2054,7 @@ function plot_qr(setup)
             ax,
             qr.ref.x,
             qr.ref.y,
-            max.(qr.ref.density, 1e-20);
+            max.(qr.ref.density, 1.0e-20);
             levels = logrange(ran..., ncat),
             color = colors.ref,
         )
@@ -2051,7 +2062,7 @@ function plot_qr(setup)
             ax,
             qr[key].x,
             qr[key].y,
-            max.(qr[key].density, 1e-20);
+            max.(qr[key].density, 1.0e-20);
             levels = logrange(ran..., ncat),
             color = colors[key],
         )
@@ -2069,7 +2080,7 @@ function plot_qr(setup)
         end
     end
     save("$(setup.plotdir)/qr.pdf", fig; backend = CairoMakie)
-    fig
+    return fig
 end
 
 function plot_equivariance_errors(errs)
@@ -2081,7 +2092,7 @@ function plot_equivariance_errors(errs)
         ylabel = "Error",
         xticks = [1, 8, 16, 24, 32, 40, 48],
     )
-    ylims!(ax, 1e-17, 1)
+    ylims!(ax, 1.0e-17, 1)
     i = 1:48
     colors = (;
         nomo = Cycled(1),
@@ -2102,7 +2113,7 @@ function plot_equivariance_errors(errs)
     )
     for key in keys(errs)
         e = errs[key]
-        e = max.(e, 1e-30) # Encode true zeros as 1e-30
+        e = max.(e, 1.0e-30) # Encode true zeros as 1e-30
         scatterlines!(
             ax,
             i,
@@ -2123,7 +2134,7 @@ function plot_equivariance_errors(errs)
         nbanks = 3,
     )
     rowgap!(fig.layout, 5)
-    fig
+    return fig
 end
 
 function plot_sfs(setup, data)
@@ -2199,7 +2210,7 @@ function plot_sfs(setup, data)
     colgap!(fig.layout, 10)
 
     save("$(setup.plotdir)/sfs.png", fig; backend = CairoMakie)
-    fig
+    return fig
 end
 
 function plot_evolution_dns(setup)
@@ -2229,7 +2240,7 @@ function plot_evolution_dns(setup)
     @info "Saving DNS time series plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
-    fig
+    return fig
 end
 
 function plot_evolution_data(setup, data)
@@ -2273,7 +2284,7 @@ function plot_evolution_data(setup, data)
     @info "Saving energy and dissipation time series plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
-    fig
+    return fig
 end
 
 function plot_dissipation_finite_difference(setup)
@@ -2283,7 +2294,7 @@ function plot_dissipation_finite_difference(setup)
     # Create plot
     fig = Figure(; size = (400, 340))
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity")
-    lines!(ax, times, 6/5 * dissipations; label = "Dissipation")
+    lines!(ax, times, 6 / 5 * dissipations; label = "Dissipation")
     lines!(
         ax,
         times[2:end],
@@ -2306,7 +2317,7 @@ function plot_dissipation_finite_difference(setup)
     @info "Saving DNS dissipation plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
-    fig
+    return fig
 end
 
 function plot_spectrum_data(setup, data)
@@ -2321,13 +2332,13 @@ function plot_spectrum_data(setup, data)
     k_dns = 2π / setup.l * eachindex(s_dns)
     k_les = 2π / setup.l * eachindex(s_les)
     if D == 2
-        C = 4e1
-        s_kol = C * diss^(2/3) * k_dns .^ (-3)
-        escale = C^(-1) * diss^(-2/3) * eta^(-3)
+        C = 4.0e1
+        s_kol = C * diss^(2 / 3) * k_dns .^ (-3)
+        escale = C^(-1) * diss^(-2 / 3) * eta^(-3)
     elseif D == 3
         C = 1.6
-        s_kol = C * diss^(2/3) * k_dns .^ (-5/3)
-        escale = C^(-1) * diss^(-2/3) * eta^(-5/3)
+        s_kol = C * diss^(2 / 3) * k_dns .^ (-5 / 3)
+        escale = C^(-1) * diss^(-2 / 3) * eta^(-5 / 3)
     end
 
     fig = Figure(; size = (400, 340))
@@ -2378,7 +2389,7 @@ function plot_spectrum_data(setup, data)
     rowgap!(fig.layout, 5)
 
     save(joinpath(setup.plotdir, "spectrum_data.pdf"), fig; backend = CairoMakie)
-    fig
+    return fig
 end
 
 function plot_spectrum_dns(setup)
@@ -2415,7 +2426,7 @@ function plot_spectrum_dns(setup)
     if D == 2
         C = 1.6
         kkolmo = 2π / l * [1, g_dns.n / 2]
-        kolmo = @. 3e1 * C * stat.diss^(2 / 3) * kkolmo^(-3)
+        kolmo = @. 3.0e1 * C * stat.diss^(2 / 3) * kkolmo^(-3)
         escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(3)
     elseif D == 3
         kkolmo = 2π / l * [1, g_dns.n / 8]
@@ -2466,7 +2477,7 @@ function plot_spectrum_dns(setup)
     @info "Saving DNS spectrum to $file"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
-    fig
+    return fig
 end
 
 function plot_spectrum_les(setup, data, les_stat)
@@ -2478,12 +2489,12 @@ function plot_spectrum_les(setup, data, les_stat)
     k = 2π / setup.l * eachindex(s_ref)
     if D == 2
         C = 1.6
-        s_kol = C * diss^(2/3) * k .^ (-3)
-        escale = C^(-1) * diss^(-2/3) * eta^(-3)
+        s_kol = C * diss^(2 / 3) * k .^ (-3)
+        escale = C^(-1) * diss^(-2 / 3) * eta^(-3)
     elseif D == 3
         C = 1.6
-        s_kol = C * diss^(2/3) * k .^ (-5/3)
-        escale = C^(-1) * diss^(-2/3) * eta^(-5/3)
+        s_kol = C * diss^(2 / 3) * k .^ (-5 / 3)
+        escale = C^(-1) * diss^(-2 / 3) * eta^(-5 / 3)
     end
     labels = getlabels()
 
@@ -2518,5 +2529,5 @@ function plot_spectrum_les(setup, data, les_stat)
     @info "Saving LES spectrum plot to $file"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
-    fig
+    return fig
 end

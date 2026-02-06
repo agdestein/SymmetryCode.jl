@@ -2,11 +2,11 @@ function setup_laptop()
     l = 2π
     n_dns = 512
     n_les = 128
-    visc = 1e-4
+    visc = 1.0e-4
     Δ = 3 * l / n_les
     outdir = joinpath(@__DIR__, "..", "output", "laptop") |> mkpath
     plotdir = joinpath(outdir, "plots") |> mkpath
-    (;
+    return (;
         name = "laptop",
         outdir,
         plotdir,
@@ -30,13 +30,13 @@ function setup_turbulator()
     # n_dns = 256
     n_dns = 512
     n_les = 64
-    visc = 3e-4
+    visc = 3.0e-4
     Δ = 3 * l / n_les
     outdir =
         joinpath(@__DIR__, "..", "output", "turbulator_visc=$(visc)_n=$(n_dns)") |> mkpath
     # plotdir = "~/Projects/SymmetryPaper/figures" |> expanduser |> mkpath
     plotdir = joinpath(outdir, "plots") |> mkpath
-    (;
+    return (;
         name = "turbulator",
         outdir,
         plotdir,
@@ -57,9 +57,9 @@ function setup_snellius()
     l = 2π
     n_dns = 810
     n_les = 128
-    visc = 2e-4
+    visc = 2.0e-4
     Δ = 4 * l / n_les
-    (;
+    return (;
         name = "snellius",
         outdir = mkpath("/projects/prjs1757/SymmetryOutput/visc$(visc)"),
         plotdir = joinpath(@__DIR__, "..", "output", "snellius") |> mkpath,

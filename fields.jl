@@ -20,54 +20,54 @@ end
 @inline dx(g::Grid) = g.l / g.n
 @inline shift(I::CartesianIndex{N}, i, n) where {N} =
     CartesianIndex(ntuple(j -> ifelse(j == i, I[j] + n, I[j]), N))
-@inline fd(g, f, I, i) = (f[shift(I, i, +1)|>g] - f[shift(I, i, -1)|>g]) / 2 / dx(g)
+@inline fd(g, f, I, i) = (f[shift(I, i, +1) |> g] - f[shift(I, i, -1) |> g]) / 2 / dx(g)
 @inline fd(g, u, I, i, j) =
-    (u[shift(I, j, +1)|>g][i] - u[shift(I, j, -1)|>g][i]) / 2 / dx(g)
+    (u[shift(I, j, +1) |> g][i] - u[shift(I, j, -1) |> g][i]) / 2 / dx(g)
 @kernel function grad!(g::Grid, ∇u, u)
     I = @index(Global, Cartesian)
-    ∇u[I] = @SMatrix [fd(g, u, I, i, j) for i = 1:3, j = 1:3]
+    ∇u[I] = @SMatrix [fd(g, u, I, i, j) for i in 1:3, j in 1:3]
 end
 @kernel function grad_scalar!(g::Grid, ∇f, f)
     I = @index(Global, Cartesian)
-    ∇f[I] = @SVector [fd(g, f, I, i) for i = 1:3]
+    ∇f[I] = @SVector [fd(g, f, I, i) for i in 1:3]
 end
 function apply!(
-    kernel,
-    g::Grid,
-    args;
-    backend = CPU(),
-    workgroupsize = 64,
-    ndrange = (g.n, g.n, g.n),
-)
+        kernel,
+        g::Grid,
+        args;
+        backend = CPU(),
+        workgroupsize = 64,
+        ndrange = (g.n, g.n, g.n),
+    )
     kernel(backend, workgroupsize)(args...; ndrange)
-    nothing
+    return nothing
 end
 
 function transform_scalar(f, (p, s))
     f = permutedims(f, p)
     dims = (findall(==(-1), s)...,)
-    f = reverse(f; dims)
+    return f = reverse(f; dims)
 end
 function transform_vector(u, (p, s))
     u = permutedims(u, p)
     dims = (findall(==(-1), s)...,)
     u = reverse(u; dims)
     m = roto_reflection_matrix(p, s)
-    u = map(u -> m * u, u)
+    return u = map(u -> m * u, u)
 end
 function transform_tensor(t, (p, s))
     t = permutedims(t, p)
     dims = (findall(==(-1), s)...,)
     t = reverse(t; dims)
     m = roto_reflection_matrix(p, s)
-    t = map(t -> m * t * m', t)
+    return t = map(t -> m * t * m', t)
 end
 
 let
     ip, is = 2, 1
     p, s = permutations[ip], signs[is]
     g = Grid(1.0, 16)
-    u = [@SVector(randn(3)) for i = 1:g.n, j = 1:g.n, k = 1:g.n]
+    u = [@SVector(randn(3)) for i in 1:g.n, j in 1:g.n, k in 1:g.n]
     Gu = fill(@SMatrix(zeros(3, 3)), g.n, g.n, g.n)
     GRu = fill(@SMatrix(zeros(3, 3)), g.n, g.n, g.n)
     apply!(grad!, g, (g, Gu, u))
@@ -82,8 +82,8 @@ let
     p, s = permutations[ip], signs[is]
     g = Grid(1.0, 16)
     f = randn(g.n, g.n, g.n)
-    Gf = [@SVector(zeros(3)) for i = 1:g.n, j = 1:g.n, k = 1:g.n]
-    GRf = [@SVector(zeros(3)) for i = 1:g.n, j = 1:g.n, k = 1:g.n]
+    Gf = [@SVector(zeros(3)) for i in 1:g.n, j in 1:g.n, k in 1:g.n]
+    GRf = [@SVector(zeros(3)) for i in 1:g.n, j in 1:g.n, k in 1:g.n]
     apply!(grad_scalar!, g, (g, Gf, f))
     Rf = transform_scalar(f, (p, s))
     RGf = transform_vector(Gf, (p, s))

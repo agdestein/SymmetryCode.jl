@@ -11,12 +11,12 @@ outdir = joinpath(@__DIR__, "output") |> mkpath
 times, dissipation = let
     t = 0.0
     cfl = 0.85
-    tstop = 2e1
+    tstop = 2.0e1
     Δt = 0.0
     g = S.Grid{3}(; l = 2π, n = 512, backend = CUDABackend())
-    visc = 2e-4
-    cache = S.getcache(g);
-    u = S.taylorgreen(g, cache.plan);
+    visc = 2.0e-4
+    cache = S.getcache(g)
+    u = S.taylorgreen(g, cache.plan)
     e = round(S.energy(u); sigdigits = 4)
     i = 0
     times = zeros(0)
@@ -36,13 +36,13 @@ times, dissipation = let
                 2 *
                 visc *
                 (
-                    S.getenergy(strain.xx) +
+                S.getenergy(strain.xx) +
                     S.getenergy(strain.yy) +
                     S.getenergy(strain.zz) +
                     2 * S.getenergy(strain.xy) +
                     2 * S.getenergy(strain.yz) +
                     2 * S.getenergy(strain.zx)
-                )
+            )
             push!(times, t)
             push!(dissipation, d)
             @info join(
@@ -82,10 +82,10 @@ let
     # k = [2, 500]
     k = [2, g.n / 8]
     if D == 2
-        kolmo = @. 2e0 * stat.diss^(1 / 3) * k^(-3)
+        kolmo = @. 2.0e0 * stat.diss^(1 / 3) * k^(-3)
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-3)
     elseif D == 3
-        kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
+        kolmo = @. 5.0e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
     end
     kscale = stat.l_kol

@@ -27,7 +27,7 @@ let
     l = 10.0
     Δ = l / 20
     n = 512
-    x = range(-l / 2, l / 2, n + 1)[1:(end-1)]
+    x = range(-l / 2, l / 2, n + 1)[1:(end - 1)]
     y = @. sqrt(6 / pi / Δ^2) * exp(-6 * x^2 / Δ^2)
     yhat = rfft(y) * l / n
     kmax = div(n, 2)
@@ -39,7 +39,7 @@ let
     lines!(ax, 2 * pi / l * k[2:end], abs.(yref[2:end]); label = "Theory")
     vlines!(ax, 2 * pi / Δ)
     vlines!(ax, 2 * pi / l)
-    ylims!(1e-10, 1e2)
+    ylims!(1.0e-10, 1.0e2)
     save("$(plotdir)/filterkernel.pdf", fig; backend = CairoMakie)
     fig
 end
@@ -64,7 +64,7 @@ setup = let
     l = 1.0
     n_les = 256
     Δ = 4 * l / n_les
-    (; visc = 5e-5, D = 2, l = 1.0, n_dns = 1024, n_les, Δ, backend = CUDABackend())
+    (; visc = 5.0e-5, D = 2, l = 1.0, n_dns = 1024, n_les, Δ, backend = CUDABackend())
 end
 
 dns = create_dns(setup; t_warmup = 0.5, cfl = 0.35, rng = Xoshiro(0));
@@ -86,10 +86,10 @@ let
     ax = Axis(fig[1, 1]; xscale = log10, yscale = log10)
     k = [2, g_dns.n / 8]
     if D == 2
-        kolmo = @. 2e0 * stat.diss^(2 / 3) * k^(-3)
+        kolmo = @. 2.0e0 * stat.diss^(2 / 3) * k^(-3)
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-3)
     elseif D == 3
-        kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
+        kolmo = @. 5.0e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
     end
     kscale = stat.l_kol
@@ -101,7 +101,7 @@ let
 end
 
 data = let
-    d = create_data(setup; nstep = 1000, nsubstep = 100, rng = Xoshiro(0), setup.Δ);
+    d = create_data(setup; nstep = 1000, nsubstep = 100, rng = Xoshiro(0), setup.Δ)
     filename = joinpath(outdir, "data-$(setup.n_les).jld2")
     jldsave(filename; data = d)
     load(filename, "data")
@@ -139,7 +139,7 @@ let
     u = spacevectorfield(g)
     rng = Xoshiro(0)
     foreach(u -> randn!(rng, u), u)
-    u_sa = map(SVector{D,T}, u...)
+    u_sa = map(SVector{D, T}, u...)
     ru_sa = transform_vector(u_sa, (p, s))
     ru = (; x = getindex.(ru_sa, 1), y = getindex.(ru_sa, 2))
     uhat = map(rfft, u)
@@ -148,7 +148,7 @@ let
     Gru = getgradient(ruhat, g)
     nGu = m_tbnn(Gu)
     nGru = m_tbnn(Gru)
-    M = SMatrix{2,2,T,4}
+    M = SMatrix{2, 2, T, 4}
     nGu = M.(
         selectdim(nGu, 3, 1),
         selectdim(nGu, 3, 3),
@@ -277,7 +277,7 @@ let
         dims = 3,
     ) # Desymmetrize
     nx = nx
-    nx = ntuple(i -> view(nx,:,:,i), 4)
+    nx = ntuple(i -> view(nx, :, :, i), 4)
     nx = tensorfield_to_smatrix(nx)
     rnx = transform_tensor(nx, (p, s))
     rnx = smatrix_to_tensorfield(rnx) |> stack
@@ -305,7 +305,7 @@ let
     Gru = getgradient(ruhat, g)
     Gu = stack(Gu)
     Gru = stack(Gru)
-    GGu = ntuple(i -> view(Gu,:,:,i), 4)
+    GGu = ntuple(i -> view(Gu, :, :, i), 4)
     GGu = tensorfield_to_smatrix(GGu)
     rGGu = transform_tensor(GGu, (p, s))
     rGu = smatrix_to_tensorfield(rGGu) |> stack
@@ -341,7 +341,7 @@ let
     nG = hcat(nG[:, 1, :], nG[:, 3, :], nG[:, 3, :], nG[:, 2, :]) # Desymmetrize
     nrG = hcat(nrG[:, 1, :], nrG[:, 3, :], nrG[:, 3, :], nrG[:, 2, :]) # Desymmetrize
     nGG = reshape(nG, g.n, g.n, 4)
-    nGG = ntuple(i -> view(nGG,:,:,i), 4)
+    nGG = ntuple(i -> view(nGG, :, :, i), 4)
     nGG = tensorfield_to_smatrix(nGG)
     rnGG = transform_tensor(nGG, (p, s))
     rnG = smatrix_to_tensorfield(rnGG) |> stack
@@ -367,7 +367,7 @@ m_tbnn = let
         setup,
         dataloader = create_dataloader_tbnn(setup, data; batchsize = 5, rng = Xoshiro(0)),
         nepoch = 10,
-        learning_rate = 1e-3,
+        learning_rate = 1.0e-3,
         net_stuff = (; net, ps, st),
     )
     file = joinpath(outdir, "ps-tbnn-$(setup.n_les).jld2")
@@ -387,7 +387,7 @@ m_equi = let
         setup,
         dataloader = create_dataloader(setup, data; batchsize = 5),
         nepoch = 10,
-        learning_rate = 1e-3,
+        learning_rate = 1.0e-3,
         net_stuff,
     )
     file = joinpath(outdir, "ps_equi.jld2")
@@ -414,7 +414,7 @@ m_conv = let
         setup,
         dataloader = create_dataloader(setup, data; batchsize = 5),
         nepoch = 10,
-        learning_rate = 1e-3,
+        learning_rate = 1.0e-3,
         net_stuff,
     )
     file = joinpath(outdir, "ps_conv.jld2")
@@ -428,7 +428,7 @@ let
     g_dns = Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
     ustart = randomfield(g_dns; rng = Xoshiro(123), kpeak = 5)
     models = (; tbnn = m_tbnn, conv = m_conv, equi = m_equi)
-    u, u_les = inference_post(; ustart, setup, models, setup.Δ, tstop = 1e-1)
+    u, u_les = inference_post(; ustart, setup, models, setup.Δ, tstop = 1.0e-1)
 end
 
 u_dns, u_les = let
@@ -439,7 +439,7 @@ u_dns, u_les = let
         setup,
         models = (; tbnn = m_tbnn, conv = m_conv, equi = m_equi),
         setup.Δ,
-        tstop = 1e-1,
+        tstop = 1.0e-1,
     )
 end;
 
@@ -456,10 +456,10 @@ let
     ax = Makie.Axis(fig[1, 1]; xscale = log10, yscale = log10)
     k = [2, g_dns.n / 8]
     if D == 2
-        kolmo = @. 2e0 * stat.diss^(1 / 3) * k^(-3)
+        kolmo = @. 2.0e0 * stat.diss^(1 / 3) * k^(-3)
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-3)
     elseif D == 3
-        kolmo = @. 5e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
+        kolmo = @. 5.0e-1 * stat.diss^(2 / 3) * k^(-5 / 3)
         escale = stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
     end
     kscale = stat.l_kol
@@ -494,7 +494,7 @@ let
         y = m(G)
         if D == 2
             xx, yy, xy = 1, 2, 3
-            (; xx = view(y,:,:,xx), yy = view(y,:,:,yy), xy = view(y,:,:,xy))
+            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
         elseif D == 3
             error()
         end
@@ -520,7 +520,7 @@ let
     for (key, val) in pairs(τxx)
         lines!(ax_xx, val.x / setup.Δ, val.density; label = labels[key])
     end
-    ylims!(ax_xx, 3e-2, 2e2)
+    ylims!(ax_xx, 3.0e-2, 2.0e2)
     # xlims!(ax_xx, -0.1, 0.4)
     #
     ax_xy = Makie.Axis(fig[1, 2]; xlabel = "xy-component", yscale = log10)
@@ -528,7 +528,7 @@ let
     for (key, val) in pairs(τxy)
         lines!(ax_xy, val.x / setup.Δ, val.density)
     end
-    ylims!(ax_xy, 5e-2, 1e2)
+    ylims!(ax_xy, 5.0e-2, 1.0e2)
     # xlims!(ax_xy, -0.2, 0.12)
     #
     ax_diss = Makie.Axis(fig[1, 3]; xlabel = "Dissipation", yscale = log10)
@@ -541,7 +541,7 @@ let
             val.density,
         )
     end
-    ylims!(ax_diss, 1e-1, 7e1)
+    ylims!(ax_diss, 1.0e-1, 7.0e1)
     xlims!(ax_diss, -20, 20)
     Legend(fig[0, :], ax_xx; orientation = :horizontal)
     fig
@@ -588,7 +588,7 @@ let
     lines!(ax, dy.x, dy.density; label = "Reference")
     # lines!(ax, dmx.x / sqrt(n), dmx.density * sqrt(n); label = "Prediction")
     lines!(ax, dmx.x, dmx.density; label = "Prediction")
-    ylims!(ax, 1e-2, 1e3)
+    ylims!(ax, 1.0e-2, 1.0e3)
     axislegend(ax)
     fig |> display
     nothing
