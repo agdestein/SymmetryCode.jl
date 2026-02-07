@@ -19,6 +19,8 @@ using StaticArrays
 using Statistics
 using Zygote
 
+default_backend() = CUDA.functional() ? CUDABackend() : CPU()
+
 "Free up GPU memory."
 function clean()
     GC.gc()

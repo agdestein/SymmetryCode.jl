@@ -44,11 +44,11 @@ data = joinpath(setup.outdir, "data.jld2") |> load_object;
 
 let
     (; D) = setup
-    u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
+    u = load("$(setup.outdir)/dns.jld2", "u") |> u -> map(copy, u) |> adapt(setup.backend)
     g = S.Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
     v = S.spacescalarfield(g)
     p = plan_rfft(v)
-    fac = S.get_fft_factor(g)
+    fac = S.get_fft_fac(g)
     if D == 2
         ldiv!(v, p, u.x)
         v .*= fac
@@ -58,18 +58,18 @@ let
         v .*= fac
         field = v[:, :, end] |> Array
     end
-    fig, ax, im = image(field; colormap = :RdBu)
+    fig, ax, im = heatmap(field; colormap = :RdBu)
     save("$(setup.plotdir)/dnsfield.png", fig)
     fig
 end
 
 let
     (; D) = setup
-    u = data.inputs[1] |> adapt(setup.backend)
+    u = map(copy, data.inputs[2]) |> adapt(setup.backend)
     g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     v = S.spacescalarfield(g)
     p = plan_rfft(v)
-    fac = S.get_fft_factor(g)
+    fac = S.get_fft_fac(g)
     if D == 2
         ldiv!(v, p, u.x)
         v .*= fac
@@ -79,7 +79,7 @@ let
         v .*= fac
         field = v[:, :, end] |> Array
     end
-    fig, ax, im = image(field; colormap = :RdBu)
+    fig, ax, im = heatmap(field; colormap = :RdBu)
     save("$(setup.plotdir)/dnsfield_filtered.png", fig)
     fig
 end
@@ -95,7 +95,7 @@ getindex.(data.statistics_dns, :t_int)
 getindex.(data.statistics_dns, :l_int)
 getindex.(data.statistics_dns, :l_kol)
 
-S.plot_evolution_data(setup, data)
+S.plot_evolution_data(setup, data);
 
 let
     fig = Figure()
@@ -151,7 +151,7 @@ m_dynsmag = S.create_dynamic_smagorinsky(
 #     Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
 # )
 
-m_clar = S.create_clark(setup.Δ, Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
+m_clar = S.create_clark(setup.Δ, S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
 
 m_tbnn, train_tbnn = S.create_tbnn(setup, data, false);
 
@@ -176,7 +176,7 @@ upostfiles = map(
     (;
         nomo = "nomo",
         smag = "smag",
-        dynsmag = "dynsmag",
+        # dynsmag = "dynsmag",
         # vers = "vers",
         clar = "clar",
         # tbnn = "tbnn",
@@ -187,11 +187,11 @@ upostfiles = map(
 
 let
     models = (;
-        # nomo = m_nomo,
-        # smag = m_smag,
-        dynsmag = m_dynsmag,
+        nomo = m_nomo,
+        smag = m_smag,
+        # dynsmag = m_dynsmag,
         # # vers = m_vers,
-        # clar = m_clar,
+        clar = m_clar,
         # tbnn = m_tbnn,
         # equi = m_equi,
         # conv = m_conv,
@@ -255,9 +255,9 @@ S.predict_sfs(
         #
         smag = m_smag,
         clar = m_clar,
-        tbnn = m_tbnn,
-        equi = m_equi,
-        conv = m_conv,
+        # tbnn = m_tbnn,
+        # equi = m_equi,
+        # conv = m_conv,
     ),
 )
 

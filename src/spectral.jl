@@ -432,7 +432,7 @@ function create_dataloader(setup, data; nsample, batchsize)
     plan = plan_rfft(GG.xx)
     T = typeof(setup.l)
     nsample_use = min(nsample, length(data.inputs))
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
     snaps = map(1:nsample_use) do j
         ucpu, τcpu = data.inputs[j], data.outputs[j]
         foreach(copyto!, u, ucpu)
@@ -523,7 +523,7 @@ function inverse_vector_fourier(u, g)
     uu = spacevectorfield(g)
     temp = scalarfield(g)
     plan = plan_rfft(uu.x)
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
     for (uu, u) in zip(uu, u)
         copyto!(temp, u)
         temp .*= fac
@@ -536,7 +536,7 @@ end
 function forward_vector_fourier(uu, g)
     u = vectorfield(g)
     plan = plan_rfft(uu.x)
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
     for (uu, u) in zip(uu, u)
         mul!(u, plan, uu)
         u ./= fac
@@ -719,7 +719,7 @@ function les!(du, u, grid, cache; model, visc)
 
     # Closure model stress (in physical space)
     apply!(vectorgradient!, grid, (G, u, grid))
-    fac = get_fft_factor(grid)
+    fac = get_fft_fac(grid)
     GG = map(G) do G
         apply!(twothirds!, grid, (G, grid))
         res = plan \ G
@@ -815,19 +815,19 @@ function solve_les!(u; times, grid, visc, model, cfl)
             end
 
             if j % 1 == 0
-                energy = energy(u)
+                e = energy(u)
                 # @info join(
                 #     [
                 #         "j = $j",
                 #         "t = $(round(t; sigdigits = 4))",
                 #         "Δt = $(round(Δt; sigdigits = 4))",
-                #         "energy = $(round(energy; sigdigits = 4))",
+                #         "energy = $(round(e; sigdigits = 4))",
                 #     ],
                 #     ",\t",
                 # )
                 flush(stderr)
                 forever = Δt < 1.0e-8
-                boom = energy > 1.0e5
+                boom = e > 1.0e5
                 if forever || boom
                     forever && @warn "This will never finish"
                     boom && @warn "Boom!"
@@ -1003,7 +1003,7 @@ function getgradient(u, g)
     AA = spacetensorfield_nonsym(g)
     apply!(vectorgradient!, g, (A, u, g))
     plan = plan_rfft(AA.xx)
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
     for (AA, A) in zip(AA, A)
         apply!(twothirds!, g, (A, g))
         ldiv!(AA, plan, A) # Inverse RFFT
@@ -1041,7 +1041,7 @@ function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
     ττ = spacetensorfield(g)
     plan = plan_rfft(ττ.xx)
     nsample_use = min(nsample, length(data.inputs))
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
     snaps = map(1:nsample_use) do j
         ucpu, τcpu = data.inputs[j], data.outputs[j]
         foreach(copyto!, u, ucpu)
@@ -1184,7 +1184,7 @@ function predict_sfs(setup, data, models)
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
 
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
     for (key, m) in pairs(models)
         @info "Computing SFS for $(key)"
         flush(stderr)
@@ -1237,7 +1237,7 @@ function compute_densities(setup, data, modelkeys)
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
 
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
     for mkey in [:ref, modelkeys...]
         @info "Computing SFS quantities for $(mkey)"
         flush(stderr)
@@ -1639,7 +1639,7 @@ function create_dynamic_smagorinsky(Δ, g)
     D = dim(g)
     Δtilde = 2 * Δ # Filter width of test filter (single Gaussian, twice the original width)
     Δdouble = sqrt(Δtilde^2 + Δ^2) # Filter width of double-Gaussian (original + test)
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
 
     # Model takes spectral ubar as input
     function model(u, G)
@@ -1730,7 +1730,7 @@ function apriori_error(setup, data, modelkeys)
     τhat = scalarfield(g)
     plan = plan_rfft(τ.xx)
 
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
 
     τ_ref = map(data.outputs) do τcpu
         for (τ, τcpu) in zip(τ, τcpu)
@@ -1834,7 +1834,7 @@ function plot_velocities(setup, data, upostfiles, comp)
         :equi,
         :conv,
     ]
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
     for (k, key) in enumerate(modelkeys)
         @info "Plotting velocity for $(key)"
         flush(stderr)
@@ -1890,7 +1890,7 @@ function get_dissipation_errors(; setup, u_dns, models)
     for (τ, τhat) in zip(τ, τhat)
         # apply!(twothirds!, g_les, (τhat, g_les))
         ldiv!(τ, plan, τhat)
-        fac = get_fft_factor(g_les)
+        fac = get_fft_fac(g_les)
         τ .*= fac
     end
     G = getgradient(ubar, g_les)
@@ -1971,7 +1971,7 @@ function compute_qr(setup, data, upostfiles)
 
     modelkeys = [:ref, keys(upostfiles)...]
 
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
 
     for k in modelkeys
         @info "Computing Q-R for $(k)"
@@ -2162,7 +2162,7 @@ function plot_sfs(setup, data)
     # Time index
     t = 100
 
-    fac = get_fft_factor(g)
+    fac = get_fft_fac(g)
     τcpu = data.outputs[t]
     for (τ, τcpu) in zip(τ, τcpu)
         copyto!(τhat, τcpu)

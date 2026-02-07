@@ -19,7 +19,7 @@ function setup_laptop()
         cfl = 0.35,
         warmup = (; totalenergy = 0.2, tstop = 5.0, seed = 0),
         datagen = (; nstep = 100, nsubstep = 25),
-        backend = CPU(),
+        backend = default_backend(),
     )
 end
 
