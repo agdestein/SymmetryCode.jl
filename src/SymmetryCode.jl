@@ -1,9 +1,10 @@
 module SymmetryCode
 
+using AbstractFFTs
 using Adapt
+using CUDA
 using CairoMakie
 using ComponentArrays: ComponentArray
-using CUDA
 using FFTW
 using JLD2
 using KernelAbstractions
