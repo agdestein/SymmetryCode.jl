@@ -211,6 +211,47 @@ end
     u[I] = ifelse(nonzero & ix & iy & iz, u[I], zero(eltype(u)))
 end
 
+"""
+Enforce Hermitian symmetry `S(k) = conj(S(-k))` on the `kx=0` and `kx=kmax`
+planes of an RFFT array. The other `kx` planes are already independent and
+left alone. Required after filling the spectral array with `randn!`, which
+breaks the symmetry and causes the IRFFT to silently discard part of the
+energy on those planes.
+"""
+@kernel function symmetrize!(u, g::Grid{2})
+    I = @index(Global, Cartesian)
+    n = g.n
+    kmax = div(n, 2)
+    ix, iy = I.I
+    on_sym = (ix == 1) | (ix == kmax + 1)
+    iy_self = (iy == 1) | (iy == kmax + 1)
+    if on_sym
+        if iy_self
+            u[I] = complex(real(u[I]))
+        elseif iy > kmax + 1
+            u[I] = conj(u[ix, n + 2 - iy])
+        end
+    end
+end
+@kernel function symmetrize!(u, g::Grid{3})
+    I = @index(Global, Cartesian)
+    n = g.n
+    kmax = div(n, 2)
+    ix, iy, iz = I.I
+    on_sym = (ix == 1) | (ix == kmax + 1)
+    iy_self = (iy == 1) | (iy == kmax + 1)
+    iz_self = (iz == 1) | (iz == kmax + 1)
+    piy = ifelse(iy_self, iy, n + 2 - iy)
+    piz = ifelse(iz_self, iz, n + 2 - iz)
+    if on_sym
+        if iy_self & iz_self
+            u[I] = complex(real(u[I]))
+        elseif (iy > piy) | ((iy == piy) & (iz > piz))
+            u[I] = conj(u[ix, piy, piz])
+        end
+    end
+end
+
 getplan(grid) = plan_rfft(spacescalarfield(grid))
 
 function nonlinearity!(σ, vi_vj, v, u, plan, g::Grid)
@@ -341,9 +382,13 @@ function randomfield(profile, grid; totalenergy = 1, rng = Random.default_rng(),
         mask[I] = kleft^2 ≤ k2 < (kleft + 1)^2
     end
 
-    # Create random field and make it divergence free
+    # Create random field and make it divergence free.
+    # `randn!` on the complex spectral array does not produce a Hermitian-
+    # symmetric field on the kx=0 / kx=kmax planes, so fix that before any
+    # transform back to physical space silently averages it away.
     u = vectorfield(grid)
     foreach(u -> randn!(rng, u), u)
+    foreach(u -> apply!(symmetrize!, grid, (u, grid)), u)
     apply!(project!, grid, (u, grid))
 
     # RFFT exploits conjugate symmetry, so we only need half the modes
