@@ -30,9 +30,12 @@ function clean()
 end
 
 include("Seneca.jl")
+include("filtering.jl")
+include("symmetry.jl")
 include("octahedral.jl")
 include("spectral.jl")
 include("training.jl")
 include("setups.jl")
+include("verify.jl")
 
 end
