@@ -24,7 +24,8 @@ default_backend() = CUDA.functional() ? CUDABackend() : CPU()
 "Free up GPU memory."
 function clean()
     GC.gc()
-    return CUDA.functional() && CUDA.reclaim()
+    CUDA.functional() && CUDA.reclaim()
+    return
 end
 
 include("Seneca.jl")
@@ -32,9 +33,5 @@ include("octahedral.jl")
 include("spectral.jl")
 include("training.jl")
 include("setups.jl")
-
-if false
-    include("../testspectral.jl")
-end
 
 end

@@ -346,7 +346,7 @@ function create_data(setup)
         push!(spectra_dns, s_dns.s)
         push!(spectra_les, s_les.s)
 
-        # Compute turbulence statistics (use σ as temporary tensor storage)
+        # Compute turbulence statistics
         stat_dns = turbulence_statistics(u, visc, g_dns, dissfield_dns)
         stat_les = turbulence_statistics(ubar, visc, g_les, dissfield_les)
         push!(statistics_dns, stat_dns)
@@ -724,7 +724,7 @@ function les!(du, u, grid, cache; model, visc)
         apply!(twothirds!, grid, (G, grid))
         res = plan \ G
         res .*= fac
-        res
+        return res
     end
     y = model(u, GG)
 
@@ -737,7 +737,9 @@ function les!(du, u, grid, cache; model, visc)
     end
 
     # Final force
-    return apply!(tensordivergence!, grid, (du, σ, grid))
+    apply!(tensordivergence!, grid, (du, σ, grid))
+
+    return
 end
 
 function solve_les(; data, setup, models, files)
@@ -871,7 +873,8 @@ function get_les_statistics(setup, data, files)
         end
         s = map(u_les) do u_les
             foreach(copyto!, u_les_gpu, u_les)
-            spectrum(u_les_gpu, g, stuff).s
+            spec = spectrum(u_les_gpu, g, stuff)
+            return spec.s
         end
         (; e_post, s)
     end
@@ -906,7 +909,7 @@ end
 )
 
 # # Pope's basis:
-# @inline nbasis(::Grid{3}) = 11
+# @inline nbasis(::Grid{3}) = 10
 # @inline getbasis(::Grid{3}, S, R) = (
 #     deviator(S),
 #     deviator(S * R - R * S),
@@ -1706,8 +1709,6 @@ function create_dynamic_smagorinsky(Δ, g)
         # Estimate Smagorinsky coefficients from smag-commutator M and nonlinearity-commutator L
         apply!(smagorinsky_coefficient!, g, (c, M, L, g))
 
-        @show extrema(c), mean(c)
-
         # Multiply original Smagorinsky tensor with coefficients
         for m1 in m1
             m1 .*= c
@@ -2434,22 +2435,29 @@ function plot_spectrum_dns(setup)
         xscale = log10,
         yscale = log10,
         xlabel = L"\kappa \eta",
-        ylabel = L"\epsilon^{-2 / 3} \eta^{5 / 3} E(\kappa)",
+        ylabel = if D == 2
+            L"C^{-1} \epsilon_\omega^{-2 / 3} \eta^{-5 / 3} E(\kappa)"
+        else
+            L"C^{-1} \epsilon^{-2 / 3} \eta^{-3} E(\kappa)"
+        end,
         xlabelsize = 20,
         ylabelsize = 20,
     )
     if D == 2
-        C = 1.6
-        kkolmo = 2π / l * [1, g_dns.n / 2]
-        kolmo = @. 3.0e1 * C * stat.diss^(2 / 3) * kkolmo^(-3)
-        escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(3)
+        C = 4
+        kkolmo = 2π / l * logrange(1, g_dns.n / 2, 100)
+        lω_kol = stat.enstrophy_diss^(-1 / 6) * visc^(1 / 2)
+        kolmo = @. C * stat.enstrophy_diss^(2 / 3) * kkolmo^(-3)
+        escale = C^(-1) * stat.enstrophy_diss^(-2 / 3) * lω_kol^(-3)
+        kscale = lω_kol
     elseif D == 3
         kkolmo = 2π / l * [1, g_dns.n / 8]
         C = 1.6
         kolmo = @. C * stat.diss^(2 / 3) * kkolmo^(-5 / 3)
         escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
+        kscale = stat.l_kol
     end
-    kscale = stat.l_kol
+    ylims!(ax, 1.0e-4, 1.0e8)
 
     # # Banded force stuff
     # band = getband(g_dns, force[1])

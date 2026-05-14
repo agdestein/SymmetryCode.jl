@@ -10,8 +10,10 @@ using LinearAlgebra
 using Random
 using StaticArrays
 using Statistics
-using SymmetryCode: SymmetryCode as S
 using WGLMakie
+
+import SymmetryCode as S
+
 lines([1, 2, 3])
 
 setup = S.setup_laptop()
@@ -58,7 +60,7 @@ let
         v .*= fac
         field = v[:, :, end] |> Array
     end
-    fig, ax, im = heatmap(field; colormap = :RdBu)
+    fig, _ = heatmap(field; colormap = :RdBu)
     save("$(setup.plotdir)/dnsfield.png", fig)
     fig
 end
@@ -79,7 +81,7 @@ let
         v .*= fac
         field = v[:, :, end] |> Array
     end
-    fig, ax, im = heatmap(field; colormap = :RdBu)
+    fig, _ = heatmap(field; colormap = :RdBu)
     save("$(setup.plotdir)/dnsfield_filtered.png", fig)
     fig
 end
@@ -95,7 +97,7 @@ getindex.(data.statistics_dns, :t_int)
 getindex.(data.statistics_dns, :l_int)
 getindex.(data.statistics_dns, :l_kol)
 
-S.plot_evolution_data(setup, data);
+S.plot_evolution_data(setup, data)
 
 let
     fig = Figure()
@@ -134,7 +136,7 @@ m_nomo = let
 end
 
 m_smag = S.create_smagorinsky(
-    0.17,
+    0.1,
     setup.Δ,
     S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
 )
@@ -208,7 +210,7 @@ flush(stdout)
 les_stat = S.get_les_statistics(setup, data, upostfiles);
 save_object("$(setup.outdir)/les_stat.jld2", les_stat)
 
-les_stat = S.load_object("$(setup.outdir)/les_stat.jld2");
+les_stat = load_object("$(setup.outdir)/les_stat.jld2");
 
 map(s -> round(mean(s.e_post); sigdigits = 4), les_stat) |> pairs
 
