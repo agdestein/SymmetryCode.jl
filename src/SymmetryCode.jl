@@ -29,7 +29,7 @@ function clean()
     return
 end
 
-include("Seneca.jl")
+include("solver.jl")
 include("filtering.jl")
 include("symmetry.jl")
 include("nets.jl")

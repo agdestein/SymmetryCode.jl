@@ -1,5 +1,5 @@
 # "Pseudo-spectral solver for the 3D incompressible Navier-Stokes equations."
-# module Seneca
+# module Solver
 
 # using AbstractFFTs
 # using Adapt
