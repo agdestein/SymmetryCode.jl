@@ -1,3 +1,99 @@
+# Generic training loop and per-model orchestration (TBNN, G-Conv, Conv).
+
+create_loss(project) = function loss(net, ps, st, (x, y))
+    ps = project(ps)
+    yhat = net(x, ps, st) |> first
+    # l = MSELoss()(yhat, y) # (x, y) pair is already normalized
+    l = sum(abs2, yhat - y) / sum(abs2, y)
+    return l, st, (;)
+end
+
+create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
+    D = dim(g)
+    nx = size(x)[1:D]
+    nt = tensordim(g)
+    ni = ninvariant(g)
+    nb = nbasis(g)
+
+    # Destructure invariants and basis
+    i = selectdim(x, D + 1, 1:ni)
+    b = selectdim(x, D + 1, (ni + 1):size(x, D + 1))
+
+    # Compute coefficients
+    w = net(i, ps, st) |> first
+
+    # Basis contraction
+    w = reshape(w, nx..., 1, nb, :)
+    b = reshape(b, nx..., nt, nb, :)
+    wb = @. w * b
+    m = sum(wb; dims = D + 2)
+    m = reshape(m, nx..., nt, :)
+
+    # l = MSELoss()(m, y)
+    l = sum(abs2, m - y) / sum(abs2, y)
+    return l, st, (;)
+end
+
+function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
+    (; backend) = setup
+    (; net, ps, st) = net_stuff
+    ps = deepcopy(ps)
+    device = adapt(backend)
+    opt = AdamW(learning_rate)
+    train_state = Training.TrainState(net, ps, st, opt)
+    b_valid = first(dataloader) |> device
+    ps_best = deepcopy(ps)
+    l_best = Inf
+    losses_train = zeros(0)
+    losses_valid = zeros(0)
+
+    # Warmup step
+    x, y = first(dataloader) |> device
+    _, l_train, _, train_state =
+        Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
+    l_valid = loss(net, ps, st, b_valid) |> first
+
+    timing = time()
+    i = 0
+    for iepoch in 1:nepoch, (ibatch, batch) in enumerate(dataloader)
+        i += 1
+        x, y = batch |> device
+        # loss(net, ps, st, (x, y)); error()
+        _, l_train, _, train_state =
+            Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
+        if ibatch % 1 == 0
+            # Check performance on validation batch
+            l_valid = loss(net, ps, st, b_valid) |> first
+
+            # Log
+            @info join(
+                [
+                    "iepoch = $iepoch",
+                    "ibatch = $ibatch",
+                    "loss (valid) = $(round(l_valid; sigdigits = 4))",
+                    "loss (train) = $(round(l_train; sigdigits = 4))",
+                ],
+                ",\t",
+            )
+            flush(stderr)
+
+            push!(losses_train, l_train)
+            push!(losses_valid, l_valid)
+
+            # Keep current best parameters
+            if l_valid < l_best
+                l_best = l_valid
+                ps_best = deepcopy(train_state.parameters)
+            end
+        end
+    end
+    timing = time() - timing
+
+    ps = ps_best # Retain best (not last) parameters
+    st = train_state.states # Note: If st is non-empty, need to make "best"-mechanism for states
+    return (; ps, st, losses_train, losses_valid, timing)
+end
+
 function create_tbnn(setup, data, dotrain)
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     kern = ntuple(Returns(1), setup.D)
@@ -118,32 +214,4 @@ function create_conv(setup, data, dotrain)
     (; net, project) = net_stuff
     chain = fullchain(setup, net, project, ps, st, setup.Δ)
     return chain, (; losses_train, losses_valid, timing)
-end
-
-function plot_training(setup, train_tbnn, train_equi, train_conv)
-    fig = Figure(; size = (400, 340))
-    ax = Axis(
-        fig[1, 1];
-        # xscale = log10,
-        # yscale = log10,
-        xlabel = "Iteration",
-        ylabel = "Loss",
-    )
-    lines!(ax, train_tbnn.losses_valid; label = "TBNN")
-    lines!(ax, train_equi.losses_valid; label = "G-Conv")
-    lines!(ax, train_conv.losses_valid; label = "Conv")
-    Legend(
-        fig[0, 1],
-        ax;
-        tellwidth = false,
-        tellheight = true,
-        framevisible = false,
-        horizontal = true,
-        nbanks = 3,
-    )
-    eps = 0.1
-    ylims!(ax, -eps, 1 + eps)
-    rowgap!(fig.layout, 5)
-    save("$(setup.plotdir)/training.pdf", fig; backend = CairoMakie)
-    return fig
 end

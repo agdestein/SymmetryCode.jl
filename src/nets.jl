@@ -1,0 +1,317 @@
+function equivariant_net(setup, nchan)
+    (; D, backend) = setup
+    dev = adapt(backend)
+    # dev = identity
+    rng = Xoshiro(0)
+    T, f = Float64, f64
+    nten = D^2
+    (; elements) = group_stuff(D)
+    (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
+    nreg = length(elements)
+    e_lift = eigen(r_lift / nreg; sortby = -).vectors[:, 1:nten]
+    e_mid = eigen(r_mid / nreg; sortby = -).vectors[:, 1:nreg]
+    e_sink = eigen(r_sink / nreg; sortby = -).vectors[:, 1:nten]
+    proj_lift = Dense(nten => nten * nreg; use_bias = false)
+    proj_sink = Dense(nten => nreg * nten; use_bias = false)
+    proj_mid = Dense(nreg => nreg^2; use_bias = false)
+    proj_lift_ps, _ = Lux.setup(rng, proj_lift) |> f |> dev
+    copyto!(proj_lift_ps.weight, e_lift)
+    proj_sink_ps, _ = Lux.setup(rng, proj_sink) |> f |> dev
+    copyto!(proj_sink_ps.weight, e_sink)
+    proj_mid_ps, _ = Lux.setup(rng, proj_mid) |> f |> dev
+    copyto!(proj_mid_ps.weight, e_mid)
+    kern = ntuple(Returns(1), D)
+    function project_lift(ps)
+        w, b = ps.weight, ps.bias
+        _, c_out = size(w)
+        w = proj_lift(w, proj_lift_ps, (;)) |> first
+        w = reshape(w, nreg, nten, c_out)
+        w = permutedims(w, (2, 1, 3))
+        weight = reshape(w, kern..., nten, nreg * c_out)
+        bias = reshape(repeat(reshape(b, 1, :), nreg), :)
+        return (; weight, bias)
+    end
+    function project_mid(ps)
+        w, b = ps.weight, ps.bias
+        _, c_out, c_in = size(w)
+        w = reshape(w, nreg, :)
+        w = proj_mid(w, proj_mid_ps, (;)) |> first
+        w = reshape(w, nreg, nreg, c_out, c_in)
+        w = permutedims(w, (2, 4, 1, 3))
+        weight = reshape(w, kern..., nreg * c_in, nreg * c_out)
+        bias = reshape(repeat(reshape(b, 1, :), nreg), :)
+        return (; weight, bias)
+    end
+    function project_sink(ps)
+        w = ps.weight
+        _, c_in = size(w)
+        w = proj_sink(w, proj_sink_ps, (;)) |> first
+        w = reshape(w, nten, nreg, c_in)
+        w = permutedims(w, (2, 3, 1))
+        weight = reshape(w, kern..., nreg * c_in, nten)
+        return (; weight)
+    end
+    function project(ps)
+        lift, mids..., sink, symm = ps
+        return (;
+            lift = project_lift(lift),
+            map(project_mid, mids)...,
+            sink = project_sink(sink),
+            symm,
+        )
+    end
+    net = Chain(;
+        lift = Conv(kern, nten => nreg * nchan[1], gelu),
+        map(
+            i ->
+            Symbol(:mid_, i) =>
+                Conv(kern, nreg * nchan[i] => nreg * nchan[i + 1], gelu),
+            1:(length(nchan) - 1),
+        )...,
+        sink = Conv(kern, nreg * nchan[end] => nten; use_bias = false),
+        symm = WrappedFunction() do σ
+            if D == 2
+                xx = selectdim(σ, 3, 1:1)
+                xy = (selectdim(σ, 3, 2:2) + selectdim(σ, 3, 3:3)) / 2
+                yy = selectdim(σ, 3, 4:4)
+                cat(xx, yy, xy; dims = 3)
+            else
+                xx = selectdim(σ, 4, 1:1)
+                yy = selectdim(σ, 4, 5:5)
+                zz = selectdim(σ, 4, 9:9)
+                xy = (selectdim(σ, 4, 2:2) + selectdim(σ, 4, 4:4)) / 2
+                yz = (selectdim(σ, 4, 6:6) + selectdim(σ, 4, 8:8)) / 2
+                zx = (selectdim(σ, 4, 3:3) + selectdim(σ, 4, 7:7)) / 2
+                cat(xx, yy, zz, xy, yz, zx; dims = 4)
+            end
+        end,
+    )
+    net |> display
+    ps =
+        (;
+        lift = (;
+            weight = kaiming_uniform(rng, T, nten, nchan[1]),
+            bias = zeros(T, nchan[1]),
+        ),
+        map(
+            i ->
+            Symbol(:mid_, i) => (;
+                weight = kaiming_uniform(rng, T, nreg, nchan[i + 1], nchan[i]),
+                bias = zeros(T, nchan[i + 1]),
+            ),
+            1:(length(nchan) - 1),
+        )...,
+        sink = (; weight = kaiming_uniform(rng, T, nten, nchan[end])),
+        symm = (;),
+    ) |> dev
+    st = map(Returns((;)), ps)
+    return (; project, net, ps, st)
+end
+
+"Same as `equivariant_net` but without the weight projection."
+function cnn(setup, nchan; same_as_equi)
+    (; D, backend) = setup
+    dev = adapt(backend)
+    # dev = identity
+    rng = Xoshiro(0)
+    f = f64
+    nt_nonsym = D^2
+    nt = D == 2 ? 3 : 6
+    (; elements) = group_stuff(D)
+    nreg = if same_as_equi
+        length(elements)
+    else
+        1
+    end
+    kern = ntuple(Returns(1), D)
+    net = Chain(;
+        lift = Conv(kern, nt_nonsym => nreg * nchan[1], gelu),
+        map(
+            i ->
+            Symbol(:mid_, i) =>
+                Conv(kern, nreg * nchan[i] => nreg * nchan[i + 1], gelu),
+            1:(length(nchan) - 1),
+        )...,
+        sink = Conv(kern, nreg * nchan[end] => nt; use_bias = false),
+        symm = WrappedFunction(identity),
+    )
+    net |> display
+    ps, st = Lux.setup(rng, net) |> f |> dev
+    project = identity # No projection
+    return (; project, net, ps, st)
+end
+
+# Wrap a trained network into a model usable as a closure inside `les!`.
+function fullchain(setup, net, project, ps, st, Δ)
+    (; D) = setup
+    ps = project(ps)
+    function model(x)
+        x = stack(x) # Convert named tuple to array
+        T = eltype(x)
+        s = size(x)
+        x = reshape(x, s..., 1) # Add singleton sample dimension
+        A2 = sum(abs2, x; dims = D + 1) # VGT squared norm
+        @. x /= (sqrt(A2) + eps(T)) # Normalize input gradient
+        y = net(x, ps, st) |> first # Apply model
+        @. y *= Δ^2 * A2 # Scale output with dimensional stuff
+        return reshape(y, s[1:D]..., :) # Remove singleton sample dimension
+    end
+    return model
+end
+
+# --- Tensor-basis neural network (TBNN) ---
+
+# 2D basis
+@inline nbasis(::Grid{2}) = 2 # Number of entries below
+@inline getbasis(::Grid{2}, S, R) = (
+    deviator(S),
+    deviator(S * R - R * S),
+    # deviator(S * S),
+    # deviator(R * R),
+)
+
+# # Second-order only basis:
+# # https://arc.aiaa.org/doi/10.2514/6.2022-0595
+# @inline nbasis(::Grid{3}) = 5
+# @inline getbasis(::Grid{3}, S, R) =
+#     (deviator(S), deviator(S * S), deviator(R * R), deviator(S * R - R * S))
+
+# New reduced basis:
+# https://arc.aiaa.org/doi/10.2514/6.2022-0595
+@inline nbasis(::Grid{3}) = 7
+@inline getbasis(::Grid{3}, S, R) = (
+    deviator(S),
+    deviator(S * S),
+    deviator(R * R),
+    deviator(S * R - R * S),
+    deviator(R * S * R),
+    deviator(R * S * S - S * S * R),
+    deviator(R * S * R * R - R * R * S * R),
+)
+
+# # Pope's basis:
+# @inline nbasis(::Grid{3}) = 10
+# @inline getbasis(::Grid{3}, S, R) = (
+#     deviator(S),
+#     deviator(S * R - R * S),
+#     deviator(S * S),
+#     deviator(R * R),
+#     deviator(R * S * S - S * S * R),
+#     deviator(S * R * R + R * R * S),
+#     deviator(R * S * R * R - R * R * S * R),
+#     deviator(S * R * S * S - S * S * R * S),
+#     deviator(R * R * S * S + S * S * R * R),
+#     deviator(R * S * S * R * R - R * R * S * S * R),
+# )
+
+# 2D invariants
+@inline ninvariant(::Grid{2}) = 2
+@inline getinvariants(::Grid{2}, S, R) = tr(S * S), tr(R * R)
+
+# 3D invariants
+@inline ninvariant(::Grid{3}) = 5
+@inline getinvariants(::Grid{3}, S, R) =
+    tr(S * S), tr(R * R), tr(S * S * S), tr(S * R * R), tr(S * S * R * R)
+
+# # 3D invariants
+# @inline ninvariant(::Grid{3}) = 6
+# @inline getinvariants(::Grid{3}, S, R) =
+#     tr(S * S), tr(R * R), tr(S * S * S), tr(S * R * R), tr(S * S * R * R), tr(S * S * R * R * S * R)
+
+"Compute deviatoric part of a tensor."
+@inline deviator(σ::SMatrix{2, 2}) = σ - tr(σ) / 2 * one(σ)
+@inline deviator(σ::SMatrix{3, 3}) = σ - tr(σ) / 3 * one(σ)
+
+@kernel function tb_kernel!(invariants, basis, grads, Δ, g::Grid{2})
+    nb, ni = nbasis(g), ninvariant(g)
+    I = @index(Global, Cartesian)
+    Gxx, Gyx, Gxy, Gyy = grads.xx[I], grads.yx[I], grads.xy[I], grads.yy[I]
+    A = @SMatrix [Gxx Gxy; Gyx Gyy]
+    A2 = sum(abs2, A)
+    A = A / (sqrt(A2) + eps(eltype(A))) # Normalize gradient
+    S, R = (A + A') / 2, (A - A') / 2
+    i, b = getinvariants(g, S, R), getbasis(g, S, R)
+    for iinv in Base.OneTo(ni)
+        invariants[I, iinv] = i[iinv]
+    end
+    for ibas in Base.OneTo(nb)
+        # Convert symmetric 2x2 tensor b to
+        # flattened symmetric tensor [xx, yy, xy].
+        # Also premultiply by Δ^2 * |A|^2, since the output tensor is
+        # Δ^2 * |A|^2 * coeffs * basis
+        basis[I, 1, ibas] = b[ibas][1, 1] * A2 * Δ^2
+        basis[I, 2, ibas] = b[ibas][2, 2] * A2 * Δ^2
+        basis[I, 3, ibas] = b[ibas][1, 2] * A2 * Δ^2
+    end
+end
+
+@kernel function tb_kernel!(invariants, basis, grads, Δ, g::Grid{3})
+    ni, nb = ninvariant(g), nbasis(g)
+    I = @index(Global, Cartesian)
+    Axx, Axy, Axz = grads.xx[I], grads.xy[I], grads.xz[I]
+    Ayx, Ayy, Ayz = grads.yx[I], grads.yy[I], grads.yz[I]
+    Azx, Azy, Azz = grads.zx[I], grads.zy[I], grads.zz[I]
+    A = @SMatrix [Axx Axy Axz; Ayx Ayy Ayz; Azx Azy Azz]
+    A2 = sum(abs2, A)
+    A = A / (sqrt(A2) + eps(eltype(A))) # Normalize gradient
+    S, R = (A + A') / 2, (A - A') / 2
+    i, b = getinvariants(g, S, R), getbasis(g, S, R)
+    for iinv in Base.OneTo(ni)
+        invariants[I, iinv] = i[iinv]
+    end
+    for ibas in Base.OneTo(nb)
+        # Convert symmetric 3x3 tensor b to flattened symmetric tensor [xx, yy, zz, xy, yz, zx]
+        # Also premultiply by Δ^2 * |A|^2, since the output tensor is
+        # Δ^2 * |A|^2 * coeffs * basis
+        basis[I, 1, ibas] = b[ibas][1, 1] * A2 * Δ^2
+        basis[I, 2, ibas] = b[ibas][2, 2] * A2 * Δ^2
+        basis[I, 3, ibas] = b[ibas][3, 3] * A2 * Δ^2
+        basis[I, 4, ibas] = b[ibas][1, 2] * A2 * Δ^2
+        basis[I, 5, ibas] = b[ibas][2, 3] * A2 * Δ^2
+        basis[I, 6, ibas] = b[ibas][3, 1] * A2 * Δ^2
+    end
+end
+
+function build_tensorbasis(grad, g, Δ)
+    T = typeof(g.l)
+    nx, nb, ni, nt = space_ndrange(g), nbasis(g), ninvariant(g), tensordim(g)
+    basis = KernelAbstractions.zeros(g.backend, T, nx..., nt, nb)
+    invariants = KernelAbstractions.zeros(g.backend, T, nx..., ni)
+    apply!(tb_kernel!, g, (invariants, basis, grad, Δ, g); ndrange = nx)
+    return invariants, basis
+end
+
+function getgradient(u, g)
+    D = dim(g)
+    A = tensorfield_nonsym(g)
+    AA = spacetensorfield_nonsym(g)
+    apply!(vectorgradient!, g, (A, u, g))
+    plan = plan_rfft(AA.xx)
+    fac = get_fft_fac(g)
+    for (AA, A) in zip(AA, A)
+        apply!(twothirds!, g, (A, g))
+        ldiv!(AA, plan, A) # Inverse RFFT
+        AA .*= fac
+    end
+    return AA
+end
+
+tbnn(net, ps, st, Δ, g) = function model(A)
+    nx = space_ndrange(g)
+    nt = tensordim(g)
+    nb = nbasis(g)
+
+    # Compute invariants and basis tensors
+    invariants, basis = build_tensorbasis(A, g, Δ)
+
+    # Compute coefficients
+    invariants = reshape(invariants, size(invariants)..., 1) # One sample
+    w = net(invariants, ps, st) |> first
+
+    # Basis contraction
+    b = reshape(basis, :, nt, nb)
+    w = reshape(w, :, 1, nb)
+    b .*= w
+    m = sum(b; dims = 3)
+    return reshape(m, nx..., nt)
+end
