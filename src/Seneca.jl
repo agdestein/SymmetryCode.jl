@@ -1,12 +1,12 @@
 # "Pseudo-spectral solver for the 3D incompressible Navier-Stokes equations."
 # module Seneca
 
-using AbstractFFTs
-using Adapt
-using FFTW
-using LinearAlgebra
-using KernelAbstractions
-using Random
+# using AbstractFFTs
+# using Adapt
+# using FFTW
+# using LinearAlgebra
+# using KernelAbstractions
+# using Random
 
 "Cartesian grid of a squared/cubic periodic domain."
 struct Grid{D, T, B}
@@ -316,7 +316,7 @@ function taylorgreen(g::Grid{3}, plan; doproject)
     y = reshape(x, 1, :)
     z = reshape(x, 1, 1, :)
     v = spacescalarfield(g)
-    fac = get_ffc_fac(g)
+    fac = get_fft_fac(g)
     #! format: off
     @. v =  sinpi(2x / l) * cospi(2y / l) * sinpi(2z / l) / 2; ux = plan * v; ux ./= fac
     @. v = -cospi(2x / l) * sinpi(2y / l) * sinpi(2z / l) / 2; uy = plan * v; uy ./= fac
@@ -366,7 +366,7 @@ function randomfield(profile, grid; totalenergy = 1, rng = Random.default_rng(),
     end
 
     # Maximum partially resolved wavenumber (sqrt(dim) * kmax)
-    kdiag = floor(Int, sqrt(3) * kmax)
+    kdiag = floor(Int, sqrt(dim(grid)) * kmax)
     # k23 = round(Int, 2 / 3 * kmax)
 
     # Sum of shell weights
@@ -782,17 +782,5 @@ function getshells(grid, shells)
         (; shell = i, inds = (inds, conjinds), k2 = (k2[inds], k2[conjinds]))
     end
 end
-
-# @kernel function vectorgradient!(Gij, u, grid::Grid{3}, i, j)
-#     I = @index(Global, Cartesian)
-#     kk = wavenumber(grid, I)
-#     uu = u.x[I], u.y[I], u.z[I]
-#     Gij[I] = im * kk[j] * uu[i]
-# end
-
-# @kernel function qcrit!(q, G, grid::Grid{3})
-#     I = @index(Global, Cartesian)
-#     g = G.xx[I]
-# end
 
 # end
