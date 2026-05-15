@@ -59,7 +59,7 @@ A "setup" is a NamedTuple — fields are destructured throughout the codebase (`
 
 ## Conventions to know before editing
 
-**FFT scaling.** Spectral fields use a non-standard `(n/l)^D` convention: forward divides by it (`to_spec!`), inverse multiplies by it (`to_phys!`). Both helpers live in `solver.jl`. Prefer them over inline `mul!(...); ./= fac` / `ldiv!(...); .*= fac`.
+**FFT scaling.** Spectral fields use the convention `û_code = F[u_phys] / n^D` (the FFTW forward, divided by the total point count). With this normalization, `Σ_k |û_code|² = ⟨|u|²⟩_phys`, so `energy(u)` returns the physical mean KE `⟨½ u_i u_i⟩` and `get_dissipation!` returns physical dissipation ε directly — these can be plugged straight into textbook turbulence formulas. `to_spec!` divides by `n^D`, `to_phys!` multiplies by `n^D`. Both helpers live in `solver.jl`; prefer them over inline `mul!(...); ./= fac` / `ldiv!(...); .*= fac`.
 
 **RFFT energy accounting.** Real FFTs store only `kx ∈ 0:kmax`. Energy/dot-product sums must add the contribution of `kx ∈ 1:kmax-1` twice — see `getenergy`, `spectralsum`, `spectraldot` in `solver.jl`. The `shells` returned by `getshells` carry both the storage indices and the conjugate-pair "energy" indices for this reason.
 

@@ -82,7 +82,10 @@ ndrange((; n)::Grid{3}) = div(n, 2) + 1, n, n
 "Range for physical space arrays."
 space_ndrange(g::Grid) = ntuple(Returns(g.n), dim(g))
 
-get_fft_fac(g::Grid) = (g.n / g.l)^dim(g)
+# FFT scaling factor. Choosing N = n^D makes û_code = F[u_phys] / N, the
+# normalization where Σ_k |û_code|² = ⟨|u|²⟩_phys directly (so `energy(u)`
+# returns physical mean KE and `get_dissipation!` returns physical ε).
+get_fft_fac(g::Grid) = g.n^dim(g)
 
 "Inverse RFFT with the solver's `(n/l)^D` scaling. Returns `phys`."
 to_phys!(phys, spec, plan, g) =
@@ -653,19 +656,19 @@ end
 function turbulence_statistics(u, visc, g, dissfield = similar(u.x, typeof(g.l)))
     D = dim(g)
     foreach(u -> apply!(twothirds!, g, (u, g)), u) # Empty ghost modes
-    e = sum(getenergy, u) / 2
-    uavg = sqrt(2 * e / D)
-    diss = get_dissipation!(dissfield, u, visc, g)
-    l_kol = (visc^3 / diss)^(1 / 4)
-    l_tay = sqrt(15 * visc / diss) * uavg
-    l_int = uavg^3 / diss
-    t_int = l_int / uavg
-    t_tay = l_tay / uavg
-    t_kol = visc / diss |> sqrt
-    Re_int = l_int * uavg / visc
-    Re_tay = l_tay * uavg / visc
-    Re_kol = l_kol * uavg / visc
-    return (; uavg, diss, l_int, l_tay, l_kol, t_int, t_tay, t_kol, Re_int, Re_tay, Re_kol)
+    e = sum(getenergy, u) / 2                       # ⟨½ u_i u_i⟩ in physical units
+    diss = get_dissipation!(dissfield, u, visc, g)  # ε in physical units
+    uavg = sqrt(2 * e / D)                          # per-component rms
+    l_kol = (visc^3 / diss)^(1 / 4)                 # Kolmogorov length η
+    l_tay = sqrt(15 * visc / diss) * uavg           # Taylor microscale λ
+    l_int = uavg^3 / diss                           # Crude integral scale L = u'³/ε
+    t_int = l_int / uavg                            # Eddy turnover L/u'
+    t_tay = l_tay / uavg                            # λ/u'
+    t_kol = sqrt(visc / diss)                       # Kolmogorov time τ_η
+    Re_int = l_int * uavg / visc                    # Re_L
+    Re_tay = l_tay * uavg / visc                    # Re_λ
+    kmax_eta = (π * g.n / g.l) * l_kol              # DNS-resolution check (≥ 1.5 is well-resolved)
+    return (; uavg, diss, l_int, l_tay, l_kol, t_int, t_tay, t_kol, Re_int, Re_tay, kmax_eta)
 end
 
 function forwardeuler!(f!, u, cache, grid, Δt; args...)
