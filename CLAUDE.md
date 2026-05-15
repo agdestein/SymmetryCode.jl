@@ -35,7 +35,7 @@ setup_*()  →  create_dns       →  dns.jld2
 ```
 
 Three setups in `src/setups.jl`:
-- `setup_laptop` — 2D, small (`n_dns=1024`), uses `default_backend()` (CUDA if available, else CPU).
+- `setup_laptop` — 2D, small (`n_dns=1024`), uses `default_backend()` (CUDA if available, else CPU). Quick prototyping only — the paper's experiments are 3D. Closure models that assume a 3D Kolmogorov inertial range (e.g. dynamic Smagorinsky) are not expected to perform well here, since the small-scale dynamics follow a 2D Kraichnan enstrophy cascade (`E(k)~k^{-3}`).
 - `setup_turbulator` — 3D, `n_dns=512`, hard-codes `CUDABackend()`.
 - `setup_snellius` — 3D, `n_dns=810`, writes to `/projects/prjs1757/...` (cluster path).
 

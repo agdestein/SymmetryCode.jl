@@ -105,7 +105,7 @@ end
     τ[zx][I] = -2 * nu * Szx
 end
 
-@kernel function smagorinsky_coefficient!(c, M, L, g::Grid{2})
+@kernel function smagorinsky_ml_mm!(ml, mm, M, L, g::Grid{2})
     I = @index(Global, Cartesian)
     Mxx, Myy, Mxy = M.xx[I], M.yy[I], M.xy[I]
     Lxx, Lyy, Lxy = L.xx[I], L.yy[I], L.xy[I]
@@ -115,15 +115,11 @@ end
     Lxx -= trace
     Lyy -= trace
 
-    # Dot products
-    ML = Mxx * Lxx + Myy * Lyy + 2 * Mxy * Lxy
-    MM = Mxx * Mxx + Myy * Myy + 2 * Mxy * Mxy
-
-    # Least squares fit (clipped to non-negative; zero strain → zero coefficient)
-    c[I] = ifelse(iszero(MM), zero(MM), max(-ML / MM, zero(MM)))
+    ml[I] = Mxx * Lxx + Myy * Lyy + 2 * Mxy * Lxy
+    mm[I] = Mxx * Mxx + Myy * Myy + 2 * Mxy * Mxy
 end
 
-@kernel function smagorinsky_coefficient!(c, M, L, g::Grid{3})
+@kernel function smagorinsky_ml_mm!(ml, mm, M, L, g::Grid{3})
     I = @index(Global, Cartesian)
     Mxx, Myy, Mzz, Mxy, Myz, Mzx = M.xx[I], M.yy[I], M.zz[I], M.xy[I], M.yz[I], M.zx[I]
     Lxx, Lyy, Lzz, Lxy, Lyz, Lzx = L.xx[I], L.yy[I], L.zz[I], L.xy[I], L.yz[I], L.zx[I]
@@ -134,12 +130,8 @@ end
     Lyy -= trace
     Lzz -= trace
 
-    # Dot products
-    ML = Mxx * Lxx + Myy * Lyy + Mzz * Lzz + 2 * Mxy * Lxy + 2 * Myz * Lyz + 2 * Mzx * Lzx
-    MM = Mxx * Mxx + Myy * Myy + Mzz * Mzz + 2 * Mxy * Mxy + 2 * Myz * Myz + 2 * Mzx * Mzx
-
-    # Least squares fit (clipped to non-negative; zero strain → zero coefficient)
-    c[I] = ifelse(iszero(MM), zero(MM), max(-ML / MM, zero(MM)))
+    ml[I] = Mxx * Lxx + Myy * Lyy + Mzz * Lzz + 2 * Mxy * Lxy + 2 * Myz * Lyz + 2 * Mzx * Lzx
+    mm[I] = Mxx * Mxx + Myy * Myy + Mzz * Mzz + 2 * Mxy * Mxy + 2 * Myz * Myz + 2 * Mzx * Mzx
 end
 
 function create_dynamic_smagorinsky(Δ, g)
@@ -153,7 +145,8 @@ function create_dynamic_smagorinsky(Δ, g)
     m1 = spacetensorfield(g)      # Smagorinsky tensor at grid level
     m2 = spacetensorfield(g)      # Smagorinsky tensor at combined-filter level
     τ = similar(space, space_ndrange(g)..., tensordim(g))
-    c = spacescalarfield(g)       # Dynamic coefficient
+    ml = spacescalarfield(g)      # Pointwise M:L for Lilly volume averaging
+    mm = spacescalarfield(g)      # Pointwise M:M for Lilly volume averaging
     utilde = vectorfield(g)       # Test-filtered velocity (spectral)
     v = spacevectorfield(g)
     σ = tensorfield(g)
@@ -209,8 +202,13 @@ function create_dynamic_smagorinsky(Δ, g)
             M .-= m2
         end
 
-        # Dynamic coefficient c = -ML/MM, then τ = c * m1
-        apply!(smagorinsky_coefficient!, g, (c, M, L, g))
+        # Dynamic coefficient via global Lilly average: c = -<ML>/<MM>, clipped.
+        # Valid because the laptop/turbulator/snellius setups are homogeneous on
+        # the periodic box, so spatial mean is the right statistical operation.
+        apply!(smagorinsky_ml_mm!, g, (ml, mm, M, L, g))
+        sum_ml = sum(ml)
+        sum_mm = sum(mm)
+        c = ifelse(iszero(sum_mm), zero(sum_mm), max(-sum_ml / sum_mm, zero(sum_mm)))
         for m1 in m1
             m1 .*= c
         end
