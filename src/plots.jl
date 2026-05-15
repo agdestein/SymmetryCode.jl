@@ -45,7 +45,15 @@ function plot_densities(setup; dolog)
     (; outdir, plotdir, name) = setup
     yscale = dolog ? log10 : identity
 
-    mkeys = [:ref, :smag, :clar, :tbnn, :equi, :conv]
+    mkeys = [
+             :ref,
+             :smag,
+             :dynsmag,
+             :clar,
+             # :tbnn,
+             # :equi,
+             # :conv,
+            ]
     # t_kol = mean(x -> x.t_kol, data.statistics_les)
 
     fig = Figure(; size = (800, 300))
@@ -87,7 +95,7 @@ function plot_densities(setup; dolog)
         xlims!(ax.xx, -0.1, 0.3)
         ylims!(ax.xx, 2.0e-2, 3.0e2)
     elseif name == "turbulator"
-        xlims!(ax.xx, -0.1, 0.2)
+        xlims!(ax.xx, -0.2, 0.2)
         ylims!(ax.xx, 2.0e-4, 3.0e2)
     elseif name == "snellius"
         xlims!(ax.xx, -0.1, 0.12)
@@ -99,7 +107,7 @@ function plot_densities(setup; dolog)
         xlims!(ax.xy, -0.1, 0.1)
         ylims!(ax.xy, 1.0e-1, 5.0e2)
     elseif name == "turbulator"
-        xlims!(ax.xy, -0.1, 0.1)
+        xlims!(ax.xy, -0.15, 0.15)
         ylims!(ax.xy, 1.0e-3, 3.0e2)
     elseif name == "snellius"
         xlims!(ax.xy, -0.12, 0.12)
@@ -111,7 +119,7 @@ function plot_densities(setup; dolog)
         xlims!(ax.diss, -0.3, 0.3)
         ylims!(ax.diss, 1.0e-1, 1.0e2)
     elseif name == "turbulator"
-        xlims!(ax.diss, -0.4, 0.1)
+        xlims!(ax.diss, -0.5, 0.15)
         ylims!(ax.diss, 1.0e-3, 1.0e2)
     elseif name == "snellius"
         xlims!(ax.diss, -0.5, 0.12)
@@ -149,10 +157,11 @@ function plot_velocities(setup, data, upostfiles, comp)
         :ref,
         :nomo,
         :smag,
+        :dynsmag,
         :clar,
-        :tbnn,
-        :equi,
-        :conv,
+        # :tbnn,
+        # :equi,
+        # :conv,
     ]
     for (k, key) in enumerate(modelkeys)
         @info "Plotting velocity for $(key)"
@@ -196,9 +205,14 @@ end
 function plot_qr(setup)
     (; name) = setup
     modelkeys = [
-        :ref, :nomo, :smag,
-        # :clar,
-        :tbnn, :equi, :conv,
+        :ref,
+        :nomo,
+        :smag,
+        :dynsmag,
+        :clar,
+        # :tbnn,
+        # :equi,
+        # :conv,
     ]
     qr = map(key -> key => load_object("$(setup.outdir)/qr_$(key).jld2"), modelkeys)
     qr = NamedTuple(qr)
@@ -213,6 +227,7 @@ function plot_qr(setup)
         ref = colorvec[1],
         nomo = colorvec[lescolor],
         smag = colorvec[lescolor],
+        dynsmag = colorvec[lescolor],
         vers = colorvec[lescolor],
         clar = colorvec[lescolor],
         tbnn = colorvec[lescolor],
@@ -342,7 +357,7 @@ function plot_sfs(setup, data)
     plan = plan_rfft(τ.xx)
 
     # Time index
-    t = 100
+    t = 30
 
     τcpu = data.outputs[t]
     for (τ, τcpu) in zip(τ, τcpu)
@@ -352,7 +367,14 @@ function plot_sfs(setup, data)
     end
     τ_ref = τ |> cpu_device()
 
-    modelkeys = [:smag, :clar, :tbnn, :equi, :conv]
+    modelkeys = [
+                 :smag,
+                 :dynsmag,
+                 :clar,
+                 # :tbnn,
+                 # :equi,
+                 # :conv,
+                ]
     τ_les = map(modelkeys) do key
         τles = load_object("$(setup.outdir)/sfs_$(key).jld2")[t]
         make_tracefree!(τles, g)
@@ -529,7 +551,9 @@ function plot_spectrum_data(setup, data)
     elseif D == 3
         C = 1.6
         s_kol = C * diss^(2 / 3) * k_dns .^ (-5 / 3)
-        escale = C^(-1) * diss^(-2 / 3) * eta^(-5 / 3)
+        # escale = C^(-1) * diss^(-2 / 3) * eta^(-5 / 3)
+        escale = 1.0
+        eta = 1.0
     end
 
     fig = Figure(; size = (400, 340))
@@ -635,11 +659,13 @@ function plot_spectrum_dns(setup)
         kkolmo = 2π / l * [1, g_dns.n / 8]
         C = 1.6
         kolmo = @. C * stat.diss^(2 / 3) * kkolmo^(-5 / 3)
-        escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
-        kscale = stat.l_kol
+        # escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
+        # kscale = stat.l_kol
+        escale = 1.0
+        kscale = 1.0
     end
     # ylims!(ax, 1.0e-4, 1.0e8)
-    ylims!(ax, 1.0e-14, 1.0e0)
+    # ylims!(ax, 1.0e-14, 1.0e0)
 
     # # Banded force stuff
     # band = getband(g_dns, force[1])

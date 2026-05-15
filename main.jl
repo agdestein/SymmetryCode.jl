@@ -243,7 +243,7 @@ let
         horizontal = true,
         nbanks = 3,
     )
-    ylims!(ax, -0.03, 0.5)
+    # ylims!(ax, -0.03, 0.5)
     rowgap!(fig.layout, 5)
     save("$(setup.plotdir)/error_post.pdf", fig; backend = CairoMakie)
     fig
@@ -258,6 +258,7 @@ S.predict_sfs(
     (;
         #
         smag = m_smag,
+        dynsmag = m_dynsmag,
         clar = m_clar,
         # tbnn = m_tbnn,
         # equi = m_equi,
@@ -269,24 +270,25 @@ S.compute_densities(
     setup, data, [
         #
         :smag,
+        :dynsmag,
         :clar,
-        :tbnn,
-        :equi,
-        :conv,
+        # :tbnn,
+        # :equi,
+        # :conv,
     ]
 )
 
-S.plot_densities(setup, data; dolog = true)
+S.plot_densities(setup; dolog = true)
 
 prediction_error_prior = let
     modelkeys = [
         :nomo,
         :smag,
-        # :vers,
+        :dynsmag,
         :clar,
-        :tbnn,
-        :equi,
-        :conv,
+        # :tbnn,
+        # :equi,
+        # :conv,
     ]
     S.apriori_error(setup, data, modelkeys)
 end
@@ -301,7 +303,15 @@ prediction_error_prior |> e -> map(x -> round(x.crosscor; sigdigits = 4), e) |> 
 equi_errors_prior_file = joinpath(setup.outdir, "equi-errors-prior.jld2")
 
 let
-    models = (; smag = m_smag, clar = m_clar, tbnn = m_tbnn, equi = m_equi, conv = m_conv)
+    # u = map(copy, data.inputs) |> adapt(setup.backend)
+    models = (;
+              smag = m_smag,
+              dynsmag = m_dynsmag,
+              clar = m_clar,
+              # tbnn = m_tbnn,
+              # equi = m_equi,
+              # conv = m_conv,
+             )
     errors = S.apriori_equivariance_error(; u, setup, models)
     save_object(equi_errors_prior_file, errors)
 end
@@ -323,9 +333,9 @@ let
         nomo = m_nomo,
         smag = m_smag,
         clar = m_clar,
-        tbnn = m_tbnn,
-        equi = m_equi,
-        conv = m_conv,
+        # tbnn = m_tbnn,
+        # equi = m_equi,
+        # conv = m_conv,
     )
     ustart = data[1][end] |> adapt(setup.backend)
     (; elements) = S.group_stuff(setup.D)
@@ -413,7 +423,7 @@ end
 S.plot_sfs(setup, data)
 
 let
-    setup = S.setup_turbulator_medium()
+    # setup = S.setup_turbulator_medium()
     (; D, l, n_dns, visc, backend) = setup
     g_dns = S.Grid{D}(; l, n = n_dns, backend)
     u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)

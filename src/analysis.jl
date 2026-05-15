@@ -27,7 +27,7 @@ function predict_sfs(setup, data, models)
             end
 
             # Prediction by LES model
-            unstack_symtensor(m(AA), g) |> cpu_device()
+            unstack_symtensor(m(u, AA), g) |> cpu_device()
         end
         save_object("$(outdir)/sfs_$(key).jld2", τ_series)
     end
