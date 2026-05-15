@@ -274,7 +274,7 @@ function get_dissipation_errors(; setup, u_dns, models)
     ubar = vectorfield(g_les)
     for (ubar, u_dns) in zip(ubar, u_dns)
         apply!(cutoff!, g_les, (ubar, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, nshell + 1, g_les))
+        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
     end
     τhat = sfs(u_dns, g_dns, g_les, Δ)
     τ = spacetensorfield(g_les)
