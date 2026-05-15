@@ -20,4 +20,4 @@
 echo "Slurm job ID: $SLURM_JOB_ID"
 echo "Slurm array task ID: $SLURM_ARRAY_TASK_ID"
 
-julia --project testspectral.jl
+julia --project main.jl
