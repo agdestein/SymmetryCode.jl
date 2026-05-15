@@ -155,30 +155,30 @@ m_dynsmag = S.create_dynamic_smagorinsky(
 
 m_clar = S.create_clark(setup.Δ, S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
 
-m_tbnn, train_tbnn = S.create_tbnn(setup, data, false);
-
-m_equi, train_equi = S.create_equi(setup, data, false);
-
-m_conv, train_conv = S.create_conv(setup, data, false);
-
-S.plot_training(setup, train_tbnn, train_equi, train_conv)
-
-map(
-    t -> round(t; digits = 1),
-    (;
-        tbnn = train_tbnn.timing,
-        equi = train_equi.timing,
-        conv = train_conv.timing,
-    ),
-) |> pairs |> display
-flush(stdout)
+# m_tbnn, train_tbnn = S.create_tbnn(setup, data, false);
+#
+# m_equi, train_equi = S.create_equi(setup, data, false);
+#
+# m_conv, train_conv = S.create_conv(setup, data, false);
+#
+# S.plot_training(setup, train_tbnn, train_equi, train_conv)
+#
+# map(
+#     t -> round(t; digits = 1),
+#     (;
+#         tbnn = train_tbnn.timing,
+#         equi = train_equi.timing,
+#         conv = train_conv.timing,
+#     ),
+# ) |> pairs |> display
+# flush(stdout)
 
 upostfiles = map(
     name -> "$(setup.outdir)/u-post-$(name).jld2",
     (;
         nomo = "nomo",
         smag = "smag",
-        # dynsmag = "dynsmag",
+        dynsmag = "dynsmag",
         # vers = "vers",
         clar = "clar",
         # tbnn = "tbnn",
@@ -191,7 +191,7 @@ let
     models = (;
         nomo = m_nomo,
         smag = m_smag,
-        # dynsmag = m_dynsmag,
+        dynsmag = m_dynsmag,
         # # vers = m_vers,
         clar = m_clar,
         # tbnn = m_tbnn,

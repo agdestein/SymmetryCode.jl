@@ -520,9 +520,12 @@ function plot_spectrum_data(setup, data)
     k_dns = 2π / setup.l * eachindex(s_dns)
     k_les = 2π / setup.l * eachindex(s_les)
     if D == 2
-        C = 4.0e1
-        s_kol = C * diss^(2 / 3) * k_dns .^ (-3)
-        escale = C^(-1) * diss^(-2 / 3) * eta^(-3)
+        # C = 4.0e1
+        # s_kol = C * diss^(2 / 3) * k_dns .^ (-3)
+        # escale = C^(-1) * diss^(-2 / 3) * eta^(-3)
+        s_kol = 1.0e1 * k_dns .^ (-3)
+        escale = 1.0
+        eta = 1.0
     elseif D == 3
         C = 1.6
         s_kol = C * diss^(2 / 3) * k_dns .^ (-5 / 3)
@@ -534,10 +537,12 @@ function plot_spectrum_data(setup, data)
         fig[1, 1];
         xscale = log10,
         yscale = log10,
-        xlabel = L"\kappa \eta",
-        ylabel = L"\epsilon^{-2 / 3} \eta^{5 / 3} E(\kappa)",
-        xlabelsize = 20,
-        ylabelsize = 20,
+        # xlabel = L"\kappa \eta",
+        # ylabel = L"\epsilon^{-2 / 3} \eta^{5 / 3} E(\kappa)",
+        # xlabelsize = 20,
+        # ylabelsize = 20,
+        xlabel = "Wavenumber",
+        ylabel = "Energy",
     )
 
     # Banded force stuff
@@ -606,22 +611,26 @@ function plot_spectrum_dns(setup)
         fig[1, 1];
         xscale = log10,
         yscale = log10,
-        xlabel = L"\kappa \eta",
-        ylabel = if D == 2
-            L"C^{-1} \epsilon_\omega^{-2 / 3} \eta^{-5 / 3} E(\kappa)"
-        else
-            L"C^{-1} \epsilon^{-2 / 3} \eta^{-3} E(\kappa)"
-        end,
-        xlabelsize = 20,
-        ylabelsize = 20,
+        # xlabel = L"\kappa \eta",
+        # ylabel = if D == 2
+        #     L"C^{-1} \epsilon_\omega^{-2 / 3} \eta^{-5 / 3} E(\kappa)"
+        # else
+        #     L"C^{-1} \epsilon^{-2 / 3} \eta^{-3} E(\kappa)"
+        # end,
+        # xlabelsize = 20,
+        # ylabelsize = 20,
+        xlabel = "Wavenumber",
+        ylabel = "Energy",
     )
     if D == 2
-        C = 4
+        # C = 4
         kkolmo = 2π / l * logrange(1, g_dns.n / 2, 100)
-        lω_kol = stat.enstrophy_diss^(-1 / 6) * visc^(1 / 2)
-        kolmo = @. C * stat.enstrophy_diss^(2 / 3) * kkolmo^(-3)
-        escale = C^(-1) * stat.enstrophy_diss^(-2 / 3) * lω_kol^(-3)
-        kscale = lω_kol
+        # lω_kol = stat.enstrophy_diss^(-1 / 6) * visc^(1 / 2)
+        # kolmo = @. C * stat.enstrophy_diss^(2 / 3) * kkolmo^(-3)
+        # escale = C^(-1) * stat.enstrophy_diss^(-2 / 3) * lω_kol^(-3)
+        # kscale = lω_kol
+        kscale, escale = 1.0, 1.0
+        kolmo = @. 1e2 * kkolmo^(-3)
     elseif D == 3
         kkolmo = 2π / l * [1, g_dns.n / 8]
         C = 1.6
@@ -629,7 +638,8 @@ function plot_spectrum_dns(setup)
         escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
         kscale = stat.l_kol
     end
-    ylims!(ax, 1.0e-4, 1.0e8)
+    # ylims!(ax, 1.0e-4, 1.0e8)
+    ylims!(ax, 1.0e-14, 1.0e0)
 
     # # Banded force stuff
     # band = getband(g_dns, force[1])
@@ -683,9 +693,12 @@ function plot_spectrum_les(setup, data, les_stat)
     eta = mean(s -> s.l_kol, data.statistics_dns)
     k = 2π / setup.l * eachindex(s_ref)
     if D == 2
-        C = 1.6
-        s_kol = C * diss^(2 / 3) * k .^ (-3)
-        escale = C^(-1) * diss^(-2 / 3) * eta^(-3)
+        # C = 1.6
+        # s_kol = C * diss^(2 / 3) * k .^ (-3)
+        # escale = C^(-1) * diss^(-2 / 3) * eta^(-3)
+        eta = 1.0
+        escale = 1.0
+        s_kol = 1.0e1 .* k .^ (-3)
     elseif D == 3
         C = 1.6
         s_kol = C * diss^(2 / 3) * k .^ (-5 / 3)
@@ -698,10 +711,12 @@ function plot_spectrum_les(setup, data, les_stat)
         fig[1, 1];
         xscale = log10,
         yscale = log10,
-        xlabel = L"\kappa \eta",
-        ylabel = L"\epsilon^{-2 / 3} \eta^{5 / 3} E(\kappa)",
-        xlabelsize = 20,
-        ylabelsize = 20,
+        # xlabel = L"\kappa \eta",
+        # ylabel = L"\epsilon^{-2 / 3} \eta^{5 / 3} E(\kappa)",
+        # xlabelsize = 20,
+        # ylabelsize = 20,
+        xlabel = "Wavenumber",
+        ylabel = "Energy",
     )
     lines!(ax, eta * k, escale * s_ref; label = "Reference")
     for key in keys(s_les)

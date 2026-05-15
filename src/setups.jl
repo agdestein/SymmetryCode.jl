@@ -1,5 +1,5 @@
 function setup_laptop()
-    l = 2π
+    l = 1.0
     n_dns = 1024
     n_les = 64
     visc = 1.0e-5
@@ -18,7 +18,7 @@ function setup_laptop()
         visc,
         cfl = 0.35,
         warmup = (; totalenergy = 0.5, tstop = 5.0, seed = 0),
-        datagen = (; nstep = 100, nsubstep = 25),
+        datagen = (; nstep = 200, nsubstep = 100),
         backend = default_backend(),
     )
 end
