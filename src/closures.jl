@@ -151,7 +151,7 @@ function create_dynamic_smagorinsky(Δ, g)
     v = spacevectorfield(g)
     σ = tensorfield(g)
     σtilde = tensorfield(g)
-    plan = plan_rfft(c)
+    plan = plan_rfft(ml)
 
     D = dim(g)
     Δtilde = 2 * Δ                   # Test filter width
@@ -189,8 +189,8 @@ function create_dynamic_smagorinsky(Δ, g)
         end
 
         # Smagorinsky tensors at the two filter levels
-        apply!(smagorinsky_tensor!, g, (m1, S, Δ, g))
-        apply!(smagorinsky_tensor!, g, (m2, Stilde, Δdouble, g))
+        apply!(smagorinsky_tensor!, g, (m1, S, Δ, g); ndrange = space_ndrange(g))
+        apply!(smagorinsky_tensor!, g, (m2, Stilde, Δdouble, g); ndrange = space_ndrange(g))
 
         # M = tilde(m1) - m2; m1 is dealiased in place so it can be reused at the end
         for (m1, M) in zip(m1, M)
@@ -205,7 +205,7 @@ function create_dynamic_smagorinsky(Δ, g)
         # Dynamic coefficient via global Lilly average: c = -<ML>/<MM>, clipped.
         # Valid because the laptop/turbulator/snellius setups are homogeneous on
         # the periodic box, so spatial mean is the right statistical operation.
-        apply!(smagorinsky_ml_mm!, g, (ml, mm, M, L, g))
+        apply!(smagorinsky_ml_mm!, g, (ml, mm, M, L, g); ndrange = space_ndrange(g))
         sum_ml = sum(ml)
         sum_mm = sum(mm)
         c = ifelse(iszero(sum_mm), zero(sum_mm), max(-sum_ml / sum_mm, zero(sum_mm)))
