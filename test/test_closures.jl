@@ -32,17 +32,25 @@ end
     @test all(τ[:, :, 3] .≈ -2 * CS^2 * Δ^2 * abs(a) * (a / 2))
 end
 
-@testset "smagorinsky_coefficient! handles MM = 0" begin
-    # When M is identically zero, the least-squares coefficient must be 0
-    # rather than NaN (the bugfix we landed earlier).
+@testset "dynamic Smagorinsky coefficient handles ⟨MM⟩ = 0" begin
+    # When M is identically zero, the global Lilly average -⟨ML⟩/⟨MM⟩ must
+    # clip to 0 rather than produce NaN. The guard moved from the old
+    # smagorinsky_coefficient! kernel into create_dynamic_smagorinsky; this
+    # mirrors the exact reduction it performs.
     g = S.Grid{2}(; l = 2π, n = 4)
-    c = S.spacescalarfield(g)
+    ml = S.spacescalarfield(g)
+    mm = S.spacescalarfield(g)
     M = S.spacetensorfield(g)
     L = S.spacetensorfield(g)
     foreach(c -> fill!(c, 0), M)
     foreach(c -> fill!(c, 1.0), L)  # arbitrary non-zero
-    S.apply!(S.smagorinsky_coefficient!, g, (c, M, L, g); ndrange = S.space_ndrange(g))
-    @test all(iszero, c)
+    S.apply!(S.smagorinsky_ml_mm!, g, (ml, mm, M, L, g); ndrange = S.space_ndrange(g))
+    @test all(iszero, mm)
+    sum_ml = sum(ml)
+    sum_mm = sum(mm)
+    c = ifelse(iszero(sum_mm), zero(sum_mm), max(-sum_ml / sum_mm, zero(sum_mm)))
+    @test c == 0
+    @test !isnan(c)
 end
 
 @testset "create_verstappen rejects 2D" begin

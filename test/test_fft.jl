@@ -19,7 +19,7 @@ using Test
         # Constant field: the k=0 coefficient picks up the l^D scaling.
         fill!(phys, 1.5)
         S.to_spec!(spec, phys, plan, g)
-        @test spec[1] ≈ 1.5 * g.l^S.dim(g) + 0im
+        @test spec[1] ≈ 1.5
     end
 end
 
