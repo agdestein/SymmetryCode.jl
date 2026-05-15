@@ -222,7 +222,7 @@ function create_dynamic_smagorinsky(Δ, g)
         end
         for (L, σ, σtilde) in zip(L, σ, σtilde)
             ldiv!(space, plan, σ)
-            space ./= fac
+            space .*= fac
             copyto!(L, space)
             ldiv!(space, plan, σtilde)
             space .*= fac
