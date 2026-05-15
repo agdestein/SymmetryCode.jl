@@ -3,20 +3,19 @@
 "Compute LES right-hand side with closure model (put force in `du`)."
 function les!(du, u, grid, cache; model, visc)
     D = dim(grid)
-    (; plan, σ, vi_vj, v, G) = cache
+    (; plan, σ, vi_vj, v, G, GG) = cache
 
     # Coarse DNS stress
     stress!(σ, vi_vj, v, u, plan, visc, grid)
 
-    # Closure model stress (in physical space)
+    # Get VGT in physical space
     apply!(vectorgradient!, grid, (G, u, grid))
-    fac = get_fft_fac(grid)
-    GG = map(G) do G
+    for (GG, G) in zip(GG, G)
         apply!(twothirds!, grid, (G, grid))
-        res = plan \ G
-        res .*= fac
-        return res
+        to_phys!(GG, G, plan, grid)
     end
+
+    # Closure model stress (in physical space)
     y = model(u, GG)
 
     # Add closure stress to existing stress (in spectral space).
@@ -34,7 +33,7 @@ function les!(du, u, grid, cache; model, visc)
 end
 
 function solve_les(; data, setup, models, files)
-    (; D, l, n_les, backend, visc, Δ, cfl) = setup
+    (; D, l, n_les, backend, visc, cfl) = setup
     grid = Grid{D}(; l, n = n_les, backend)
 
     u_les = data.inputs[1]
@@ -67,7 +66,11 @@ function solve_les!(u; times, grid, visc, model, cfl)
     cache = getcache(grid)
     if !isnothing(model)
         # Allocate velocity gradient for closure
-        cache = (; cache..., G = tensorfield_nonsym(grid))
+        cache = (;
+            cache...,
+            G = tensorfield_nonsym(grid),
+            GG = spacetensorfield_nonsym(grid),
+        )
     end
 
     shells = energy_shells(grid, [1, 2], u)
