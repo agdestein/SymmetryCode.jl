@@ -182,38 +182,55 @@ end
 end
 
 function create_dynamic_smagorinsky(Δ, g)
-    # Allocate arrays (these can probably be fewer with some clever re-use)
-    space = spacescalarfield(g) # Temporary spatial field
-    spect = scalarfield(g) # Temporary spectral field
-    Shat = tensorfield(g) # Strain-rate
-    S = spacetensorfield(g) # Strain-rate
-    L = spacetensorfield(g) # Non-linearity commutator
-    M = spacetensorfield(g) # Smagorinsky-tensor commutator
-    m1 = spacetensorfield(g) # Original Smagorinsky-tensor
-    m2 = spacetensorfield(g) # Double-filter Smagorinsky tensor
+    space = spacescalarfield(g)
+    spect = scalarfield(g)
+    Shat = tensorfield(g)
+    S = spacetensorfield(g)       # Strain rate at grid-filter level
+    Stilde = spacetensorfield(g)  # Strain rate at test-filter level
+    L = spacetensorfield(g)       # Germano resolved-stress commutator
+    M = spacetensorfield(g)       # Smagorinsky-tensor commutator
+    m1 = spacetensorfield(g)      # Smagorinsky tensor at grid level
+    m2 = spacetensorfield(g)      # Smagorinsky tensor at combined-filter level
     τ = similar(space, space_ndrange(g)..., tensordim(g))
-    c = spacescalarfield(g) # Dynamic Smagorinsky coefficient field
-    utilde = vectorfield(g) # Test-filtered ubar (effectively double-filtered)
+    c = spacescalarfield(g)       # Dynamic coefficient
+    utilde = vectorfield(g)       # Test-filtered velocity (spectral)
     v = spacevectorfield(g)
     σ = tensorfield(g)
     σtilde = tensorfield(g)
     plan = plan_rfft(c)
 
     D = dim(g)
-    Δtilde = 2 * Δ # Filter width of test filter (single Gaussian, twice the original width)
-    Δdouble = sqrt(Δtilde^2 + Δ^2) # Filter width of double-Gaussian (original + test)
+    Δtilde = 2 * Δ                   # Test filter width
+    Δdouble = sqrt(Δtilde^2 + Δ^2)   # Combined grid + test filter width
     fac = get_fft_fac(g)
 
-    # Model takes spectral ubar as input
+    # Spectral → physical with the solver's FFT scaling convention
+    to_phys!(phys, spec) = (ldiv!(phys, plan, spec); phys .*= fac)
+
+    # Round-trip a physical scalar component through 2/3 truncation
+    dealias_phys!(phys) = begin
+        mul!(spect, plan, phys)
+        apply!(twothirds!, g, (spect, g))
+        ldiv!(phys, plan, spect)
+    end
+
+    # Test-filter a physical scalar component in place
+    test_filter_phys!(phys) = begin
+        mul!(spect, plan, phys)
+        apply!(gaussianfilter!, g, (spect, Δtilde, g))
+        apply!(twothirds!, g, (spect, g))
+        ldiv!(phys, plan, spect)
+    end
+
     function model(u, G)
-        # Test-filter u
+        # Test-filtered velocity (spectral)
         for (utilde, u) in zip(utilde, u)
             copyto!(utilde, u)
             apply!(gaussianfilter!, g, (utilde, Δtilde, g))
             apply!(twothirds!, g, (utilde, g))
         end
 
-        # Nonlinearities and L
+        # Germano L = tilde(uu) - tilde(u) tilde(u), in physical space
         nonlinearity!(σ, space, v, u, plan, g)
         nonlinearity!(σtilde, space, v, utilde, plan, g)
         for σ in σ
@@ -221,60 +238,40 @@ function create_dynamic_smagorinsky(Δ, g)
             apply!(twothirds!, g, (σ, g))
         end
         for (L, σ, σtilde) in zip(L, σ, σtilde)
-            ldiv!(space, plan, σ)
-            space .*= fac
-            copyto!(L, space)
-            ldiv!(space, plan, σtilde)
-            space .*= fac
+            to_phys!(L, σ)
+            to_phys!(space, σtilde)
             L .-= space
-            # Now L = tilde(σ) - σ(tilde)
         end
 
-        # Original strainrate
+        # Physical strain rate at grid (S) and combined-filter (Stilde) levels
         apply!(strainrate!, g, (Shat, u, g))
-        for (S, Shat) in zip(S, Shat)
+        for (S, Stilde, Shat) in zip(S, Stilde, Shat)
             apply!(twothirds!, g, (Shat, g))
-            ldiv!(S, plan, Shat) # Inverse RFFT
-            S .*= fac # FFT factor
+            to_phys!(S, Shat)
+            apply!(gaussianfilter!, g, (Shat, Δtilde, g))
+            apply!(twothirds!, g, (Shat, g))
+            to_phys!(Stilde, Shat)
         end
 
-        # Original Smagorinsky tensor
+        # Smagorinsky tensors at the two filter levels
         apply!(smagorinsky_tensor!, g, (m1, S, Δ, g))
+        apply!(smagorinsky_tensor!, g, (m2, Stilde, Δdouble, g))
 
-        # Filter original tensor m1, put result in M because we need unfiltered m1 for later
+        # M = tilde(m1) - m2; m1 is dealiased in place so it can be reused at the end
         for (m1, M) in zip(m1, M)
-            mul!(spect, plan, m1) # RFFT
-            apply!(twothirds!, g, (spect, g))
-            ldiv!(m1, plan, spect) # Inverse RFFT
-            mul!(spect, plan, m1) # RFFT
-            apply!(gaussianfilter!, g, (spect, Δtilde, g)) # Test filter
-            apply!(twothirds!, g, (spect, g))
-            ldiv!(M, plan, spect) # Inverse RFFT
+            dealias_phys!(m1)
+            copyto!(M, m1)
+            test_filter_phys!(M)
         end
-
-        # Tensor applied to test-filtered strainrate
-        for (S, Shat) in zip(S, Shat)
-            apply!(gaussianfilter!, g, (Shat, Δtilde, g)) # Test filter
-            apply!(twothirds!, g, (Shat, g))
-            ldiv!(S, plan, Shat) # Inverse RFFT
-            S .*= fac # FFT factor
-        end
-        apply!(smagorinsky_tensor!, g, (m2, S, Δdouble, g)) # Note: width from double-filter
-
-        # Compute commutator between smagtensor and test filter, put result in M
         for (M, m2) in zip(M, m2)
             M .-= m2
         end
 
-        # Estimate Smagorinsky coefficients from smag-commutator M and nonlinearity-commutator L
+        # Dynamic coefficient c = -ML/MM, then τ = c * m1
         apply!(smagorinsky_coefficient!, g, (c, M, L, g))
-
-        # Multiply original Smagorinsky tensor with coefficients
         for m1 in m1
             m1 .*= c
         end
-
-        # This now contains the correctly weighted original Smagorinsky tensor
         for (i, m1) in enumerate(m1)
             copyto!(selectdim(τ, D + 1, i), m1)
         end
