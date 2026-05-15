@@ -6,15 +6,18 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Research code for the paper "Comparison of Data-Driven Symmetry-Preserving Closure Models for Large-Eddy Simulation" (Agdestein & Sanderse, 2026). It is a pseudo-spectral incompressible Navier–Stokes solver in 2D/3D with classical and learned LES closure models, plus the analysis and plotting pipeline used to generate the paper's figures.
 
-There is no test suite. CI only runs CompatHelper. The repository is driven from the REPL via `main.jl`.
+CI only runs CompatHelper. The repository is driven from the REPL via `main.jl`.
 
 ## Commands
 
 ```bash
 julia --project=. -e 'using SymmetryCode'   # precompile; the primary smoke check
+julia --project=test test/runtests.jl       # run the test suite
 julia --project main.jl                     # run the whole pipeline (long; usually run interactively)
 sbatch job.sh                               # SLURM submission; runs main.jl on a single H100
 ```
+
+The test environment is a separate project under `test/` that uses `[sources] SymmetryCode = {path = ".."}` to depend on the dev checkout — `Pkg.instantiate` from `test/` is enough to set it up.
 
 `main.jl` is the canonical pipeline driver. It is structured as a script meant to be evaluated section by section in a REPL — sections create artifacts (`output/<name>/dns.jld2`, `data.jld2`, `ps-*.jld2`, `u-post-*.jld2`, `kde_*.jld2`, …) that downstream sections consume. Reruns short-circuit if the artifact already exists for that setup.
 
