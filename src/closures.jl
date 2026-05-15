@@ -15,6 +15,7 @@
     ττ[I, 1] = τ[1, 1]
     ττ[I, 2] = τ[2, 2]
     ττ[I, 3] = τ[1, 2]
+    return nothing
 end
 @inline function store_symtensor!(ττ, I, τ, ::Grid{3})
     ττ[I, 1] = τ[1, 1]
@@ -23,6 +24,7 @@ end
     ττ[I, 4] = τ[1, 2]
     ττ[I, 5] = τ[2, 3]
     ττ[I, 6] = τ[3, 1]
+    return nothing
 end
 
 "Allocate a packed symmetric-tensor field and dispatch `kernel!` over physical space."

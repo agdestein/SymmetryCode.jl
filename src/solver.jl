@@ -609,9 +609,9 @@ contract_dissipation(τ, S, ::Grid{2}) =
     @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
 contract_dissipation(τ, S, ::Grid{3}) =
     @. τ.xx * S.xx +
-       τ.yy * S.yy +
-       τ.zz * S.zz +
-       2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+    τ.yy * S.yy +
+    τ.zz * S.zz +
+    2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
 
 @kernel function strainrate!(S, u, g::Grid{2})
     I = @index(Global, Cartesian)
