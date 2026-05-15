@@ -171,12 +171,10 @@ function inverse_vector_fourier(u, g)
     uu = spacevectorfield(g)
     temp = scalarfield(g)
     plan = plan_rfft(uu.x)
-    fac = get_fft_fac(g)
     for (uu, u) in zip(uu, u)
         copyto!(temp, u)
-        temp .*= fac
         apply!(twothirds!, g, (temp, g))
-        ldiv!(uu, plan, temp)
+        to_phys!(uu, temp, plan, g)
     end
     return uu
 end
@@ -184,10 +182,8 @@ end
 function forward_vector_fourier(uu, g)
     u = vectorfield(g)
     plan = plan_rfft(uu.x)
-    fac = get_fft_fac(g)
     for (uu, u) in zip(uu, u)
-        mul!(u, plan, uu)
-        u ./= fac
+        to_spec!(u, uu, plan, g)
     end
     return u
 end

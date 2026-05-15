@@ -84,6 +84,31 @@ space_ndrange(g::Grid) = ntuple(Returns(g.n), dim(g))
 
 get_fft_fac(g::Grid) = (g.n / g.l)^dim(g)
 
+"Inverse RFFT with the solver's `(n/l)^D` scaling. Returns `phys`."
+to_phys!(phys, spec, plan, g) =
+    (ldiv!(phys, plan, spec); phys .*= get_fft_fac(g); phys)
+
+"Forward RFFT with the solver's `(n/l)^D` scaling. Returns `spec`."
+to_spec!(spec, phys, plan, g) =
+    (mul!(spec, plan, phys); spec ./= get_fft_fac(g); spec)
+
+"Round-trip a physical scalar through 2/3-truncation. `spec` is scratch."
+dealias_phys!(phys, spec, plan, g) = (
+    mul!(spec, plan, phys);
+    apply!(twothirds!, g, (spec, g));
+    ldiv!(phys, plan, spec);
+    phys
+)
+
+"Apply Gaussian test filter (with 2/3 truncation) to a physical scalar in place."
+test_filter_phys!(phys, spec, plan, Δ, g) = (
+    mul!(spec, plan, phys);
+    apply!(gaussianfilter!, g, (spec, Δ, g));
+    apply!(twothirds!, g, (spec, g));
+    ldiv!(phys, plan, spec);
+    phys
+)
+
 """
 Apply KernelAbstractions kernel over given ndrange
 (defaults to RFFT spectral array range).
@@ -167,6 +192,36 @@ spacetensorfield_nonsym(g::Grid{3}) = (;
     xz = spacescalarfield(g),
     yz = spacescalarfield(g),
     zz = spacescalarfield(g),
+)
+
+"Subtract the trace of a symmetric tensor field in-place."
+function make_tracefree!(τ, g::Grid{2})
+    trace = @. (τ.xx + τ.yy) / 2
+    @. τ.xx -= trace
+    @. τ.yy -= trace
+    return τ
+end
+function make_tracefree!(τ, g::Grid{3})
+    trace = @. (τ.xx + τ.yy + τ.zz) / 3
+    @. τ.xx -= trace
+    @. τ.yy -= trace
+    @. τ.zz -= trace
+    return τ
+end
+
+"""
+Unpack a stacked symmetric-tensor array (shape `(n,..,n,tensordim)`)
+into a NamedTuple of views indexed by component.
+"""
+unstack_symtensor(y, ::Grid{2}) =
+    (; xx = selectdim(y, 3, 1), yy = selectdim(y, 3, 2), xy = selectdim(y, 3, 3))
+unstack_symtensor(y, ::Grid{3}) = (;
+    xx = selectdim(y, 4, 1),
+    yy = selectdim(y, 4, 2),
+    zz = selectdim(y, 4, 3),
+    xy = selectdim(y, 4, 4),
+    yz = selectdim(y, 4, 5),
+    zx = selectdim(y, 4, 6),
 )
 
 "Make vector field solenoidal."
@@ -538,6 +593,26 @@ end
     du[I] = im * kj * u[I]
 end
 
+"Symmetric part of a velocity-gradient tensor field (physical space)."
+strain_from_gradient(G, ::Grid{2}) = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
+strain_from_gradient(G, ::Grid{3}) = (;
+    G.xx,
+    G.yy,
+    G.zz,
+    xy = (G.xy .+ G.yx) ./ 2,
+    yz = (G.yz .+ G.zy) ./ 2,
+    zx = (G.zx .+ G.xz) ./ 2,
+)
+
+"Pointwise double-dot `τ : S` for symmetric tensors (sub-grid dissipation)."
+contract_dissipation(τ, S, ::Grid{2}) =
+    @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
+contract_dissipation(τ, S, ::Grid{3}) =
+    @. τ.xx * S.xx +
+       τ.yy * S.yy +
+       τ.zz * S.zz +
+       2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
+
 @kernel function strainrate!(S, u, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = wavenumber_full(g, I)
@@ -826,6 +901,29 @@ function getshells(grid, shells)
 
         (; shell = i, inds = (inds, conjinds), k2 = (k2[inds], k2[conjinds]))
     end
+end
+
+"""
+Precompute per-shell index sets and reference energies for the
+forcing-via-energy-clamp pattern. `u` is the reference (initial) field.
+"""
+energy_shells(grid, shells, u) = map(getshells(grid, shells)) do s
+    inds = s.inds[1] |> adapt(grid.backend)
+    energyinds = vcat(s.inds[1], s.inds[2]) |> adapt(grid.backend)
+    eref = sum(u -> sum(abs2, view(u, energyinds)), u) / 2
+    (; inds, energyinds, eref)
+end
+
+"""
+Rescale each shell of `u` to match the reference energy stored in `shells`
+(output of `energy_shells`).
+"""
+function maintain_shell_energy!(u, shells)
+    for s in shells
+        eshell = sum(u -> sum(abs2, view(u, s.energyinds)), u) / 2
+        foreach(u -> (view(u, s.inds) .*= sqrt(s.eref / eshell)), u)
+    end
+    return u
 end
 
 # end

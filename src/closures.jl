@@ -2,109 +2,70 @@
 # (in physical space, packed as flattened symmetric components) from a velocity
 # gradient G_{ij}. The `create_*` wrappers return a closure usable by `les!`.
 
-@kernel function clark_kernel!(ττ, GG, Δ, g::Grid{2})
-    I = @index(Global, Cartesian)
-    G = @SMatrix [GG.xx[I] GG.xy[I]; GG.yx[I] GG.yy[I]]
-    τ = Δ^2 / 12 * G * G'
-    xx, yy, xy = 1, 2, 3
-    ττ[I, xx] = τ[1, 1]
-    ττ[I, yy] = τ[2, 2]
-    ττ[I, xy] = τ[1, 2]
+"Read a non-symmetric tensor field at index `I` as a local SMatrix."
+@inline tensorat(GG, I, ::Grid{2}) = @SMatrix [GG.xx[I] GG.xy[I]; GG.yx[I] GG.yy[I]]
+@inline tensorat(GG, I, ::Grid{3}) = @SMatrix [
+    GG.xx[I] GG.xy[I] GG.xz[I]
+    GG.yx[I] GG.yy[I] GG.yz[I]
+    GG.zx[I] GG.zy[I] GG.zz[I]
+]
+
+"Write the upper triangle of a symmetric SMatrix into the packed array `ττ` at `I`."
+@inline function store_symtensor!(ττ, I, τ, ::Grid{2})
+    ττ[I, 1] = τ[1, 1]
+    ττ[I, 2] = τ[2, 2]
+    ττ[I, 3] = τ[1, 2]
+end
+@inline function store_symtensor!(ττ, I, τ, ::Grid{3})
+    ττ[I, 1] = τ[1, 1]
+    ττ[I, 2] = τ[2, 2]
+    ττ[I, 3] = τ[3, 3]
+    ττ[I, 4] = τ[1, 2]
+    ττ[I, 5] = τ[2, 3]
+    ττ[I, 6] = τ[3, 1]
 end
 
-@kernel function clark_kernel!(ττ, GG, Δ, g::Grid{3})
-    I = @index(Global, Cartesian)
-    G = @SMatrix [
-        GG.xx[I] GG.xy[I] GG.xz[I]
-        GG.yx[I] GG.yy[I] GG.yz[I]
-        GG.zx[I] GG.zy[I] GG.zz[I]
-    ]
-    τ = Δ^2 / 12 * G * G'
-    xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
-    ττ[I, xx] = τ[1, 1]
-    ττ[I, yy] = τ[2, 2]
-    ττ[I, zz] = τ[3, 3]
-    ττ[I, xy] = τ[1, 2]
-    ττ[I, yz] = τ[2, 3]
-    ττ[I, zx] = τ[3, 1]
-end
-
-create_clark(Δ, g) = function clark(u, G)
+"Allocate a packed symmetric-tensor field and dispatch `kernel!` over physical space."
+function run_closure_kernel(kernel!, args, g)
     τ = stack(spacetensorfield(g))
-    apply!(clark_kernel!, g, (τ, G, Δ, g); ndrange = space_ndrange(g))
+    apply!(kernel!, g, (τ, args..., g); ndrange = space_ndrange(g))
     return τ
 end
 
-@kernel function smagorinsky_kernel!(ττ, GG, CS, Δ, g::Grid{2})
+@kernel function clark_kernel!(ττ, GG, Δ, g)
     I = @index(Global, Cartesian)
-    G = @SMatrix [GG.xx[I] GG.xy[I]; GG.yx[I] GG.yy[I]]
-    S = (G + G') / 2
-    nu = CS^2 * Δ^2 * sqrt(2 * sum(abs2, S))
-    τ = -2 * nu * S
-    xx, yy, xy = 1, 2, 3
-    ττ[I, xx] = τ[1, 1]
-    ττ[I, yy] = τ[2, 2]
-    ττ[I, xy] = τ[1, 2]
+    G = tensorat(GG, I, g)
+    τ = Δ^2 / 12 * G * G'
+    store_symtensor!(ττ, I, τ, g)
 end
 
-@kernel function smagorinsky_kernel!(ττ, GG, CS, Δ, g::Grid{3})
+@kernel function smagorinsky_kernel!(ττ, GG, CS, Δ, g)
     I = @index(Global, Cartesian)
-    G = @SMatrix [
-        GG.xx[I] GG.xy[I] GG.xz[I]
-        GG.yx[I] GG.yy[I] GG.yz[I]
-        GG.zx[I] GG.zy[I] GG.zz[I]
-    ]
+    G = tensorat(GG, I, g)
     S = (G + G') / 2
     nu = CS^2 * Δ^2 * sqrt(2 * sum(abs2, S))
     τ = -2 * nu * S
-    xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
-    ττ[I, xx] = τ[1, 1]
-    ττ[I, yy] = τ[2, 2]
-    ττ[I, zz] = τ[3, 3]
-    ττ[I, xy] = τ[1, 2]
-    ττ[I, yz] = τ[2, 3]
-    ττ[I, zx] = τ[3, 1]
+    store_symtensor!(ττ, I, τ, g)
 end
 
 @kernel function verstappen_kernel!(ττ, GG, C, Δ, g::Grid{3})
     I = @index(Global, Cartesian)
-    G = @SMatrix [
-        GG.xx[I] GG.xy[I] GG.xz[I]
-        GG.yx[I] GG.yy[I] GG.yz[I]
-        GG.zx[I] GG.zy[I] GG.zz[I]
-    ]
+    G = tensorat(GG, I, g)
     S = (G + G') / 2
     q = tr(S * S) / 2
     r = tr(S * S * S) / 3
     nu = C^2 * Δ^2 * abs(r) / q
     τ = -2 * nu * S
-    xx, yy, zz, xy, yz, zx = 1, 2, 3, 4, 5, 6
-    ττ[I, xx] = τ[1, 1]
-    ττ[I, yy] = τ[2, 2]
-    ττ[I, zz] = τ[3, 3]
-    ττ[I, xy] = τ[1, 2]
-    ττ[I, yz] = τ[2, 3]
-    ττ[I, zx] = τ[3, 1]
+    store_symtensor!(ττ, I, τ, g)
 end
 
-function create_smagorinsky(CS, Δ, g)
-    function smagorinsky(u, G)
-        τ = stack(spacetensorfield(g))
-        apply!(smagorinsky_kernel!, g, (τ, G, CS, Δ, g); ndrange = space_ndrange(g))
-        return τ
-    end
-    return smagorinsky
-end
+create_clark(Δ, g) = (u, G) -> run_closure_kernel(clark_kernel!, (G, Δ), g)
+create_smagorinsky(CS, Δ, g) =
+    (u, G) -> run_closure_kernel(smagorinsky_kernel!, (G, CS, Δ), g)
 
 function create_verstappen(C, Δ, g)
-    D = dim(g)
-    @assert D == 3 "Q-R model is only defined in 3D"
-    function verstappen(u, G)
-        τ = stack(spacetensorfield(g))
-        apply!(verstappen_kernel!, g, (τ, G, C, Δ, g); ndrange = space_ndrange(g))
-        return τ
-    end
-    return verstappen
+    @assert dim(g) == 3 "Q-R model is only defined in 3D"
+    return (u, G) -> run_closure_kernel(verstappen_kernel!, (G, C, Δ), g)
 end
 
 @kernel function smagorinsky_tensor!(τ, S, Δ, g::Grid{2})
@@ -200,25 +161,6 @@ function create_dynamic_smagorinsky(Δ, g)
     D = dim(g)
     Δtilde = 2 * Δ                   # Test filter width
     Δdouble = sqrt(Δtilde^2 + Δ^2)   # Combined grid + test filter width
-    fac = get_fft_fac(g)
-
-    # Spectral → physical with the solver's FFT scaling convention
-    to_phys!(phys, spec) = (ldiv!(phys, plan, spec); phys .*= fac)
-
-    # Round-trip a physical scalar component through 2/3 truncation
-    dealias_phys!(phys) = begin
-        mul!(spect, plan, phys)
-        apply!(twothirds!, g, (spect, g))
-        ldiv!(phys, plan, spect)
-    end
-
-    # Test-filter a physical scalar component in place
-    test_filter_phys!(phys) = begin
-        mul!(spect, plan, phys)
-        apply!(gaussianfilter!, g, (spect, Δtilde, g))
-        apply!(twothirds!, g, (spect, g))
-        ldiv!(phys, plan, spect)
-    end
 
     function model(u, G)
         # Test-filtered velocity (spectral)
@@ -236,8 +178,8 @@ function create_dynamic_smagorinsky(Δ, g)
             apply!(twothirds!, g, (σ, g))
         end
         for (L, σ, σtilde) in zip(L, σ, σtilde)
-            to_phys!(L, σ)
-            to_phys!(space, σtilde)
+            to_phys!(L, σ, plan, g)
+            to_phys!(space, σtilde, plan, g)
             L .-= space
         end
 
@@ -245,10 +187,10 @@ function create_dynamic_smagorinsky(Δ, g)
         apply!(strainrate!, g, (Shat, u, g))
         for (S, Stilde, Shat) in zip(S, Stilde, Shat)
             apply!(twothirds!, g, (Shat, g))
-            to_phys!(S, Shat)
+            to_phys!(S, Shat, plan, g)
             apply!(gaussianfilter!, g, (Shat, Δtilde, g))
             apply!(twothirds!, g, (Shat, g))
-            to_phys!(Stilde, Shat)
+            to_phys!(Stilde, Shat, plan, g)
         end
 
         # Smagorinsky tensors at the two filter levels
@@ -257,9 +199,9 @@ function create_dynamic_smagorinsky(Δ, g)
 
         # M = tilde(m1) - m2; m1 is dealiased in place so it can be reused at the end
         for (m1, M) in zip(m1, M)
-            dealias_phys!(m1)
+            dealias_phys!(m1, spect, plan, g)
             copyto!(M, m1)
-            test_filter_phys!(M)
+            test_filter_phys!(M, spect, plan, Δtilde, g)
         end
         for (M, m2) in zip(M, m2)
             M .-= m2

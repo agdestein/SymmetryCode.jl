@@ -53,14 +53,7 @@ function create_dns(setup)
     # )
     # eband_ref = sum(u -> sum(abs2, view(u, band.energyinds)), u) / 2
 
-    # Shell stuff
-    s = getshells(g, [1, 2])
-    shells = map(s) do s
-        inds = s.inds[1] |> adapt(backend)
-        energyinds = vcat(s.inds[1], s.inds[2]) |> adapt(backend)
-        eref = sum(u -> sum(abs2, view(u, energyinds)), u) / 2
-        (; inds, energyinds, eref)
-    end
+    shells = energy_shells(g, [1, 2], u)
 
     # Allocate arrays
     dissfield = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
@@ -89,11 +82,7 @@ function create_dns(setup)
         # eband = sum(u -> sum(abs2, view(u, band.energyinds)), u) / 2
         # foreach(u -> (view(u, band.inds) .*= sqrt(eband_ref / eband)), u)
 
-        # Maintain energy
-        for s in shells
-            eshell = sum(u -> sum(abs2, view(u, s.energyinds)), u) / 2
-            foreach(u -> (view(u, s.inds) .*= sqrt(s.eref / eshell)), u)
-        end
+        maintain_shell_energy!(u, shells)
 
         if k % 1 == 0
             e = energy(u)
@@ -141,7 +130,6 @@ function create_data(setup)
     ubar = vectorfield(g_les)
     σbar1 = tensorfield(g_les)
     σbar2 = tensorfield(g_les)
-    trace = scalarfield(g_les)
     τ = tensorfield(g_les)
     inputs = fill(map(Array, ubar), 0)
     outputs = fill(map(Array, τ), 0)
@@ -163,14 +151,7 @@ function create_data(setup)
     # Keep track of adaptive time stepping
     times = zeros(0)
 
-    # Shell stuff
-    s = getshells(g_dns, [1, 2])
-    shells = map(s) do s
-        inds = s.inds[1] |> adapt(backend)
-        energyinds = vcat(s.inds[1], s.inds[2]) |> adapt(backend)
-        eref = sum(u -> sum(abs2, view(u, energyinds)), u) / 2
-        (; inds, energyinds, eref)
-    end
+    shells = energy_shells(g_dns, [1, 2], u)
 
     # # Compute force factor from DNS
     # forceval = get_forcing_constant(g_dns, u, dissfield_dns, visc)
@@ -193,11 +174,7 @@ function create_data(setup)
             wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
             # wray3!(forced_rhs!, u, Δt, g_dns, c_dns; forceval, visc)
 
-            # Maintain energy
-            for s in shells
-                eshell = sum(u -> sum(abs2, view(u, s.energyinds)), u) / 2
-                foreach(u -> (view(u, s.inds) .*= sqrt(s.eref / eshell)), u)
-            end
+            maintain_shell_energy!(u, shells)
 
             # Log
             # if j == nsubstep && i % 1 == 0
@@ -218,7 +195,7 @@ function create_data(setup)
         end
 
         # Compute ubar and sub-filter stress
-        sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
+        sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
 
         # Save current (ubar,tau)-pair
         push!(inputs, map(Array, ubar))
@@ -270,14 +247,12 @@ function sfs(u, g_dns, g_les, Δ)
     ubar = vectorfield(g_les)
     σbar1 = tensorfield(g_les)
     σbar2 = tensorfield(g_les)
-    trace = scalarfield(g_les)
     τ = tensorfield(g_les)
-    sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
+    sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     return τ
 end
 
-function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
-    D = dim(g_dns)
+function sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     nonlinearity!(c_dns.σ, c_dns.vi_vj, c_dns.v, u, c_dns.plan, g_dns)
     for (ubar, u) in zip(ubar, u)
         apply!(cutoff!, g_les, (ubar, u))
@@ -291,18 +266,7 @@ function sfs!(; τ, trace, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, 
     nonlinearity!(σbar2, c_les.vi_vj, c_les.v, ubar, c_les.plan, g_les)
     foreach(i -> (τ[i] .= σbar1[i] .- σbar2[i]), 1:tensordim(g_dns))
     foreach(τ -> apply!(twothirds!, g_les, (τ, g_les)), τ)
-
-    # Make tensor trace-free
-    return if D == 2
-        @. trace = (τ[1] + τ[2]) / 2
-        τ[1] .-= trace
-        τ[2] .-= trace
-    elseif D == 3
-        @. trace = (τ[1] + τ[2] + τ[3]) / 3
-        τ[1] .-= trace
-        τ[2] .-= trace
-        τ[3] .-= trace
-    end
+    return make_tracefree!(τ, g_les)
 end
 
 function create_dataloader(setup, data; nsample, batchsize)

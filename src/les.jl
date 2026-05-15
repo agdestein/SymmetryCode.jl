@@ -19,12 +19,12 @@ function les!(du, u, grid, cache; model, visc)
     end
     y = model(u, GG)
 
-    # Add closure stress to existing stress (in spectral space)
+    # Add closure stress to existing stress (in spectral space).
+    # du.x and vi_vj are scratch.
     for (i, σ) in enumerate(σ)
-        # Use vi_vj and du.x as temp storage
         copyto!(vi_vj, selectdim(y, D + 1, i))
-        mul!(du.x, plan, vi_vj)
-        @. σ += du.x / fac
+        to_spec!(du.x, vi_vj, plan, grid)
+        σ .+= du.x
     end
 
     # Final force
@@ -64,21 +64,13 @@ function solve_les(; data, setup, models, files)
 end
 
 function solve_les!(u; times, grid, visc, model, cfl)
-    backend = get_backend(u.x)
     cache = getcache(grid)
     if !isnothing(model)
         # Allocate velocity gradient for closure
         cache = (; cache..., G = tensorfield_nonsym(grid))
     end
 
-    # Shell stuff
-    s = getshells(grid, [1, 2])
-    shells = map(s) do s
-        inds = s.inds[1] |> adapt(backend)
-        energyinds = vcat(s.inds[1], s.inds[2]) |> adapt(backend)
-        eref = sum(u -> sum(abs2, view(u, energyinds)), u) / 2
-        (; inds, energyinds, eref)
-    end
+    shells = energy_shells(grid, [1, 2], u)
 
     # Storage for states on CPU
     states = fill(map(Array, u), 0)
@@ -101,11 +93,7 @@ function solve_les!(u; times, grid, visc, model, cfl)
                 wray3!(les!, u, Δt, grid, cache; model, visc)
             end
 
-            # Maintain energy
-            for s in shells
-                eshell = sum(u -> sum(abs2, view(u, s.energyinds)), u) / 2
-                foreach(u -> (view(u, s.inds) .*= sqrt(s.eref / eshell)), u)
-            end
+            maintain_shell_energy!(u, shells)
 
             if j % 1 == 0
                 e = energy(u)
@@ -172,19 +160,8 @@ function get_les_statistics(setup, data, files)
 end
 
 function getdissipation(g, u, m)
-    D = dim(g)
     G = getgradient(u, g)
-    τ = m(G)
-    S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
-    return if D == 2
-        xx, yy, xy = 1, 2, 3
-        τ = (;
-            xx = selectdim(τ, D + 1, xx),
-            yy = selectdim(τ, D + 1, yy),
-            xy = selectdim(τ, D + 1, xy),
-        )
-        @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
-    elseif D == 3
-        error()
-    end
+    τ = unstack_symtensor(m(G), g)
+    S = strain_from_gradient(G, g)
+    return contract_dissipation(τ, S, g)
 end

@@ -154,7 +154,6 @@ function plot_velocities(setup, data, upostfiles, comp)
         :equi,
         :conv,
     ]
-    fac = get_fft_fac(g)
     for (k, key) in enumerate(modelkeys)
         @info "Plotting velocity for $(key)"
         flush(stderr)
@@ -181,8 +180,7 @@ function plot_velocities(setup, data, upostfiles, comp)
             )
             ui = useries[t][comp] |> adapt(backend)
             apply!(twothirds!, g, (ui, g))
-            ldiv!(ui_space, plan, ui) # Make copy, ldiv! overwrites...
-            ui_space .*= fac
+            to_phys!(ui_space, ui, plan, g)
             range = (:, :)
             # range = (40:60, 40:60)
             slice = ui_space[range..., end] |> Array
@@ -346,26 +344,18 @@ function plot_sfs(setup, data)
     # Time index
     t = 100
 
-    fac = get_fft_fac(g)
     τcpu = data.outputs[t]
     for (τ, τcpu) in zip(τ, τcpu)
         copyto!(τhat, τcpu)
         apply!(twothirds!, g, (τhat, g))
-        ldiv!(τ, plan, τhat)
-        τ .*= fac
+        to_phys!(τ, τhat, plan, g)
     end
     τ_ref = τ |> cpu_device()
 
     modelkeys = [:smag, :clar, :tbnn, :equi, :conv]
     τ_les = map(modelkeys) do key
         τles = load_object("$(setup.outdir)/sfs_$(key).jld2")[t]
-
-        # Make trace free
-        trace = @. (τles.xx + τles.yy + τles.zz) / D
-        @. τles.xx -= trace
-        @. τles.yy -= trace
-        @. τles.zz -= trace
-
+        make_tracefree!(τles, g)
         key => τles
     end |> NamedTuple
 

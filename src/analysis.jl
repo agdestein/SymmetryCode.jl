@@ -4,16 +4,13 @@
 
 "Compute distribution of tensor components and dissipation coefficients."
 function predict_sfs(setup, data, models)
-    (; outdir, D, l, n_les, backend, Δ) = setup
+    (; outdir, D, l, n_les, backend) = setup
     g = Grid{D}(; l, n = n_les, backend)
     u = vectorfield(g)
-    τ = spacetensorfield(g)
-    τhat = scalarfield(g)
-    plan = plan_rfft(τ.xx)
+    plan = plan_rfft(spacescalarfield(g))
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
 
-    fac = get_fft_fac(g)
     for (key, m) in pairs(models)
         @info "Computing SFS for $(key)"
         flush(stderr)
@@ -21,33 +18,16 @@ function predict_sfs(setup, data, models)
             GC.gc()
             CUDA.reclaim()
 
-            # Gradient and strain-rate
+            # Velocity gradient in physical space
             foreach(copyto!, u, ucpu)
             apply!(vectorgradient!, g, (A, u, g))
             for (AA, A) in zip(AA, A)
                 apply!(twothirds!, g, (A, g))
-                ldiv!(AA, plan, A) # Inverse RFFT
-                AA .*= fac
+                to_phys!(AA, A, plan, g)
             end
 
             # Prediction by LES model
-            y = m(AA)
-            τ_les = if D == 2
-                xx, yy, xy = 1, 2, 3
-                (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
-            elseif D == 3
-                xx, yy, zz = 1, 2, 3
-                xy, yz, zx = 4, 5, 6
-                (;
-                    xx = view(y, :, :, :, xx),
-                    yy = view(y, :, :, :, yy),
-                    zz = view(y, :, :, :, zz),
-                    xy = view(y, :, :, :, xy),
-                    yz = view(y, :, :, :, yz),
-                    zx = view(y, :, :, :, zx),
-                )
-            end
-            τ_les |> cpu_device()
+            unstack_symtensor(m(AA), g) |> cpu_device()
         end
         save_object("$(outdir)/sfs_$(key).jld2", τ_series)
     end
@@ -66,7 +46,6 @@ function compute_densities(setup, data, modelkeys)
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
 
-    fac = get_fft_fac(g)
     for mkey in [:ref, modelkeys...]
         @info "Computing SFS quantities for $(mkey)"
         flush(stderr)
@@ -78,8 +57,7 @@ function compute_densities(setup, data, modelkeys)
                 for (τ, τcpu) in zip(τ, τcpu)
                     copyto!(τhat, τcpu)
                     apply!(twothirds!, g, (τhat, g))
-                    ldiv!(τ, plan, τhat)
-                    τ .*= fac
+                    to_phys!(τ, τhat, plan, g)
                 end
                 τ |> cpu_device()
             end
@@ -94,68 +72,26 @@ function compute_densities(setup, data, modelkeys)
             ucpu = data.inputs[i]
             τcpu = τ_series[i]
 
-            # Gradient and strain-rate
+            # Velocity gradient and strain rate (physical space)
             foreach(copyto!, u, ucpu)
             apply!(vectorgradient!, g, (A, u, g))
             for (AA, A) in zip(AA, A)
                 apply!(twothirds!, g, (A, g))
-                ldiv!(AA, plan, A) # Inverse RFFT
-                AA .*= fac
+                to_phys!(AA, A, plan, g)
             end
-            G = AA
+            S = strain_from_gradient(AA, g)
 
-            S = if D == 2
-                (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
-            elseif D == 3
-                (;
-                    G.xx,
-                    G.yy,
-                    G.zz,
-                    xy = (G.xy .+ G.yx) ./ 2,
-                    yz = (G.yz .+ G.zy) ./ 2,
-                    zx = (G.zx .+ G.xz) ./ 2,
-                )
-            end
-
-            # SFS
+            # SFS: copy, dealias, and make trace-free
             foreach(copyto!, τ, τcpu)
-
-            # Remove ghost modes and make trace-free
             for τ in τ
-                mul!(τhat, plan, τ)
-                apply!(twothirds!, g, (τhat, g))
-                ldiv!(τ, plan, τhat)
+                dealias_phys!(τ, τhat, plan, g)
             end
-            if D == 2
-                traces = @. (τ.xx + τ.yy) / 2
-                τ.xx .-= traces
-                τ.yy .-= traces
-            else
-                traces = @. (τ.xx + τ.yy + τ.zz) / 3
-                τ.xx .-= traces
-                τ.yy .-= traces
-                τ.zz .-= traces
-            end
-
-            # for S in S
-            #     plan = plan_rfft(S)
-            #     temp = plan * S
-            #     apply!(twothirds!, g, (temp, g))
-            #     ldiv!(S, plan, temp)
-            # end
+            make_tracefree!(τ, g)
 
             # Extract components and dissipation
             τxx = τ.xx |> cpu_device()
             τxy = τ.xy |> cpu_device()
-            if D == 2
-                @. dissfield = τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
-            else
-                @. dissfield =
-                    τ.xx * S.xx +
-                    τ.yy * S.yy +
-                    τ.zz * S.zz +
-                    2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
-            end
+            dissfield .= contract_dissipation(τ, S, g)
             diss = dissfield |> cpu_device()
 
             (; xx = τxx, xy = τxy, diss)
@@ -186,14 +122,11 @@ function apriori_error(setup, data, modelkeys)
     τhat = scalarfield(g)
     plan = plan_rfft(τ.xx)
 
-    fac = get_fft_fac(g)
-
     τ_ref = map(data.outputs) do τcpu
         for (τ, τcpu) in zip(τ, τcpu)
             copyto!(τhat, τcpu)
             apply!(twothirds!, g, (τhat, g))
-            ldiv!(τ, plan, τhat)
-            τ .*= fac
+            to_phys!(τ, τhat, plan, g)
         end
         τ |> cpu_device()
     end
@@ -239,25 +172,7 @@ function apriori_equivariance_error(; u, setup, models)
         @info "Computing a-priori equi errors for $(key)"
         m = models[key]
         mG = m(G)
-        mG_split = if D == 2
-            xx, yy, xy = 1, 2, 3
-            (;
-                xx = selectdim(mG, D + 1, xx),
-                yy = selectdim(mG, D + 1, yy),
-                xy = selectdim(mG, D + 1, xy),
-            )
-        else
-            xx, yy, zz = 1, 2, 3
-            xy, yz, zx = 4, 5, 6
-            (;
-                xx = selectdim(mG, D + 1, xx),
-                yy = selectdim(mG, D + 1, yy),
-                zz = selectdim(mG, D + 1, zz),
-                xy = selectdim(mG, D + 1, xy),
-                yz = selectdim(mG, D + 1, yz),
-                zx = selectdim(mG, D + 1, zx),
-            )
-        end
+        mG_split = unstack_symtensor(mG, g)
         err = map(elements) do e
             ip, is = e
             p, s = permutations[ip], signs[is]
@@ -285,54 +200,13 @@ function get_dissipation_errors(; setup, u_dns, models)
     τ = spacetensorfield(g_les)
     plan = getplan(g_les)
     for (τ, τhat) in zip(τ, τhat)
-        # apply!(twothirds!, g_les, (τhat, g_les))
-        ldiv!(τ, plan, τhat)
-        fac = get_fft_fac(g_les)
-        τ .*= fac
+        to_phys!(τ, τhat, plan, g_les)
     end
     G = getgradient(ubar, g_les)
-    if D == 2
-        S = (; G.xx, G.yy, xy = (G.xy .+ G.yx) ./ 2)
-    elseif D == 3
-        S = (;
-            G.xx,
-            G.yy,
-            G.zz,
-            xy = (G.xy .+ G.yx) ./ 2,
-            yz = (G.yz .+ G.zy) ./ 2,
-            zx = (G.zx .+ G.xz) ./ 2,
-        )
-    end
-    τ_les = map(models) do m
-        y = m(G)
-        if D == 2
-            xx, yy, xy = 1, 2, 3
-            (; xx = view(y, :, :, xx), yy = view(y, :, :, yy), xy = view(y, :, :, xy))
-        elseif D == 3
-            xx, yy, zz = 1, 2, 3
-            xy, yz, zx = 4, 5, 6
-            (;
-                xx = view(y, :, :, :, xx),
-                yy = view(y, :, :, :, yy),
-                zz = view(y, :, :, :, zz),
-                xy = view(y, :, :, :, xy),
-                yz = view(y, :, :, :, yz),
-                zx = view(y, :, :, :, zx),
-            )
-        end
-    end
+    S = strain_from_gradient(G, g_les)
+    τ_les = map(m -> unstack_symtensor(m(G), g_les), models)
     τ_all = (; ref = τ, τ_les...)
-    diss = map(τ_all) do τ
-        d = if D == 2
-            @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
-        else
-            @. τ.xx * S.xx +
-                τ.yy * S.yy +
-                τ.zz * S.zz +
-                2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
-        end
-        d
-    end
+    diss = map(τ -> contract_dissipation(τ, S, g_les), τ_all)
     return map(median, NamedTuple(diss))
 end
 
@@ -368,8 +242,6 @@ function compute_qr(setup, data, upostfiles)
 
     modelkeys = [:ref, keys(upostfiles)...]
 
-    fac = get_fft_fac(g)
-
     for k in modelkeys
         @info "Computing Q-R for $(k)"
         u_series = if k == :ref
@@ -385,8 +257,7 @@ function compute_qr(setup, data, upostfiles)
                 ij = Symbol(s[i], s[j])
                 apply!(derivative!, g, (Ghat, u[i], j, g))
                 apply!(twothirds!, g, (Ghat, g))
-                ldiv!(G[ij], plan, Ghat) # Inverse RFFT
-                G[ij] .*= fac
+                to_phys!(G[ij], Ghat, plan, g)
             end
             apply!(qr_kernel!, g, (q, r, G, g); ndrange = space_ndrange(g))
             qvec = q |> cpu_device() |> vec
