@@ -305,13 +305,13 @@ equi_errors_prior_file = joinpath(setup.outdir, "equi-errors-prior.jld2")
 let
     # u = map(copy, data.inputs) |> adapt(setup.backend)
     models = (;
-              smag = m_smag,
-              dynsmag = m_dynsmag,
-              clar = m_clar,
-              # tbnn = m_tbnn,
-              # equi = m_equi,
-              # conv = m_conv,
-             )
+        smag = m_smag,
+        dynsmag = m_dynsmag,
+        clar = m_clar,
+        # tbnn = m_tbnn,
+        # equi = m_equi,
+        # conv = m_conv,
+    )
     errors = S.apriori_equivariance_error(; u, setup, models)
     save_object(equi_errors_prior_file, errors)
 end

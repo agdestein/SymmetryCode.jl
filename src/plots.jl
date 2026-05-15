@@ -46,14 +46,14 @@ function plot_densities(setup; dolog)
     yscale = dolog ? log10 : identity
 
     mkeys = [
-             :ref,
-             :smag,
-             :dynsmag,
-             :clar,
-             # :tbnn,
-             # :equi,
-             # :conv,
-            ]
+        :ref,
+        :smag,
+        :dynsmag,
+        :clar,
+        # :tbnn,
+        # :equi,
+        # :conv,
+    ]
     # t_kol = mean(x -> x.t_kol, data.statistics_les)
 
     fig = Figure(; size = (800, 300))
@@ -368,13 +368,13 @@ function plot_sfs(setup, data)
     τ_ref = τ |> cpu_device()
 
     modelkeys = [
-                 :smag,
-                 :dynsmag,
-                 :clar,
-                 # :tbnn,
-                 # :equi,
-                 # :conv,
-                ]
+        :smag,
+        :dynsmag,
+        :clar,
+        # :tbnn,
+        # :equi,
+        # :conv,
+    ]
     τ_les = map(modelkeys) do key
         τles = load_object("$(setup.outdir)/sfs_$(key).jld2")[t]
         make_tracefree!(τles, g)
@@ -654,7 +654,7 @@ function plot_spectrum_dns(setup)
         # escale = C^(-1) * stat.enstrophy_diss^(-2 / 3) * lω_kol^(-3)
         # kscale = lω_kol
         kscale, escale = 1.0, 1.0
-        kolmo = @. 1e2 * kkolmo^(-3)
+        kolmo = @. 1.0e2 * kkolmo^(-3)
     elseif D == 3
         kkolmo = 2π / l * [1, g_dns.n / 8]
         C = 1.6
