@@ -156,9 +156,8 @@ end
     ML = Mxx * Lxx + Myy * Lyy + 2 * Mxy * Lxy
     MM = Mxx * Mxx + Myy * Myy + 2 * Mxy * Mxy
 
-    # Least squares fit
-    # c[I] = -ML / MM
-    c[I] = max(-ML / MM, 0) # Clip
+    # Least squares fit (clipped to non-negative; zero strain → zero coefficient)
+    c[I] = ifelse(iszero(MM), zero(MM), max(-ML / MM, zero(MM)))
 end
 
 @kernel function smagorinsky_coefficient!(c, M, L, g::Grid{3})
@@ -176,9 +175,8 @@ end
     ML = Mxx * Lxx + Myy * Lyy + Mzz * Lzz + 2 * Mxy * Lxy + 2 * Myz * Lyz + 2 * Mzx * Lzx
     MM = Mxx * Mxx + Myy * Myy + Mzz * Mzz + 2 * Mxy * Mxy + 2 * Myz * Myz + 2 * Mzx * Mzx
 
-    # Least squares fit
-    # c[I] = -ML / MM
-    c[I] = max(-ML / MM, 0)
+    # Least squares fit (clipped to non-negative; zero strain → zero coefficient)
+    c[I] = ifelse(iszero(MM), zero(MM), max(-ML / MM, zero(MM)))
 end
 
 function create_dynamic_smagorinsky(Δ, g)

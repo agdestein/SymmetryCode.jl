@@ -315,7 +315,7 @@ function dns_aid()
     D = 3
     g = Grid{D}(; l = 1.0, n = 16)
     gbar = Grid{D}(; l = 1.0, n = 8)
-    u = randomfield(g; kpeak = 5)
+    u = vectorfield(g)
     foreach(randn!, u)
     apply!(project!, g, (u, g))
     ubar = vectorfield(gbar)
@@ -328,7 +328,7 @@ function dns_aid()
     i = 0
     while t < tstop
         i += 1
-        Δt = cfl * propose_timestep(u, c, visc, g)
+        Δt = cfl * propose_timestep(u, g, visc, c)
         Δt = min(Δt, tstop - t)
         t += Δt
         @info "t = $t, Δt = $Δt"

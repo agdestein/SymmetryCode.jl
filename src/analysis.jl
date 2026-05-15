@@ -122,15 +122,20 @@ function compute_densities(setup, data, modelkeys)
 
             # Remove ghost modes and make trace-free
             for τ in τ
-                plan = plan_rfft(τ)
                 mul!(τhat, plan, τ)
                 apply!(twothirds!, g, (τhat, g))
                 ldiv!(τ, plan, τhat)
             end
-            traces = @. (τ[1] + τ[2] + τ[3]) / 3
-            τ[1] .-= traces
-            τ[2] .-= traces
-            τ[3] .-= traces
+            if D == 2
+                traces = @. (τ.xx + τ.yy) / 2
+                τ.xx .-= traces
+                τ.yy .-= traces
+            else
+                traces = @. (τ.xx + τ.yy + τ.zz) / 3
+                τ.xx .-= traces
+                τ.yy .-= traces
+                τ.zz .-= traces
+            end
 
             # for S in S
             #     plan = plan_rfft(S)

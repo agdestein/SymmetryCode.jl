@@ -350,7 +350,7 @@ function taylorgreen(g::Grid{2}, plan; doproject = true)
     doproject && apply!(project!, g, (u, g))
     return u
 end
-function taylorgreen(g::Grid{3}, plan; doproject)
+function taylorgreen(g::Grid{3}, plan; doproject = true)
     (; l, n, backend) = g
     h = l / n
     x = range(h / 2, l - h / 2, n) |> Array |> adapt(backend)
@@ -423,7 +423,7 @@ function randomfield(profile, grid; totalenergy = 1, rng = Random.default_rng(),
         @. Emask = mask * E
         Eshell = sum(Emask) + sum(selectdim(Emask, 1, 2:kmax)) # Current energy in shell
         E0 = totalenergy * profile(k; kwargs...) / totalprofile # Desired energy in shell
-        factor = sqrt(E0 / Eshell) # E = u^2 / 2
+        factor = Eshell > 0 ? sqrt(E0 / Eshell) : zero(E0) # E = u^2 / 2
         for u in u
             @. u = ifelse(mask, factor * u, u)
         end

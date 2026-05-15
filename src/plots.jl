@@ -358,16 +358,15 @@ function plot_sfs(setup, data)
 
     modelkeys = [:smag, :clar, :tbnn, :equi, :conv]
     τ_les = map(modelkeys) do key
-        τ_les = load_object("$(setup.outdir)/sfs_$(key).jld2")
-        τ_les = τ_les[t]
+        τles = load_object("$(setup.outdir)/sfs_$(key).jld2")[t]
 
         # Make trace free
-        trace = @. τ.xx + τ.yy + τ.zz
-        @. τ.xx -= trace / D
-        @. τ.yy -= trace / D
-        @. τ.zz -= trace / D
+        trace = @. (τles.xx + τles.yy + τles.zz) / D
+        @. τles.xx -= trace
+        @. τles.yy -= trace
+        @. τles.zz -= trace
 
-        key => τ_les
+        key => τles
     end |> NamedTuple
 
     τ_all = (; ref = τ_ref, τ_les...)

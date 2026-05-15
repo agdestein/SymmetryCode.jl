@@ -41,7 +41,8 @@ end
     k2 = kx^2 + ky^2
     w = exp(-Δ^2 * k2 / 24)
     nshell = 2
-    w = ifelse(k2 < (nshell + 1)^2, one(w), w) # Don't filter forced shells
+    kbound2 = (2π / g.l * (nshell + 1))^2
+    w = ifelse(k2 < kbound2, one(w), w) # Don't filter forced shells
     u[I] *= w
 end
 @kernel function gaussianfilter!(u, Δ, g::Grid{3})

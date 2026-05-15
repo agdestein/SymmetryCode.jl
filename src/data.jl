@@ -12,11 +12,8 @@ end
 function forced_rhs!(du, u, grid, cache; forceval, visc)
     convectiondiffusion!(du, u, grid, cache; visc)
     if isnothing(forceval)
-        # Use adaptive forcing strength
-        # This constant maintains the total energy.
-        # This will overwrite σ, but it is no used after convectiondiffusion!
+        # Adaptive forcing strength that maintains the total energy.
         forceval = get_forcing_constant(grid, u, cache.dissfield, visc)
-        # forceval = 0.5
     end
     for (du, u) in zip(du, u)
         # Add linear forcing to du
