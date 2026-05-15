@@ -36,7 +36,7 @@ setup_*()  →  create_dns       →  dns.jld2
 
 Three setups in `src/setups.jl`:
 - `setup_laptop` — 2D, small (`n_dns=1024`), uses `default_backend()` (CUDA if available, else CPU). Quick prototyping only — the paper's experiments are 3D. Closure models that assume a 3D Kolmogorov inertial range (e.g. dynamic Smagorinsky) are not expected to perform well here, since the small-scale dynamics follow a 2D Kraichnan enstrophy cascade (`E(k)~k^{-3}`).
-- `setup_turbulator` — 3D, `n_dns=512`, hard-codes `CUDABackend()`.
+- `setup_turbulator_{small,medium,large}` — 3D forced HIT, `n_dns ∈ {256, 384, 512}`, hard-code `CUDABackend()`. The three variants trade resolution against memory / wall time and are sized for a 24 GB consumer GPU; `medium` (n=384, ν=5e-4) is the recommended default for an RTX 4090, `large` (n=512, ν=3e-4) is tight on memory but closest to paper-quality.
 - `setup_snellius` — 3D, `n_dns=810`, writes to `/projects/prjs1757/...` (cluster path).
 
 A "setup" is a NamedTuple — fields are destructured throughout the codebase (`(; D, l, n_les, backend, Δ, visc, cfl) = setup`).

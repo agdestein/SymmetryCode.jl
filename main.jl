@@ -17,7 +17,9 @@ import SymmetryCode as S
 lines([1, 2, 3])
 
 setup = S.setup_laptop()
-setup = S.setup_turbulator()
+setup = S.setup_turbulator_small()
+setup = S.setup_turbulator_medium()
+setup = S.setup_turbulator_large()
 setup = S.setup_snellius()
 setup |> pairs
 
@@ -411,7 +413,7 @@ end
 S.plot_sfs(setup, data)
 
 let
-    setup = S.setup_turbulator()
+    setup = S.setup_turbulator_medium()
     (; D, l, n_dns, visc, backend) = setup
     g_dns = S.Grid{D}(; l, n = n_dns, backend)
     u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
