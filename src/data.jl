@@ -58,11 +58,13 @@ function create_dns(setup)
     # Allocate arrays
     dissfield = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
     cache = (; getcache(g)..., dissfield)
+    sc = statscache(g)
 
     t = 0.0
     times = [t]
     energies = [energy(u)]
     dissipations = [get_dissipation!(dissfield, u, visc, g)]
+    statistics = [turbulence_statistics(u, visc, g, sc)]
 
     @info "Running DNS simulation"
     flush(stderr)
@@ -90,6 +92,7 @@ function create_dns(setup)
             push!(times, t)
             push!(energies, e)
             push!(dissipations, diss)
+            push!(statistics, turbulence_statistics(u, visc, g, sc))
             @info join(
                 [
                     # "k = $k",
@@ -110,7 +113,15 @@ function create_dns(setup)
     file = joinpath(outdir, "dns.jld2")
     @info "Saving final DNS snapshot to $(file)"
     flush(stderr)
-    return jldsave(file; u = u |> cpu_device(), times, energies, dissipations, walltime)
+    return jldsave(
+        file;
+        u = u |> cpu_device(),
+        times,
+        energies,
+        dissipations,
+        statistics,
+        walltime,
+    )
 end
 
 function create_data(setup)
@@ -137,6 +148,8 @@ function create_data(setup)
     dissfield_les = similar(ubar.x, typeof(l))
     c_dns = (; getcache(g_dns)..., dissfield = dissfield_dns)
     c_les = (; getcache(g_les)..., dissfield = dissfield_les)
+    sc_dns = statscache(g_dns)
+    sc_les = statscache(g_les)
 
     # Spectra
     stuff_dns = spectral_stuff(g_dns)
@@ -145,8 +158,8 @@ function create_data(setup)
     spectra_les = fill(zeros(0), 0)
 
     # Compute turbulence statistics (use σ as temporary tensor storage)
-    statistics_dns = fill(turbulence_statistics(u, visc, g_dns, dissfield_dns), 0)
-    statistics_les = fill(turbulence_statistics(ubar, visc, g_les, dissfield_les), 0)
+    statistics_dns = fill(turbulence_statistics(u, visc, g_dns, sc_dns), 0)
+    statistics_les = fill(turbulence_statistics(ubar, visc, g_les, sc_les), 0)
 
     # Keep track of adaptive time stepping
     times = zeros(0)
@@ -208,8 +221,8 @@ function create_data(setup)
         push!(spectra_les, s_les.s)
 
         # Compute turbulence statistics
-        stat_dns = turbulence_statistics(u, visc, g_dns, dissfield_dns)
-        stat_les = turbulence_statistics(ubar, visc, g_les, dissfield_les)
+        stat_dns = turbulence_statistics(u, visc, g_dns, sc_dns)
+        stat_les = turbulence_statistics(ubar, visc, g_les, sc_les)
         push!(statistics_dns, stat_dns)
         push!(statistics_les, stat_les)
 

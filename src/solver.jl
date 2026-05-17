@@ -653,11 +653,34 @@ function get_dissipation!(diss, u, visc, g)
     return d = sum(diss) + sum(selectdim(diss, 1, 2:(size(diss, 1) - 1)))
 end
 
-function turbulence_statistics(u, visc, g, dissfield = similar(u.x, typeof(g.l)))
+@kernel function palinstrophy_kernel!(p, u, visc, g::Grid{2})
+    I = @index(Global, Cartesian)
+    k2 = squared_wavenumber_full(g, I)
+    u2 = abs2(u.x[I]) + abs2(u.y[I])
+    p[I] = visc * k2^2 * u2
+end
+"""
+2D enstrophy-dissipation rate `η_Ω = 2 ν P = ν Σ k⁴ |û|²`, where
+`P = ⟨½|∇ω|²⟩` is the palinstrophy. Mirrors `get_dissipation!`, which
+returns `ε = 2 ν Ω = ν Σ k² |û|²`.
+"""
+function get_palinstrophy!(p, u, visc, g::Grid{2})
+    apply!(palinstrophy_kernel!, g, (p, u, visc, g))
+    return sum(p) + sum(selectdim(p, 1, 2:(size(p, 1) - 1)))
+end
+
+"Scratch buffer for `turbulence_statistics` (real, RFFT-sized; works in 2D and 3D)."
+statscache(g::Grid) = (; field = KernelAbstractions.zeros(g.backend, typeof(g.l), ndrange(g)))
+
+"""
+3D homogeneous-isotropic-turbulence statistics (Kolmogorov K41 scaling).
+`sc` is scratch from [`statscache`](@ref).
+"""
+function turbulence_statistics(u, visc, g::Grid{3}, sc = statscache(g))
     D = dim(g)
     foreach(u -> apply!(twothirds!, g, (u, g)), u) # Empty ghost modes
     e = sum(getenergy, u) / 2                       # ⟨½ u_i u_i⟩ in physical units
-    diss = get_dissipation!(dissfield, u, visc, g)  # ε in physical units
+    diss = get_dissipation!(sc.field, u, visc, g)   # ε in physical units
     uavg = sqrt(2 * e / D)                          # per-component rms
     l_kol = (visc^3 / diss)^(1 / 4)                 # Kolmogorov length η
     l_tay = sqrt(15 * visc / diss) * uavg           # Taylor microscale λ
@@ -668,7 +691,47 @@ function turbulence_statistics(u, visc, g, dissfield = similar(u.x, typeof(g.l))
     Re_int = l_int * uavg / visc                    # Re_L
     Re_tay = l_tay * uavg / visc                    # Re_λ
     kmax_eta = (π * g.n / g.l) * l_kol              # DNS-resolution check (≥ 1.5 is well-resolved)
-    return (; uavg, diss, l_int, l_tay, l_kol, t_int, t_tay, t_kol, Re_int, Re_tay, kmax_eta)
+    return (; e, uavg, diss, l_int, l_tay, l_kol, t_int, t_tay, t_kol, Re_int, Re_tay, kmax_eta)
+end
+
+"""
+2D turbulence statistics (Kraichnan–Batchelor–Leith dual cascade).
+The small scales are set by the forward *enstrophy* cascade, so the relevant
+dissipation is the enstrophy-dissipation rate `η_Ω` and the relevant length is
+the Kraichnan scale `η_K = (ν³/η_Ω)^{1/6}` — not the Kolmogorov scale.
+`sc` is scratch from [`statscache`](@ref).
+"""
+function turbulence_statistics(u, visc, g::Grid{2}, sc = statscache(g))
+    D = dim(g)
+    foreach(u -> apply!(twothirds!, g, (u, g)), u)            # Empty ghost modes
+    e = sum(getenergy, u) / 2                                  # E = ⟨½ u_i u_i⟩
+    uavg = sqrt(2 * e / D)                                     # per-component rms
+    diss = get_dissipation!(sc.field, u, visc, g)              # ε = 2νΩ = ν Σ k²|û|²
+    enstrophy = diss / (2 * visc)                              # Ω = ⟨½ ω²⟩
+    omega_rms = sqrt(2 * enstrophy)                            # ω′ = √⟨ω²⟩
+    enstrophy_diss = get_palinstrophy!(sc.field, u, visc, g)   # η_Ω = 2νP = ν Σ k⁴|û|²
+    palinstrophy = enstrophy_diss / (2 * visc)                 # P = ⟨½|∇ω|²⟩
+    l_kra = (visc^3 / enstrophy_diss)^(1 / 6)                  # Kraichnan length η_K
+    l_omega = uavg / omega_rms                                 # Taylor-type 2D length u′/ω′
+    t_eddy = 1 / omega_rms                                     # large-scale strain time 1/ω′
+    t_ens = enstrophy_diss^(-1 / 3)                            # enstrophy-cascade time
+    Re = uavg * l_omega / visc                                 # Re = u′²/(ν ω′)
+    kmax_etaK = (π * g.n / g.l) * l_kra                        # DNS-resolution check (≳ 1 well-resolved)
+    return (;
+        e,
+        uavg,
+        diss,
+        enstrophy,
+        palinstrophy,
+        enstrophy_diss,
+        omega_rms,
+        l_kra,
+        l_omega,
+        t_eddy,
+        t_ens,
+        Re,
+        kmax_etaK,
+    )
 end
 
 function forwardeuler!(f!, u, cache, grid, Δt; args...)

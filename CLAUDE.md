@@ -15,13 +15,14 @@ julia --project=. -e 'using SymmetryCode'   # precompile; the primary smoke chec
 julia --project=test test/runtests.jl       # run the test suite
 julia --project main.jl                     # run the whole pipeline (long; usually run interactively)
 sbatch job.sh                               # SLURM submission; runs main.jl on a single H100
+runic -i .                                  # format all code in place (run from repo root)
 ```
 
 The test environment is a separate project under `test/` that uses `[sources] SymmetryCode = {path = ".."}` to depend on the dev checkout — `Pkg.instantiate` from `test/` is enough to set it up.
 
 `main.jl` is the canonical pipeline driver. It is structured as a script meant to be evaluated section by section in a REPL — sections create artifacts (`output/<name>/dns.jld2`, `data.jld2`, `ps-*.jld2`, `u-post-*.jld2`, `kde_*.jld2`, …) that downstream sections consume. Reruns short-circuit if the artifact already exists for that setup.
 
-Code is formatted with [Runic.jl](https://github.com/fredrikekre/Runic.jl) (no per-repo config).
+Code is formatted with [Runic.jl](https://github.com/fredrikekre/Runic.jl) (no per-repo config); run `runic -i .` from the repo root before committing.
 
 ## Pipeline
 

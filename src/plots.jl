@@ -13,6 +13,40 @@ getlabels() = (;
     conv = "Conv",
 )
 
+"""
+Inertial-range reference spectrum and the normalization that collapses the
+data onto the universal `κ̃^{-p}` shape.
+3D: Kolmogorov  `E = C ε^{2/3} κ^{-5/3}`,  `κ̃ = κ·l_kol`  (κη).
+2D: Kraichnan–Batchelor enstrophy cascade  `E = C η_Ω^{2/3} κ^{-3}`,
+    `κ̃ = κ·l_kra`  (κη_ω).
+`stats` may be a Vector of stat NamedTuples (averaged) or a single one.
+Plotting `(kscale·k, escale·E)` puts the inertial range on the universal
+`κ̃^{-p}` line and the dissipation scale at `κ̃ ≈ kdiss = 1`.
+"""
+function spectrum_reference(setup, stats)
+    (; D, l) = setup
+    sm(f) = stats isa AbstractVector ? mean(f, stats) : f(stats)
+    if D == 2
+        χ, l_d, p, C = sm(s -> s.enstrophy_diss), sm(s -> s.l_kra), 3, 1.4
+        xlabel = L"\kappa \eta_\omega"
+        ylabel = L"C^{-1} \eta_\Omega^{-2/3} \eta_\omega^{-3}\, E(\kappa)"
+        label = "Kraichnan −3"
+    else
+        χ, l_d, p, C = sm(s -> s.diss), sm(s -> s.l_kol), 5 / 3, 1.6
+        xlabel = L"\kappa \eta"
+        ylabel = L"C^{-1} \epsilon^{-2/3} \eta^{-5/3}\, E(\kappa)"
+        label = "Kolmogorov −5/3"
+    end
+    kscale = l_d
+    escale = 1 / (C * χ^(2 / 3) * l_d^(-p))      # = C^{-1} χ^{-2/3} l_d^{-p}
+    # Reference drawn from ~2× the forcing-shell wavenumber up to the
+    # dissipation scale κ̃ ≈ 1 (normalized units).
+    k_f = 2 * (2π / l) * 2 * l_d
+    k_ref = logrange(k_f, 1.0, 100)
+    E_ref = k_ref .^ (-p)
+    return (; kscale, escale, p, C, k_ref, E_ref, kdiss = 1.0, xlabel, ylabel, label)
+end
+
 function plot_training(setup, train_tbnn, train_equi, train_conv)
     fig = Figure(; size = (400, 340))
     ax = Axis(
@@ -536,37 +570,20 @@ function plot_spectrum_data(setup, data)
 
     s_dns = mean(data.spectra_dns)
     s_les = mean(data.spectra_les)
-    diss = mean(s -> s.diss, data.statistics_dns)
-    eta = mean(s -> s.l_kol, data.statistics_dns)
+    r = spectrum_reference(setup, data.statistics_dns)
 
     k_dns = 2π / setup.l * eachindex(s_dns)
     k_les = 2π / setup.l * eachindex(s_les)
-    if D == 2
-        # C = 4.0e1
-        # s_kol = C * diss^(2 / 3) * k_dns .^ (-3)
-        # escale = C^(-1) * diss^(-2 / 3) * eta^(-3)
-        s_kol = 1.0e1 * k_dns .^ (-3)
-        escale = 1.0
-        eta = 1.0
-    elseif D == 3
-        C = 1.6
-        s_kol = C * diss^(2 / 3) * k_dns .^ (-5 / 3)
-        # escale = C^(-1) * diss^(-2 / 3) * eta^(-5 / 3)
-        escale = 1.0
-        eta = 1.0
-    end
 
     fig = Figure(; size = (400, 340))
     ax = Axis(
         fig[1, 1];
         xscale = log10,
         yscale = log10,
-        # xlabel = L"\kappa \eta",
-        # ylabel = L"\epsilon^{-2 / 3} \eta^{5 / 3} E(\kappa)",
-        # xlabelsize = 20,
-        # ylabelsize = 20,
-        xlabel = "Wavenumber",
-        ylabel = "Energy",
+        xlabel = r.xlabel,
+        ylabel = r.ylabel,
+        xlabelsize = 20,
+        ylabelsize = 20,
     )
 
     # Banded force stuff
@@ -574,9 +591,9 @@ function plot_spectrum_data(setup, data)
     k2min = minimum(band.k2)
     k2max = maximum(band.k2)
     kforce = 2π / l * [sqrt(k2min), sqrt(k2max)]
-    span = kforce * eta
+    span = kforce * r.kscale
     forcecolor = Makie.wong_colors()[4]
-    b = sqrt(prod(extrema(escale * s_dns)))
+    b = sqrt(prod(extrema(r.escale * s_dns)))
     a = 1.1 * span[2]
     c = sqrt(prod(span))
     w = D == 2 ? 1 : 1.5
@@ -590,9 +607,10 @@ function plot_spectrum_data(setup, data)
         color = forcecolor,
     )
 
-    lines!(ax, eta * k_dns, escale * s_dns; label = "DNS")
-    lines!(ax, eta * k_les, escale * s_les; label = "Filtered DNS")
-    lines!(ax, eta * k_dns, escale * s_kol; label = "Kolmogorov")
+    lines!(ax, r.kscale * k_dns, r.escale * s_dns; label = "DNS")
+    lines!(ax, r.kscale * k_les, r.escale * s_les; label = "Filtered DNS")
+    lines!(ax, r.k_ref, r.E_ref; label = r.label)
+    vlines!(ax, r.kdiss; color = (:gray, 0.5), linestyle = :dash)
 
     Legend(
         fig[0, 1],
@@ -626,6 +644,7 @@ function plot_spectrum_dns(setup)
     stat |> pairs |> display
     s_dns = spectrum(u, g_dns, stuff_dns)
     s_les = spectrum(ubar, g_les, stuff_les)
+    r = spectrum_reference(setup, stat)
     # l_int_new = pi / 2 / stat.uavg * sum(eachindex(s_dns.s)) do i
     #     s_dns.s[i] / stuff_dns.k[i]
     # end
@@ -635,35 +654,11 @@ function plot_spectrum_dns(setup)
         fig[1, 1];
         xscale = log10,
         yscale = log10,
-        # xlabel = L"\kappa \eta",
-        # ylabel = if D == 2
-        #     L"C^{-1} \epsilon_\omega^{-2 / 3} \eta^{-5 / 3} E(\kappa)"
-        # else
-        #     L"C^{-1} \epsilon^{-2 / 3} \eta^{-3} E(\kappa)"
-        # end,
-        # xlabelsize = 20,
-        # ylabelsize = 20,
-        xlabel = "Wavenumber",
-        ylabel = "Energy",
+        xlabel = r.xlabel,
+        ylabel = r.ylabel,
+        xlabelsize = 20,
+        ylabelsize = 20,
     )
-    if D == 2
-        # C = 4
-        kkolmo = 2π / l * logrange(1, g_dns.n / 2, 100)
-        # lω_kol = stat.enstrophy_diss^(-1 / 6) * visc^(1 / 2)
-        # kolmo = @. C * stat.enstrophy_diss^(2 / 3) * kkolmo^(-3)
-        # escale = C^(-1) * stat.enstrophy_diss^(-2 / 3) * lω_kol^(-3)
-        # kscale = lω_kol
-        kscale, escale = 1.0, 1.0
-        kolmo = @. 1.0e2 * kkolmo^(-3)
-    elseif D == 3
-        kkolmo = 2π / l * [1, g_dns.n / 8]
-        C = 1.6
-        kolmo = @. C * stat.diss^(2 / 3) * kkolmo^(-5 / 3)
-        # escale = C^(-1) * stat.diss^(-2 / 3) * stat.l_kol^(-5 / 3)
-        # kscale = stat.l_kol
-        escale = 1.0
-        kscale = 1.0
-    end
     # ylims!(ax, 1.0e-4, 1.0e8)
     # ylims!(ax, 1.0e-14, 1.0e0)
 
@@ -688,10 +683,10 @@ function plot_spectrum_dns(setup)
     #     color = forcecolor,
     # )
 
-    @show kscale * s_dns.k[end]
-    lines!(ax, kscale * s_dns.k, escale * s_dns.s; label = "DNS")
-    lines!(ax, kscale * s_les.k, escale * s_les.s; label = "Filtered DNS")
-    lines!(kscale * kkolmo, escale * kolmo; label = "Kolmogorov")
+    lines!(ax, r.kscale * s_dns.k, r.escale * s_dns.s; label = "DNS")
+    lines!(ax, r.kscale * s_les.k, r.escale * s_les.s; label = "Filtered DNS")
+    lines!(ax, r.k_ref, r.E_ref; label = r.label)
+    vlines!(ax, r.kdiss; color = (:gray, 0.5), linestyle = :dash)
     Legend(
         fig[0, 1],
         ax;
@@ -715,21 +710,8 @@ function plot_spectrum_les(setup, data, les_stat)
     (; D) = setup
     s_ref = mean(data.spectra_les)
     s_les = map(stat -> mean(stat.s), les_stat)
-    diss = mean(s -> s.diss, data.statistics_dns)
-    eta = mean(s -> s.l_kol, data.statistics_dns)
+    r = spectrum_reference(setup, data.statistics_dns)
     k = 2π / setup.l * eachindex(s_ref)
-    if D == 2
-        # C = 1.6
-        # s_kol = C * diss^(2 / 3) * k .^ (-3)
-        # escale = C^(-1) * diss^(-2 / 3) * eta^(-3)
-        eta = 1.0
-        escale = 1.0
-        s_kol = 1.0e1 .* k .^ (-3)
-    elseif D == 3
-        C = 1.6
-        s_kol = C * diss^(2 / 3) * k .^ (-5 / 3)
-        escale = C^(-1) * diss^(-2 / 3) * eta^(-5 / 3)
-    end
     labels = getlabels()
 
     fig = Figure(; size = (400, 360))
@@ -737,18 +719,17 @@ function plot_spectrum_les(setup, data, les_stat)
         fig[1, 1];
         xscale = log10,
         yscale = log10,
-        # xlabel = L"\kappa \eta",
-        # ylabel = L"\epsilon^{-2 / 3} \eta^{5 / 3} E(\kappa)",
-        # xlabelsize = 20,
-        # ylabelsize = 20,
-        xlabel = "Wavenumber",
-        ylabel = "Energy",
+        xlabel = r.xlabel,
+        ylabel = r.ylabel,
+        xlabelsize = 20,
+        ylabelsize = 20,
     )
-    lines!(ax, eta * k, escale * s_ref; label = "Reference")
+    lines!(ax, r.kscale * k, r.escale * s_ref; label = "Reference")
     for key in keys(s_les)
-        lines!(ax, eta * k, escale * s_les[key]; label = labels[key])
+        lines!(ax, r.kscale * k, r.escale * s_les[key]; label = labels[key])
     end
-    # lines!(ax, eta * k, escale * s_kol; label = "Kolmogorov")
+    lines!(ax, r.k_ref, r.E_ref; label = r.label)
+    vlines!(ax, r.kdiss; color = (:gray, 0.5), linestyle = :dash)
     Legend(
         fig[0, :],
         ax;
