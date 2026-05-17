@@ -31,8 +31,8 @@ let
     statistics = load("$(setup.outdir)/dns.jld2", "statistics")
     s = statistics[end]
     s |> pairs |> display
+    flush(stdout)
 end
-flush(stdout)
 
 # Plot DNS spectrum
 S.plot_spectrum_dns(setup)
