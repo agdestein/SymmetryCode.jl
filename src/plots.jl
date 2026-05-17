@@ -207,7 +207,7 @@ function plot_velocities(setup, comp)
     time_inds = map(x -> round(Int, x), range(1, ntime, nrow + 1))[2:end]
     # time_inds = [20, 30, 50, 100]
     # time_inds = [5, 10, 20, 30]
-    
+
     # Loop over figure columns
     for (k, key) in enumerate(modelkeys)
         @info "Plotting velocity for $(key)"
@@ -517,8 +517,11 @@ function plot_evolution_dns(setup)
     return fig
 end
 
-function plot_evolution_data(setup, data)
+function plot_evolution_data(setup)
     (; D) = setup
+
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+
     times_warmup, stats_warmup = load("$(setup.outdir)/dns.jld2", "times", "statistics")
     times_warmup .-= times_warmup[end] # Use negative times for warmup
     energies_warmup = map(s -> s.e, stats_warmup)

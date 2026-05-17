@@ -45,7 +45,7 @@ S.plot_evolution_dns(setup)
 
 S.create_data(setup);
 
-data = joinpath(setup.outdir, "data.jld2") |> load_object;
+# data = joinpath(setup.outdir, "data.jld2") |> load_object;
 
 let
     (; D) = setup
@@ -70,7 +70,8 @@ end
 
 let
     (; D) = setup
-    u = map(copy, data.inputs[2]) |> adapt(setup.backend)
+    data = joinpath(setup.outdir, "data.jld2") |> load_object;
+    u = map(copy, data.inputs[1]) |> adapt(setup.backend)
     g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     v = S.spacescalarfield(g)
     p = plan_rfft(v)
@@ -89,20 +90,21 @@ let
     fig
 end
 
-Base.summarysize(data) * 1.0e-9
+# Base.summarysize(data) * 1.0e-9
+#
+# data |> pairs
+#
+# getindex.(data.statistics_dns, :diss)
+# getindex.(data.statistics_dns, :uavg) .^ 2 / 2 * 3
+# getindex.(data.statistics_dns, :Re_tay)
+# getindex.(data.statistics_dns, :t_int)
+# getindex.(data.statistics_dns, :l_int)
+# getindex.(data.statistics_dns, :l_kol)
 
-data |> pairs
-
-getindex.(data.statistics_dns, :diss)
-getindex.(data.statistics_dns, :uavg) .^ 2 / 2 * 3
-getindex.(data.statistics_dns, :Re_tay)
-getindex.(data.statistics_dns, :t_int)
-getindex.(data.statistics_dns, :l_int)
-getindex.(data.statistics_dns, :l_kol)
-
-S.plot_evolution_data(setup, data)
+S.plot_evolution_data(setup)
 
 let
+    data = joinpath(setup.outdir, "data.jld2") |> load_object;
     fig = Figure()
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity")
     s = data.statistics_dns

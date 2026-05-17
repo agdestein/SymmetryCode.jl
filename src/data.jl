@@ -117,7 +117,7 @@ end
 
 function create_data(setup)
     (; l, visc, D, n_dns, n_les, cfl, backend, outdir, datagen, Δ) = setup
-    (; nstep, nsubstep) = datagen
+    (; nstep, tstop) = datagen
 
     @info "Creating data"
     flush(stderr)
@@ -162,14 +162,16 @@ function create_data(setup)
     flush(stderr)
 
     # Time stepping
-    t = 0.0
+    savetimes = range(0.0, tstop, length = nstep)
+    t = savetimes[1]
     timing = time()
-    for i in 1:nstep
-        # Do multiple substeps before storing data
-        # Skip first step to get initial statistics
-        i == 1 || for j in 1:nsubstep
+    for (i, tnext) in enumerate(savetimes)
+        # Step until the next save point.
+        # Skip the first step to capture the initial statistics.
+        i == 1 || while t < tnext
             # Time step
             Δt = cfl * propose_timestep(u, g_dns, visc, c_dns)
+            Δt = min(Δt, tnext - t)
             t += Δt
 
             # Evolve DNS
@@ -179,7 +181,6 @@ function create_data(setup)
             maintain_shell_energy!(u, shells)
 
             # Log
-            # if j == nsubstep && i % 1 == 0
             if i % 1 == 0
                 e = energy(u)
                 @info join(
