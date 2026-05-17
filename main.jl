@@ -26,13 +26,12 @@ setup |> pairs
 # Warmup simulation
 S.create_dns(setup)
 
-# Compute statistics after warm-up
+# Show statistics after warm-up
 let
-    (; D, l, n_dns, visc, backend) = setup
-    g = S.Grid{D}(; l, n = n_dns, backend)
-    u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    S.turbulence_statistics(u, visc, g_dns)
-end |> pairs |> display
+    statistics = load("$(setup.outdir)/dns.jld2", "statistics")
+    s = statistics[end]
+    s |> pairs |> display
+end
 flush(stdout)
 
 # Plot DNS spectrum
@@ -42,14 +41,7 @@ S.plot_spectrum_dns(setup)
 S.plot_evolution_dns(setup)
 
 # # Plot dissipation vs finite difference of energy
-# plot_dissipation_finite_difference(setup)
-
-# set_theme!(;
-#     fonts = (;
-#         regular = "Dejavu",
-#         # regular = "Palatino",
-#     ),
-# )
+# S.plot_dissipation_finite_difference(setup)
 
 S.create_data(setup);
 
@@ -139,7 +131,7 @@ let
     fig
 end
 
-S.plot_spectrum_data(setup, data)
+S.plot_spectrum_data(setup)
 
 m_nomo = let
     g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
@@ -198,27 +190,43 @@ upostfiles = map(
     ),
 )
 
-let
-    models = (;
+S.solve_les(
+    setup,
+    (;
         nomo = m_nomo,
         smag = m_smag,
         dynsmag = m_dynsmag,
-        # # vers = m_vers,
+        # vers = m_vers,
         clar = m_clar,
         # tbnn = m_tbnn,
         # equi = m_equi,
         # conv = m_conv,
-    )
-    S.solve_les(; data, setup, models, files = upostfiles)
-end
+    ),
+)
 
 round(data.timing; digits = 1)
 
-map(f -> load_object(f).timing, upostfiles) |>
-    t -> map(x -> round(x; digits = 1), t) |> pairs |> display
-flush(stdout)
+let
+    keys = [
+        :nomo,
+        :smag,
+        :dynsmag,
+        # :vers,
+        :clar,
+        # :tbnn,
+        # :equi,
+        # :conv,
+    ]
+    files = S.get_upostfiles(setup)
+    map(keys) do k
+        t = load_object(files[k]).timing
+        tround = round(t; digits = 1)
+        k => tround
+    end |> NamedTuple |> pairs |> display
+    flush(stdout)
+end
 
-les_stat = S.get_les_statistics(setup, data, upostfiles);
+les_stat = S.get_les_statistics(setup, upostfiles);
 save_object("$(setup.outdir)/les_stat.jld2", les_stat)
 
 les_stat = load_object("$(setup.outdir)/les_stat.jld2");
@@ -259,11 +267,10 @@ let
 end
 
 # Plot LES spectrum
-S.plot_spectrum_les(setup, data, les_stat)
+S.plot_spectrum_les(setup, les_stat)
 
 S.predict_sfs(
     setup,
-    data,
     (;
         #
         smag = m_smag,
@@ -276,8 +283,7 @@ S.predict_sfs(
 )
 
 S.compute_densities(
-    setup, data, [
-        #
+    setup, [
         :smag,
         :dynsmag,
         :clar,
@@ -299,11 +305,11 @@ prediction_error_prior = let
         # :equi,
         # :conv,
     ]
-    S.apriori_error(setup, data, modelkeys)
+    S.apriori_error(setup, modelkeys)
 end
 
-prediction_error_prior |> e -> map(x -> round(x.relerr; sigdigits = 4), e) |> pairs
-prediction_error_prior |> e -> map(x -> round(x.crosscor; sigdigits = 4), e) |> pairs
+map(x -> round(x.relerr; sigdigits = 4), prediction_error_prior) |> pairs
+map(x -> round(x.crosscor; sigdigits = 4), prediction_error_prior) |> pairs
 
 ##############################
 # A-priori equivariance errors
@@ -411,36 +417,10 @@ end;
 
 dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
-S.plot_velocities(setup, data, upostfiles, :x)
-S.plot_velocities(setup, data, upostfiles, :z)
+S.plot_velocities(setup, :x)
+S.plot_velocities(setup, :z)
 
-let
-    models = (;
-        # nomo = m_nomo,
-        smag = m_smag,
-        # vers = m_vers,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        equi = m_equi,
-        conv = m_conv,
-    )
-    u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    save("$(setup.plotdir)/sfs.png", fig; backend = CairoMakie)
-    fig
-end
-
-S.plot_sfs(setup, data)
-
-let
-    (; D, l, n_dns, visc, backend) = setup
-    g_dns = S.Grid{D}(; l, n = n_dns, backend)
-    u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    stat = S.turbulence_statistics(u, visc, g_dns)
-    diss1 = stat.diss
-    dd = similar(u.x, typeof(l))
-    diss2 = S.get_dissipation!(dd, u, visc, g_dns)
-    @show diss1 diss2
-end;
+S.plot_sfs(setup)
 
 S.compute_qr(setup, data, upostfiles)
 

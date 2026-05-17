@@ -56,14 +56,11 @@ function create_dns(setup)
     shells = energy_shells(g, [1, 2], u)
 
     # Allocate arrays
-    dissfield = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
-    cache = (; getcache(g)..., dissfield)
+    cache = getcache(g)
     sc = statscache(g)
 
     t = 0.0
     times = [t]
-    energies = [energy(u)]
-    dissipations = [get_dissipation!(dissfield, u, visc, g)]
     statistics = [turbulence_statistics(u, visc, g, sc)]
 
     @info "Running DNS simulation"
@@ -87,20 +84,14 @@ function create_dns(setup)
         maintain_shell_energy!(u, shells)
 
         if k % 1 == 0
-            e = energy(u)
-            diss = get_dissipation!(dissfield, u, visc, g)
             push!(times, t)
-            push!(energies, e)
-            push!(dissipations, diss)
-            push!(statistics, turbulence_statistics(u, visc, g, sc))
+            s = turbulence_statistics(u, visc, g, sc)
+            push!(statistics, s)
             @info join(
                 [
-                    # "k = $k",
                     "t = $(round(t; sigdigits = 4))",
                     "Δt = $(round(Δt; sigdigits = 4))",
-                    # "umax = $(round(maximum(u -> maximum(abs, u), u); sigdigits = 4))",
-                    "energy = $(round(e; sigdigits = 4))",
-                    "diss = $(round(diss; sigdigits = 4))",
+                    "energy = $(round(s.e; sigdigits = 4))",
                 ],
                 ",\t",
             )
@@ -113,15 +104,15 @@ function create_dns(setup)
     file = joinpath(outdir, "dns.jld2")
     @info "Saving final DNS snapshot to $(file)"
     flush(stderr)
-    return jldsave(
+    jldsave(
         file;
         u = u |> cpu_device(),
         times,
-        energies,
-        dissipations,
         statistics,
         walltime,
     )
+
+    return nothing
 end
 
 function create_data(setup)
@@ -144,10 +135,8 @@ function create_data(setup)
     τ = tensorfield(g_les)
     inputs = fill(map(Array, ubar), 0)
     outputs = fill(map(Array, τ), 0)
-    dissfield_dns = similar(u.x, typeof(l))
-    dissfield_les = similar(ubar.x, typeof(l))
-    c_dns = (; getcache(g_dns)..., dissfield = dissfield_dns)
-    c_les = (; getcache(g_les)..., dissfield = dissfield_les)
+    c_dns = getcache(g_dns)
+    c_les = getcache(g_les)
     sc_dns = statscache(g_dns)
     sc_les = statscache(g_les)
 
@@ -157,7 +146,7 @@ function create_data(setup)
     spectra_dns = fill(zeros(0), 0)
     spectra_les = fill(zeros(0), 0)
 
-    # Compute turbulence statistics (use σ as temporary tensor storage)
+    # Compute turbulence statistics
     statistics_dns = fill(turbulence_statistics(u, visc, g_dns, sc_dns), 0)
     statistics_les = fill(turbulence_statistics(ubar, visc, g_les, sc_les), 0)
 
@@ -198,7 +187,6 @@ function create_data(setup)
                         "i = $i",
                         "t = $(round(t; sigdigits = 4))",
                         "Δt = $(round(Δt; sigdigits = 4))",
-                        # "umax = $(round(maximum(u -> maximum(abs, u), u); sigdigits = 4))",
                         "energy = $(round(e; sigdigits = 4))",
                     ],
                     ",\t",

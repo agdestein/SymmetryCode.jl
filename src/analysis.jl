@@ -3,8 +3,11 @@
 # and Q-R invariant joint distributions.
 
 "Compute distribution of tensor components and dissipation coefficients."
-function predict_sfs(setup, data, models)
+function predict_sfs(setup, models)
     (; outdir, D, l, n_les, backend) = setup
+
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+
     g = Grid{D}(; l, n = n_les, backend)
     u = vectorfield(g)
     plan = plan_rfft(spacescalarfield(g))
@@ -35,8 +38,11 @@ function predict_sfs(setup, data, models)
 end
 
 "Compute distribution of tensor components and dissipation coefficients."
-function compute_densities(setup, data, modelkeys)
+function compute_densities(setup, modelkeys)
     (; outdir, name, D, l, n_les, backend, Δ) = setup
+
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+
     g = Grid{D}(; l, n = n_les, backend)
     u = vectorfield(g)
     τ = spacetensorfield(g)
@@ -114,8 +120,11 @@ function compute_densities(setup, data, modelkeys)
     return nothing
 end
 
-function apriori_error(setup, data, modelkeys)
+function apriori_error(setup, modelkeys)
     (; D, l, n_les, backend) = setup
+
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+
     g = Grid{D}(; l, n = n_les, backend)
 
     τ = spacetensorfield(g)

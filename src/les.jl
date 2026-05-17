@@ -32,9 +32,26 @@ function les!(du, u, grid, cache; model, visc)
     return
 end
 
-function solve_les(; data, setup, models, files)
+get_upostfiles(setup) = map(
+    name -> "$(setup.outdir)/u-post-$(name).jld2",
+    (;
+        nomo = "nomo",
+        smag = "smag",
+        dynsmag = "dynsmag",
+        vers = "vers",
+        clar = "clar",
+        tbnn = "tbnn",
+        equi = "equi",
+        conv = "conv",
+    ),
+)
+
+function solve_les(setup, models)
     (; D, l, n_les, backend, visc, cfl) = setup
     grid = Grid{D}(; l, n = n_les, backend)
+
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    files = get_upostfiles(setup)
 
     u_les = data.inputs[1]
 
@@ -130,8 +147,11 @@ function solve_les!(u; times, grid, visc, model, cfl)
     return states
 end
 
-function get_les_statistics(setup, data, files)
+function get_les_statistics(setup, files)
     (; D, l, n_les, backend, visc) = setup
+
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+
     g = Grid{D}(; l, n = n_les, backend)
     dissfield_les = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
     stuff = spectral_stuff(g)

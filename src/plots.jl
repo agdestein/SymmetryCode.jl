@@ -19,26 +19,27 @@ data onto the universal `κ̃^{-p}` shape.
 3D: Kolmogorov  `E = C ε^{2/3} κ^{-5/3}`,  `κ̃ = κ·l_kol`  (κη).
 2D: Kraichnan–Batchelor enstrophy cascade  `E = C η_Ω^{2/3} κ^{-3}`,
     `κ̃ = κ·l_kra`  (κη_ω).
-`stats` may be a Vector of stat NamedTuples (averaged) or a single one.
+`stats` is a single NamedTuple.
 Plotting `(kscale·k, escale·E)` puts the inertial range on the universal
 `κ̃^{-p}` line and the dissipation scale at `κ̃ ≈ kdiss = 1`.
 """
 function spectrum_reference(setup, stats)
     (; D, l) = setup
-    sm(f) = stats isa AbstractVector ? mean(f, stats) : f(stats)
     if D == 2
-        χ, l_d, p, C = sm(s -> s.enstrophy_diss), sm(s -> s.l_kra), 3, 1.4
+        χ, l_d, p, C = stats.enstrophy_diss, stats.l_kra, 3, 1.4
         xlabel = L"\kappa \eta_\omega"
         ylabel = L"C^{-1} \eta_\Omega^{-2/3} \eta_\omega^{-3}\, E(\kappa)"
-        label = "Kraichnan −3"
+        # label = "Kraichnan −3"
+        label = "Kraichnan"
     else
-        χ, l_d, p, C = sm(s -> s.diss), sm(s -> s.l_kol), 5 / 3, 1.6
+        χ, l_d, p, C = stats.diss, stats.l_kol, 5 / 3, 1.6
         xlabel = L"\kappa \eta"
         ylabel = L"C^{-1} \epsilon^{-2/3} \eta^{-5/3}\, E(\kappa)"
-        label = "Kolmogorov −5/3"
+        # label = "Kolmogorov −5/3"
+        label = "Kolmogorov"
     end
     kscale = l_d
-    escale = 1 / (C * χ^(2 / 3) * l_d^(-p))      # = C^{-1} χ^{-2/3} l_d^{-p}
+    escale = 1 / C * χ^(-2 / 3) * l_d^(-p)      # = C^{-1} χ^{-2/3} l_d^{-p}
     # Reference drawn from ~2× the forcing-shell wavenumber up to the
     # dissipation scale κ̃ ≈ 1 (normalized units).
     k_f = 2 * (2π / l) * 2 * l_d
@@ -178,8 +179,12 @@ function plot_densities(setup; dolog)
     return fig
 end
 
-function plot_velocities(setup, data, upostfiles, comp)
+function plot_velocities(setup, comp)
     (; D, l, n_les, backend) = setup
+
+    upostfiles = get_upostfiles(setup)
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+
     fig = Figure(; size = (800, 470))
     g = Grid{D}(; l, n = n_les, backend)
     ui = scalarfield(g)
@@ -197,9 +202,17 @@ function plot_velocities(setup, data, upostfiles, comp)
         # :equi,
         # :conv,
     ]
+    nrow = 4
+    ntime = length(data.times)
+    time_inds = map(x -> round(Int, x), range(1, ntime, nrow + 1))[2:end]
+    # time_inds = [20, 30, 50, 100]
+    # time_inds = [5, 10, 20, 30]
+    
+    # Loop over figure columns
     for (k, key) in enumerate(modelkeys)
         @info "Plotting velocity for $(key)"
         flush(stderr)
+
         title = labels[key]
         useries = if key == :ref
             data.inputs
@@ -207,8 +220,12 @@ function plot_velocities(setup, data, upostfiles, comp)
             upost = load_object(upostfiles[key])
             upost.u
         end
-        for (i, t) in enumerate([20, 30, 50, 100])
-            t > length(useries) && continue # Clark series exploded and stop early
+
+        # Make all plots in current column
+        for (i, t) in enumerate(time_inds)
+            # Don't plot anything if series exploded before current time
+            t > length(useries) && continue
+
             ax = Axis(
                 fig[i, k];
                 ylabel = "t = $(round(data.times[t]; sigdigits = 2))",
@@ -221,18 +238,27 @@ function plot_velocities(setup, data, upostfiles, comp)
                 title,
                 titlevisible = i == 1,
             )
+
             ui = useries[t][comp] |> adapt(backend)
             apply!(twothirds!, g, (ui, g))
             to_phys!(ui_space, ui, plan, g)
             range = (:, :)
             # range = (40:60, 40:60)
-            slice = ui_space[range..., end] |> Array
+            slice = if D == 2
+                ui_space[range...]
+            else
+                ui_space[range..., end]
+            end |> Array
+
             image!(ax, slice; colormap = :RdBu, interpolate = false)
         end
     end
+
     rowgap!(fig.layout, 10)
     colgap!(fig.layout, 10)
+
     save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
+
     return fig
 end
 
@@ -286,7 +312,7 @@ function plot_qr(setup)
             ylabelsize = 20,
             title,
         )
-        if name == "turbulator"
+        if startswith(name, "turbulator")
             ran = 1.0e-3, 1.0e1
             ncat = 6
         elseif name == "snellius"
@@ -382,8 +408,13 @@ function plot_equivariance_errors(errs)
     return fig
 end
 
-function plot_sfs(setup, data)
+function plot_sfs(setup)
     (; D, l, n_les, backend) = setup
+
+    @assert D == 3 "TODO: Make this plot 2D compatible"
+
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+
     g = Grid{D}(; l, n = n_les, backend)
 
     τ = spacetensorfield(g)
@@ -458,16 +489,15 @@ function plot_sfs(setup, data)
 end
 
 function plot_evolution_dns(setup)
-    times, energies, dissipations =
-        load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
-    # a = @. dissipations / 2 / energies
+    times, stats = load("$(setup.outdir)/dns.jld2", "times", "statistics")
+    e = map(s -> s.e, stats)
+    diss = map(s -> s.diss, stats)
 
     # Create plot
     fig = Figure(; size = (400, 340))
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Normalized quantity")
-    lines!(ax, times, energies / maximum(energies); label = "Energy")
-    lines!(ax, times, dissipations / maximum(dissipations); label = "Dissipation")
-    # lines!(ax, times, a / maximum(a); linestyle = :dash, label = "Forcing")
+    lines!(ax, times, e / maximum(e); label = "Energy")
+    lines!(ax, times, diss / maximum(diss); label = "Dissipation")
     Legend(
         fig[0, 1],
         ax;
@@ -489,13 +519,14 @@ end
 
 function plot_evolution_data(setup, data)
     (; D) = setup
-    times_warmup, energies_warmup, dissipations_warmup =
-        load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
+    times_warmup, stats_warmup = load("$(setup.outdir)/dns.jld2", "times", "statistics")
     times_warmup .-= times_warmup[end] # Use negative times for warmup
+    energies_warmup = map(s -> s.e, stats_warmup)
+    dissipations_warmup = map(s -> s.diss, stats_warmup)
 
     times = data.times
-    energies = getindex.(data.statistics_dns, :uavg) .^ 2 / 2 * D
-    dissipations = getindex.(data.statistics_dns, :diss)
+    energies = map(s -> s.e, data.statistics_dns)
+    dissipations = map(s -> s.diss, data.statistics_dns)
 
     emax = max(maximum(energies), maximum(energies_warmup))
     dmax = max(maximum(dissipations), maximum(dissipations_warmup))
@@ -532,17 +563,18 @@ function plot_evolution_data(setup, data)
 end
 
 function plot_dissipation_finite_difference(setup)
-    times, energies, dissipations =
-        load("$(setup.outdir)/dns.jld2", "times", "energies", "dissipations")
+    times, stats = load("$(setup.outdir)/dns.jld2", "times", "statistics")
+    e = map(s -> s.e, stats)
+    diss = map(s -> s.diss, stats)
 
     # Create plot
     fig = Figure(; size = (400, 340))
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity")
-    lines!(ax, times, 6 / 5 * dissipations; label = "Dissipation")
+    lines!(ax, times, 6 / 5 * diss; label = "Dissipation")
     lines!(
         ax,
         times[2:end],
-        -diff(energies) ./ diff(times);
+        -diff(e) ./ diff(times);
         label = "Finite difference of energy",
     )
     Legend(
@@ -564,13 +596,26 @@ function plot_dissipation_finite_difference(setup)
     return fig
 end
 
-function plot_spectrum_data(setup, data)
+"Get named tuple of mean values from a vector of named tuples."
+function mean_of_named_tuple_series(series)
+    k = keys(series[1])
+    n = length(series)
+    p = map(k) do k
+        m = sum(s -> s[k], series) / n
+        k => m
+    end
+    return NamedTuple(p)
+end
+
+function plot_spectrum_data(setup)
     (; D, l, n_dns, backend) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
 
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+
     s_dns = mean(data.spectra_dns)
     s_les = mean(data.spectra_les)
-    r = spectrum_reference(setup, data.statistics_dns)
+    r = spectrum_reference(setup, mean_of_named_tuple_series(data.statistics_dns))
 
     k_dns = 2π / setup.l * eachindex(s_dns)
     k_les = 2π / setup.l * eachindex(s_les)
@@ -580,10 +625,12 @@ function plot_spectrum_data(setup, data)
         fig[1, 1];
         xscale = log10,
         yscale = log10,
-        xlabel = r.xlabel,
-        ylabel = r.ylabel,
-        xlabelsize = 20,
-        ylabelsize = 20,
+        # xlabel = r.xlabel,
+        # ylabel = r.ylabel,
+        # xlabelsize = 20,
+        # ylabelsize = 20,
+        xlabel = "Wavenumber",
+        ylabel = "Energy",
     )
 
     # Banded force stuff
@@ -610,7 +657,7 @@ function plot_spectrum_data(setup, data)
     lines!(ax, r.kscale * k_dns, r.escale * s_dns; label = "DNS")
     lines!(ax, r.kscale * k_les, r.escale * s_les; label = "Filtered DNS")
     lines!(ax, r.k_ref, r.E_ref; label = r.label)
-    vlines!(ax, r.kdiss; color = (:gray, 0.5), linestyle = :dash)
+    # vlines!(ax, r.kdiss; color = (:gray, 0.5), linestyle = :dash)
 
     Legend(
         fig[0, 1],
@@ -631,6 +678,7 @@ function plot_spectrum_dns(setup)
     (; outdir, plotdir, D, l, n_dns, n_les, backend, visc) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
+    statistics = load("$(outdir)/dns.jld2", "statistics")
     u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
     ubar = vectorfield(g_les)
     for (ubar, u) in zip(ubar, u)
@@ -640,24 +688,22 @@ function plot_spectrum_dns(setup)
     D = dim(g_dns)
     stuff_dns = spectral_stuff(g_dns)
     stuff_les = spectral_stuff(g_les)
-    stat = turbulence_statistics(u, visc, g_dns)
-    stat |> pairs |> display
+    stat = statistics[end]
     s_dns = spectrum(u, g_dns, stuff_dns)
     s_les = spectrum(ubar, g_les, stuff_les)
     r = spectrum_reference(setup, stat)
-    # l_int_new = pi / 2 / stat.uavg * sum(eachindex(s_dns.s)) do i
-    #     s_dns.s[i] / stuff_dns.k[i]
-    # end
-    # @show stat.l_int l_int_new; error()
+
     fig = Figure(; size = (400, 340))
     ax = Axis(
         fig[1, 1];
         xscale = log10,
         yscale = log10,
-        xlabel = r.xlabel,
-        ylabel = r.ylabel,
-        xlabelsize = 20,
-        ylabelsize = 20,
+        # xlabel = r.xlabel,
+        # ylabel = r.ylabel,
+        # xlabelsize = 20,
+        # ylabelsize = 20,
+        xlabel = "Wavenumber",
+        ylabel = "Energy",
     )
     # ylims!(ax, 1.0e-4, 1.0e8)
     # ylims!(ax, 1.0e-14, 1.0e0)
@@ -686,7 +732,7 @@ function plot_spectrum_dns(setup)
     lines!(ax, r.kscale * s_dns.k, r.escale * s_dns.s; label = "DNS")
     lines!(ax, r.kscale * s_les.k, r.escale * s_les.s; label = "Filtered DNS")
     lines!(ax, r.k_ref, r.E_ref; label = r.label)
-    vlines!(ax, r.kdiss; color = (:gray, 0.5), linestyle = :dash)
+    # vlines!(ax, r.kdiss; color = (:gray, 0.5), linestyle = :dash)
     Legend(
         fig[0, 1],
         ax;
@@ -706,11 +752,14 @@ function plot_spectrum_dns(setup)
     return fig
 end
 
-function plot_spectrum_les(setup, data, les_stat)
+function plot_spectrum_les(setup, les_stat)
     (; D) = setup
+
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+
     s_ref = mean(data.spectra_les)
     s_les = map(stat -> mean(stat.s), les_stat)
-    r = spectrum_reference(setup, data.statistics_dns)
+    r = spectrum_reference(setup, mean_of_named_tuple_series(data.statistics_dns))
     k = 2π / setup.l * eachindex(s_ref)
     labels = getlabels()
 
@@ -719,17 +768,19 @@ function plot_spectrum_les(setup, data, les_stat)
         fig[1, 1];
         xscale = log10,
         yscale = log10,
-        xlabel = r.xlabel,
-        ylabel = r.ylabel,
-        xlabelsize = 20,
-        ylabelsize = 20,
+        # xlabel = r.xlabel,
+        # ylabel = r.ylabel,
+        # xlabelsize = 20,
+        # ylabelsize = 20,
+        xlabel = "Wavenumber",
+        ylabel = "Energy",
     )
     lines!(ax, r.kscale * k, r.escale * s_ref; label = "Reference")
     for key in keys(s_les)
         lines!(ax, r.kscale * k, r.escale * s_les[key]; label = labels[key])
     end
-    lines!(ax, r.k_ref, r.E_ref; label = r.label)
-    vlines!(ax, r.kdiss; color = (:gray, 0.5), linestyle = :dash)
+    # lines!(ax, r.k_ref, r.E_ref; label = r.label)
+    # vlines!(ax, r.kdiss; color = (:gray, 0.5), linestyle = :dash)
     Legend(
         fig[0, :],
         ax;

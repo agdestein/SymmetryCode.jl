@@ -41,7 +41,7 @@ setup_turbulator_small() = getsetup(;
     n_dns = 256,
     n_les = 64,
     Δ_factor = 3,
-    visc = 6.0e-4,
+    visc = 7.0e-4,
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
     datagen = (; nstep = 30, nsubstep = 60),
