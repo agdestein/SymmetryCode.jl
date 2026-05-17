@@ -26,6 +26,15 @@ setup |> pairs
 # Warmup simulation
 S.create_dns(setup)
 
+# Compute statistics after warm-up
+let
+    (; D, l, n_dns, visc, backend) = setup
+    g = S.Grid{D}(; l, n = n_dns, backend)
+    u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
+    S.turbulence_statistics(u, visc, g_dns)
+end |> pairs |> display
+flush(stdout)
+
 # Plot DNS spectrum
 S.plot_spectrum_dns(setup)
 
@@ -421,15 +430,6 @@ let
 end
 
 S.plot_sfs(setup, data)
-
-let
-    # setup = S.setup_turbulator_medium()
-    (; D, l, n_dns, visc, backend) = setup
-    g_dns = S.Grid{D}(; l, n = n_dns, backend)
-    u = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    S.turbulence_statistics(u, visc, g_dns)
-end |> pairs |> display
-flush(stdout)
 
 let
     (; D, l, n_dns, visc, backend) = setup
