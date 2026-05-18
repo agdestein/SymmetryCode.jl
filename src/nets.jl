@@ -145,7 +145,9 @@ end
 function fullchain(setup, net, project, ps, st, Δ)
     (; D) = setup
     ps = project(ps)
-    function model(x)
+
+    # x is the VGT
+    function model(u, x)
         x = stack(x) # Convert named tuple to array
         T = eltype(x)
         s = size(x)
@@ -296,7 +298,7 @@ function getgradient(u, g)
     return AA
 end
 
-tbnn(net, ps, st, Δ, g) = function model(A)
+tbnn(net, ps, st, Δ, g) = function model(u, A)
     nx = space_ndrange(g)
     nt = tensordim(g)
     nb = nbasis(g)

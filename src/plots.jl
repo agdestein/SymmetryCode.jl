@@ -76,19 +76,10 @@ function plot_training(setup, train_tbnn, train_equi, train_conv)
     return fig
 end
 
-function plot_densities(setup; dolog)
+function plot_densities(setup, mkeys; dolog)
     (; outdir, plotdir, name) = setup
     yscale = dolog ? log10 : identity
 
-    mkeys = [
-        :ref,
-        :smag,
-        :dynsmag,
-        :clar,
-        # :tbnn,
-        # :equi,
-        # :conv,
-    ]
     # t_kol = mean(x -> x.t_kol, data.statistics_les)
 
     fig = Figure(; size = (800, 300))
@@ -179,7 +170,7 @@ function plot_densities(setup; dolog)
     return fig
 end
 
-function plot_velocities(setup, comp)
+function plot_velocities(setup, comp, modelkeys)
     (; D, l, n_les, backend) = setup
 
     upostfiles = get_upostfiles(setup)
@@ -191,17 +182,6 @@ function plot_velocities(setup, comp)
     ui_space = spacescalarfield(g)
     plan = plan_rfft(ui_space)
     labels = getlabels()
-    modelkeys = [
-        # :dns,
-        :ref,
-        :nomo,
-        :smag,
-        :dynsmag,
-        :clar,
-        # :tbnn,
-        # :equi,
-        # :conv,
-    ]
     nrow = 4
     ntime = length(data.times)
     time_inds = map(x -> round(Int, x), range(1, ntime, nrow + 1))[2:end]
@@ -287,7 +267,7 @@ function plot_qr(setup, modelkeys)
 
     for (k, key) in modelkeys |> enumerate
         title = labels[key]
-        j, i = CartesianIndices((3, 2))[k].I
+        j, i = CartesianIndices((4, 2))[k].I
         ax = Axis(
             fig[i, j];
             xlabelvisible = i == 2,
@@ -398,7 +378,7 @@ function plot_equivariance_errors(errs)
     return fig
 end
 
-function plot_sfs(setup)
+function plot_sfs(setup, modelkeys)
     (; D, l, n_les, backend) = setup
 
     @assert D == 3 "TODO: Make this plot 2D compatible"
@@ -422,14 +402,6 @@ function plot_sfs(setup)
     end
     τ_ref = τ |> cpu_device()
 
-    modelkeys = [
-        :smag,
-        :dynsmag,
-        :clar,
-        # :tbnn,
-        # :equi,
-        # :conv,
-    ]
     τ_les = map(modelkeys) do key
         τles = load_object("$(setup.outdir)/sfs_$(key).jld2")[t]
         make_tracefree!(τles, g)

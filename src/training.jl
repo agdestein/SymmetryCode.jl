@@ -94,21 +94,24 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
     return (; ps, st, losses_train, losses_valid, timing)
 end
 
-function create_tbnn(setup, data, dotrain)
+function create_tbnn(setup, dotrain)
+    (; tbnn_setup) = setup
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     kern = ntuple(Returns(1), setup.D)
-    net = Chain(
-        Conv(kern, ninvariant(g) => 64, gelu),
-        Conv(kern, 64 => 64, gelu),
-        Conv(kern, 64 => 128, gelu),
-        Conv(kern, 128 => nbasis(g); use_bias = false),
-    ) # 13_888 parameters
+    # TODO: Extract this from `tbnn_setup`
     # net = Chain(
-    #     Conv(kern, Spectral.ninvariant(g) => 16, gelu),
-    #     Conv(kern, 16 => 32, gelu),
-    #     Conv(kern, 32 => 64, gelu),
-    #     Conv(kern, 64 => Spectral.nbasis(g); use_bias = false),
-    # ) # 3_200 parameters
+    #     Conv(kern, ninvariant(g) => 64, gelu),
+    #     Conv(kern, 64 => 64, gelu),
+    #     Conv(kern, 64 => 128, gelu),
+    #     Conv(kern, 128 => nbasis(g); use_bias = false),
+    # ) # 13_888 parameters
+    net = Chain(
+        Conv(kern, ninvariant(g) => 16, gelu),
+        Conv(kern, 16 => 32, gelu),
+        Conv(kern, 32 => 64, gelu),
+        Conv(kern, 64 => nbasis(g); use_bias = false),
+    ) # 3_200 parameters
     net |> display
     flush(stdout)
     ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
@@ -143,13 +146,10 @@ function create_tbnn(setup, data, dotrain)
     return chain, (; losses_train, losses_valid, timing)
 end
 
-function create_equi(setup, data, dotrain)
-    net_stuff = equivariant_net(
-        setup,
-        # [12, 16, 16, 24], # 40_328 actual params
-        [8, 8, 8, 16], # 12_544 actual params
-        # [4, 4, 4, 8], # 3_200 actual params
-    )
+function create_equi(setup, dotrain)
+    (; equi_setup) = setup
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    net_stuff = equivariant_net(setup, equi_setup.layers)
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-equi.jld2")
     if dotrain
@@ -177,14 +177,10 @@ function create_equi(setup, data, dotrain)
     return chain, (; losses_train, losses_valid, timing)
 end
 
-function create_conv(setup, data, dotrain)
-    net_stuff = cnn(
-        setup,
-        # [48, 128, 128, 128]; # 40_550 parameters
-        [48, 64, 64, 64]; # 12_320 parameters
-        # [16, 32, 64]; # 3_200 parameters
-        same_as_equi = false,
-    )
+function create_conv(setup, dotrain)
+    (; conv_setup) = setup
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    net_stuff = cnn(setup, conv_setup.layers; conv_setup.same_as_equi)
     for ps in net_stuff.ps
         # Initialize weights are too large
         hasfield(typeof(ps), :weight) && (ps.weight .*= 0.1)

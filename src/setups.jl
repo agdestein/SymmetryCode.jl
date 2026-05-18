@@ -14,10 +14,30 @@ getsetup(;
     cfl,
     warmup,
     datagen,
+    tbnn_setup,
+    equi_setup,
+    conv_setup,
     backend = default_backend(),
     outdir = joinpath(@__DIR__, "..", "output", "$(name)_visc=$(visc)_n=$(n_dns)") |> mkpath,
     plotdir = joinpath(outdir, "plots") |> mkpath,
-) = (; name, D, l, n_dns, n_les, Δ = Δ_factor * l / n_les, visc, cfl, warmup, datagen, backend, outdir, plotdir)
+) = (;
+    name,
+    D,
+    l,
+    n_dns,
+    n_les,
+    Δ = Δ_factor * l / n_les,
+    visc,
+    cfl,
+    warmup,
+    datagen,
+    tbnn_setup,
+    equi_setup,
+    conv_setup,
+    backend,
+    outdir,
+    plotdir,
+)
 
 "2D forced HIT, small (n_dns=512). For quick prototyping on a laptop."
 setup_laptop() = getsetup(;
@@ -59,6 +79,18 @@ setup_turbulator_medium() = getsetup(;
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 20.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0),
+    tbnn_setup = (;), # Eventually put setup here
+    equi_setup = (;
+        # layers = [12, 16, 16, 24], # 40_328 actual params
+        # layers = [9, 8, 8, 16], # 12_544 actual params
+        layers = [4, 4, 4, 8], # 3_200 actual params
+    ),
+    conv_setup = (;
+        # layers = [48, 128, 128, 128], # 40_550 parameters
+        # layers = [48, 64, 64, 64], # 12_320 parameters
+        layers = [16, 32, 64], # 3_200 parameters
+        same_as_equi = false,
+    ),
 )
 
 "3D forced HIT, large (n_dns=512). Tight on a 24 GB GPU; closest to paper-quality."

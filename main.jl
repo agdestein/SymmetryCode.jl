@@ -160,37 +160,23 @@ m_dynsmag = S.create_dynamic_smagorinsky(
 
 m_clar = S.create_clark(setup.Δ, S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
 
-# m_tbnn, train_tbnn = S.create_tbnn(setup, data, false);
-#
-# m_equi, train_equi = S.create_equi(setup, data, false);
-#
-# m_conv, train_conv = S.create_conv(setup, data, false);
-#
-# S.plot_training(setup, train_tbnn, train_equi, train_conv)
-#
-# map(
-#     t -> round(t; digits = 1),
-#     (;
-#         tbnn = train_tbnn.timing,
-#         equi = train_equi.timing,
-#         conv = train_conv.timing,
-#     ),
-# ) |> pairs |> display
-# flush(stdout)
+m_tbnn, train_tbnn = S.create_tbnn(setup, false);
 
-upostfiles = map(
-    name -> "$(setup.outdir)/u-post-$(name).jld2",
+# m_equi, train_equi = S.create_equi(setup, true);
+
+m_conv, train_conv = S.create_conv(setup, false);
+
+S.plot_training(setup, train_tbnn, train_equi, train_conv)
+
+map(
+    t -> round(t; digits = 1),
     (;
-        nomo = "nomo",
-        smag = "smag",
-        dynsmag = "dynsmag",
-        # vers = "vers",
-        clar = "clar",
-        # tbnn = "tbnn",
-        # equi = "equi",
-        # conv = "conv",
+        tbnn = train_tbnn.timing,
+        equi = train_equi.timing,
+        conv = train_conv.timing,
     ),
-)
+) |> pairs |> display
+flush(stdout)
 
 S.solve_les(
     setup,
@@ -200,9 +186,9 @@ S.solve_les(
         dynsmag = m_dynsmag,
         # vers = m_vers,
         clar = m_clar,
-        # tbnn = m_tbnn,
+        tbnn = m_tbnn,
         # equi = m_equi,
-        # conv = m_conv,
+        conv = m_conv,
     ),
 )
 
@@ -215,9 +201,9 @@ let
         :dynsmag,
         # :vers,
         :clar,
-        # :tbnn,
+        :tbnn,
         # :equi,
-        # :conv,
+        :conv,
     ]
     files = S.get_upostfiles(setup)
     map(keys) do k
@@ -235,9 +221,9 @@ let
         :dynsmag,
         # :vers,
         :clar,
-        # :tbnn,
+        :tbnn,
         # :equi,
-        # :conv,
+        :conv,
     ]
     les_stat = S.get_les_statistics(setup, keys)
     save_object("$(setup.outdir)/les_stat.jld2", les_stat)
@@ -291,9 +277,9 @@ S.predict_sfs(
         smag = m_smag,
         dynsmag = m_dynsmag,
         clar = m_clar,
-        # tbnn = m_tbnn,
+        tbnn = m_tbnn,
         # equi = m_equi,
-        # conv = m_conv,
+        conv = m_conv,
     ),
 )
 
@@ -302,13 +288,23 @@ S.compute_densities(
         :smag,
         :dynsmag,
         :clar,
-        # :tbnn,
+        :tbnn,
         # :equi,
-        # :conv,
+        :conv,
     ]
 )
 
-S.plot_densities(setup; dolog = true)
+S.plot_densities(
+    setup, [
+        :ref,
+        :smag,
+        :dynsmag,
+        :clar,
+        :tbnn,
+        # :equi,
+        :conv,
+    ]; dolog = true
+)
 
 prediction_error_prior = let
     modelkeys = [
@@ -316,9 +312,9 @@ prediction_error_prior = let
         :smag,
         :dynsmag,
         :clar,
-        # :tbnn,
+        :tbnn,
         # :equi,
-        # :conv,
+        :conv,
     ]
     S.apriori_error(setup, modelkeys)
 end
@@ -432,35 +428,55 @@ end;
 
 dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
 
-S.plot_velocities(setup, :x)
-S.plot_velocities(setup, :z)
-
-S.plot_sfs(setup)
-
-S.compute_qr(
-    setup,
-    [
+let
+    keys = [
+        # :dns,
         :ref,
         :nomo,
         :smag,
         :dynsmag,
         :clar,
-        # :tbnn,
+        :tbnn,
         # :equi,
-        # :conv,
+        :conv,
+    ]
+    # S.plot_velocities(setup, :x, keys)
+    S.plot_velocities(setup, :z, keys)
+end
+
+S.plot_sfs(
+    setup, [
+        :smag,
+        :dynsmag,
+        :clar,
+        :tbnn,
+        # :equi,
+        :conv,
+    ],
+)
+
+S.compute_qr(
+    setup, [
+        :ref,
+        :nomo,
+        :smag,
+        :dynsmag,
+        :clar,
+        :tbnn,
+        # :equi,
+        :conv,
     ],
 )
 
 S.plot_qr(
-    setup,
-    [
+    setup, [
         :ref,
         :nomo,
         :smag,
         :dynsmag,
         :clar,
-        # :tbnn,
+        :tbnn,
         # :equi,
-        # :conv,
+        :conv,
     ],
 )
