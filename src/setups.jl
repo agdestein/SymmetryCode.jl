@@ -51,7 +51,7 @@ setup_laptop() = getsetup(;
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0),
-    tbnn_setup = (;), # Eventually put setup here
+    tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
     equi_setup = (; layers = [4, 4, 4, 8]),
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false),
 )
@@ -68,7 +68,7 @@ setup_turbulator_small() = getsetup(;
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
     datagen = (; nstep = 30, tstop = 5.0),
-    tbnn_setup = (;), # Eventually put setup here
+    tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
     equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
 )
@@ -85,7 +85,7 @@ setup_turbulator_medium() = getsetup(;
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 20.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0),
-    tbnn_setup = (;), # Eventually put setup here
+    tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
     equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
 )
@@ -103,7 +103,7 @@ setup_turbulator_large() =
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 30.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0),
-    tbnn_setup = (;), # Eventually put setup here
+    tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
     equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
 )
@@ -121,7 +121,7 @@ function setup_snellius()
         cfl = 0.35,
         warmup = (; totalenergy = 0.2, tstop = 40.0, seed = 0),
         datagen = (; nstep = 50, tstop = 10.0),
-        tbnn_setup = (;), # Eventually put setup here
+        tbnn_setup = (; layers = [64, 64, 128]), # 13_760 params
         equi_setup = (; layers = [9, 8, 8, 16]), # 12_544 actual params
         conv_setup = (; layers = [48, 64, 64, 64], same_as_equi = false), # 12_320 parameters
     )

@@ -298,6 +298,25 @@ function getgradient(u, g)
     return AA
 end
 
+"""
+Build the TBNN coefficient network from a vector of hidden-layer widths
+`nchan`. Mirrors `equivariant_net` / `cnn`: the input layer maps the
+invariants to `nchan[1]`, middle layers map `nchan[i] => nchan[i+1]`, and
+the (bias-free) output layer maps `nchan[end]` to the basis coefficients.
+"""
+function tbnn_net(setup, nchan)
+    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    kern = ntuple(Returns(1), setup.D)
+    return Chain(
+        Conv(kern, ninvariant(g) => nchan[1], gelu),
+        map(
+            i -> Conv(kern, nchan[i] => nchan[i + 1], gelu),
+            1:(length(nchan) - 1),
+        )...,
+        Conv(kern, nchan[end] => nbasis(g); use_bias = false),
+    )
+end
+
 tbnn(net, ps, st, Δ, g) = function model(u, A)
     nx = space_ndrange(g)
     nt = tensordim(g)

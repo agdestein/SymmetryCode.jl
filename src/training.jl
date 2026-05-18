@@ -98,20 +98,7 @@ function create_tbnn(setup, dotrain)
     (; tbnn_setup) = setup
     data = joinpath(setup.outdir, "data.jld2") |> load_object
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    kern = ntuple(Returns(1), setup.D)
-    # TODO: Extract this from `tbnn_setup`
-    # net = Chain(
-    #     Conv(kern, ninvariant(g) => 64, gelu),
-    #     Conv(kern, 64 => 64, gelu),
-    #     Conv(kern, 64 => 128, gelu),
-    #     Conv(kern, 128 => nbasis(g); use_bias = false),
-    # ) # 13_888 parameters
-    net = Chain(
-        Conv(kern, ninvariant(g) => 16, gelu),
-        Conv(kern, 16 => 32, gelu),
-        Conv(kern, 32 => 64, gelu),
-        Conv(kern, 64 => nbasis(g); use_bias = false),
-    ) # 3_200 parameters
+    net = tbnn_net(setup, tbnn_setup.layers)
     net |> display
     flush(stdout)
     ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
