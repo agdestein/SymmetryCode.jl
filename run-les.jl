@@ -43,11 +43,11 @@ m_dynsmag = S.create_dynamic_smagorinsky(
 
 m_clar = S.create_clark(setup.Δ, S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
 
-m_tbnn, train_tbnn = S.create_tbnn(setup, true);
+m_tbnn, train_tbnn = S.create_tbnn(setup, :resume);
 
-m_equi, train_equi = S.create_equi(setup, true);
+m_equi, train_equi = S.create_equi(setup, :resume);
 
-m_conv, train_conv = S.create_conv(setup, true);
+m_conv, train_conv = S.create_conv(setup, :resume);
 
 S.plot_training(setup, train_tbnn, train_equi, train_conv)
 

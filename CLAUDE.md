@@ -43,7 +43,7 @@ Three setups in `src/setups.jl`:
 - `setup_turbulator_{small,medium,large}` — 3D forced HIT, `n_dns ∈ {256, 384, 512}`. The three variants trade resolution against memory / wall time and are sized for a 24 GB consumer GPU; `medium` (n=384, ν=5e-4) is the recommended default for an RTX 4090, `large` (n=512, ν=3e-4) is tight on memory but closest to paper-quality.
 - `setup_snellius` — 3D, `n_dns=810`, writes to `/projects/prjs1757/...` (cluster path).
 
-A "setup" is a NamedTuple — fields are destructured throughout the codebase (`(; D, l, n_les, backend, Δ, visc, cfl) = setup`).
+A "setup" is a NamedTuple — fields are destructured throughout the codebase (`(; D, l, n_les, backend, Δ, visc, cfl) = setup`). Per-model network widths live in `tbnn_setup`/`equi_setup`/`conv_setup` (`.layers`); all training hyperparameters live in one shared `train_setup` (`default_train_setup` in `setups.jl`: `nepoch`, `batchsize`, `nsample`, `learning_rate`, `seed`, `val_fraction`, `log_every`, `precision`, `grad_clip`, `patience`, `warmup_frac`, `checkpoint_every`).
 
 ## Architecture
 
@@ -54,7 +54,7 @@ A "setup" is a NamedTuple — fields are destructured throughout the codebase (`
 - **`symmetry.jl`** — octahedral group machinery: `group_stuff`, `get_weight_projectors`, `transform_vector` / `transform_tensor` (used by the equivariant network and by `test_equivariance_post`).
 - **`closures.jl`** — classical models (Clark / Smagorinsky / dynamic Smagorinsky / Verstappen Q-R). Each kernel uses `tensorat` / `store_symtensor!`; each wrapper goes through `run_closure_kernel`.
 - **`nets.jl`** — Lux network architectures for the learned closures: `equivariant_net` (G-Conv with octahedral weight-tying via the projectors from `symmetry.jl`), `cnn` (plain Conv baseline), `tbnn` (Tensor Basis Neural Network using `ninvariant` / `nbasis` / `build_tensorbasis`), plus `fullchain` which wraps a trained net + projection into a `(u, G) -> τ` closure usable by `les!`.
-- **`training.jl`** — generic `train` loop (Lux + Zygote + AdamW, keeps best-validation params), losses (`create_loss`, `create_loss_tbnn`), and the per-model orchestrators `create_tbnn` / `create_equi` / `create_conv` that build the net, optionally train, persist `ps-*.jld2`, and return a ready-to-use closure.
+- **`training.jl`** — generic `train` loop (Lux + Zygote + AdamW with `ClipNorm`, linear-warmup→cosine LR schedule, held-out-validation best-param tracking, early stopping, periodic checkpoints), losses (`create_loss`, `create_loss_tbnn`), one shared orchestrator `create_model`, and the thin wrappers `create_tbnn` / `create_equi` / `create_conv` (which differ only in net/loss/loader/wrap). Each takes `mode` ∈ `:scratch` / `:resume` / `:skip` (a `Bool` maps `true→:resume`, `false→:skip`); they persist `ps-<key>.jld2` and, mid-run, a resumable `ps-<key>-checkpoint.jld2`.
 - **`data.jl`** — DNS warmup (`create_dns`), `(ubar,τ)` pair generation (`create_data`, calls `sfs!`), and CPU dataloaders.
 - **`les.jl`** — LES RHS with closure (`les!`) and the post-training rollout (`solve_les` / `solve_les!`).
 - **`analysis.jl`** — post-hoc evaluation: `predict_sfs`, `compute_densities`, `apriori_error`, `apriori_equivariance_error`, `get_dissipation_errors`, `compute_qr`.
@@ -77,6 +77,10 @@ A "setup" is a NamedTuple — fields are destructured throughout the codebase (`
 
 **Sub-grid stress convention.** The SFS stress is **deviatoric**: the DNS ground truth is made trace-free in `sfs!` (`make_tracefree!`), and all three learned closures produce a deviatoric stress *by construction* — TBNN via its `deviator(...)` tensor basis, the G-Conv/Conv nets via a trace-removing `symm` tail in `nets.jl`. The networks regress the **normalized** target `τ / (Δ²·‖∇u‖²)` (an O(1) target shared by all models; see `create_dataloader` / `create_dataloader_tbnn`); the inference wrappers `fullchain` (equi/conv) and `tbnn` multiply the prediction back by `Δ²·‖∇u‖²` to recover the physical stress. Keep these two consistent when changing either.
 
-**Train/val split.** The dataloaders return `(trainloader, valloader)` via `split_loaders` (in `data.jl`): a **time-based** holdout where the last `VAL_FRACTION` of the time-ordered snapshots are the validation set. `train` selects the best parameters on this held-out set, so it must never be drawn from the training pool.
+**Train/val split.** The dataloaders return `(trainloader, valloader)` via `split_loaders` (in `data.jl`): a **time-based** holdout where the last `train_setup.val_fraction` of the time-ordered snapshots are the validation set. `train` selects the best parameters on this held-out set, so it must never be drawn from the training pool. `split_loaders` also folds the last spatial axis into the batch dimension (for 2D *and* 3D — the 1×1 models use no neighbor info) and casts arrays to `train_setup.precision`.
+
+**Net vs. solver precision.** The networks train in `train_setup.precision` (default `Float32`); the solver, data generation, and spectral fields stay `Float64`. Conversion happens only at the net boundary — the inference wrappers `fullchain`/`tbnn` cast the input down to net precision and the output back to `Float64`. Keep heavy numerics in `Float64`; never widen the net params expecting the solver to follow.
+
+**Checkpoint/resume.** Long trainings are SLURM-safe: `train` writes `ps-<key>-checkpoint.jld2` every `train_setup.checkpoint_every` steps and at each epoch end; `:resume` continues from it (`create_model` deletes it on successful completion). Adam moments are *not* checkpointed — a resume restarts the optimizer state (acceptable for infrequent restarts).
 
 **Shell-clamp forcing.** The pipeline maintains low-wavenumber shell energy at its initial value rather than using an explicit body force. Setup: `shells = energy_shells(grid, [1, 2], u)`. Per-step: `maintain_shell_energy!(u, shells)`. Forcing-via-`forced_rhs!` exists but is currently commented out at all call sites.

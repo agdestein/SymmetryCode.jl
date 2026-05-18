@@ -1,4 +1,40 @@
 """
+Shared training configuration (mirrors the per-model `*_setup.layers`).
+
+- `precision` is the network's working float type (`Float32` recommended);
+  the solver/data stay `Float64` and conversion happens at the net boundary.
+- `val_fraction` is the *time-based* held-out tail of snapshots.
+- `checkpoint_every` steps a resumable checkpoint is written (SLURM-safe).
+"""
+default_train_setup(;
+    nepoch = 20,
+    batchsize = 20,
+    nsample = 50,
+    learning_rate = 1.0e-3,
+    seed = 0,
+    val_fraction = 0.2,
+    log_every = 10,
+    precision = Float32,
+    grad_clip = 1.0,
+    patience = 5,
+    warmup_frac = 0.05,
+    checkpoint_every = 200,
+) = (;
+    nepoch,
+    batchsize,
+    nsample,
+    learning_rate,
+    seed,
+    val_fraction,
+    log_every,
+    precision,
+    grad_clip,
+    patience,
+    warmup_frac,
+    checkpoint_every,
+)
+
+"""
 Problem setup.
 The filter width `Δ` is `Δ_factor` multiplied by the grid spacing.
 The fields `outdir` and `plotdir` are generated automatically.
@@ -17,6 +53,7 @@ getsetup(;
     tbnn_setup,
     equi_setup,
     conv_setup,
+    train_setup = default_train_setup(),
     backend = default_backend(),
     outdir = joinpath(@__DIR__, "..", "output", "$(name)_visc=$(visc)_n=$(n_dns)") |> mkpath,
     plotdir = joinpath(outdir, "plots") |> mkpath,
@@ -34,6 +71,7 @@ getsetup(;
     tbnn_setup,
     equi_setup,
     conv_setup,
+    train_setup,
     backend,
     outdir,
     plotdir,

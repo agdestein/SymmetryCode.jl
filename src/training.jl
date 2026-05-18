@@ -34,172 +34,250 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
     return l, st, (;)
 end
 
-function train(; loss, setup, trainloader, valloader, nepoch, learning_rate, net_stuff)
-    (; backend) = setup
+function train(;
+        loss, setup, trainloader, valloader, net_stuff,
+        checkpointfile = nothing, resume = false,
+    )
+    (; backend, train_setup) = setup
+    (;
+        nepoch, learning_rate, log_every, grad_clip, patience,
+        warmup_frac, checkpoint_every,
+    ) = train_setup
     (; net, ps, st) = net_stuff
     device = adapt(backend)
-    ps_init = deepcopy(ps)
+    opt = OptimiserChain(ClipNorm(grad_clip), AdamW(learning_rate))
 
-    # Warmup: compile the train step on a throwaway state so the timed
-    # loop is measured accurately *and* starts from the initial parameters
-    # (the previous code left this warmup update in the real state).
-    let ts = Training.TrainState(
-            net, deepcopy(ps_init), deepcopy(st), AdamW(learning_rate),
-        )
+    # Warmup: compile the train step on a throwaway state so the timed loop
+    # is measured accurately and starts from the initial parameters.
+    let ts = Training.TrainState(net, deepcopy(ps), deepcopy(st), opt)
         x, y = first(trainloader) |> device
         Training.single_train_step!(AutoZygote(), loss, (x, y), ts)
     end
 
-    opt = AdamW(learning_rate)
-    train_state = Training.TrainState(net, deepcopy(ps_init), st, opt)
+    train_state = Training.TrainState(net, deepcopy(ps), st, opt)
     b_valid = first(valloader) |> device
     ps_best = deepcopy(train_state.parameters)
     st_best = deepcopy(train_state.states)
     l_best = Inf
-    losses_train = zeros(0)
-    losses_valid = zeros(0)
+    losses_train = Float64[]
+    losses_valid = Float64[]
+    start_epoch = 1
+
+    if resume && !isnothing(checkpointfile) && isfile(checkpointfile)
+        @info "Resuming training from $(checkpointfile)"
+        flush(stderr)
+        ck = load(checkpointfile)
+        train_state =
+            Training.TrainState(net, ck["ps_cur"] |> device, ck["st_cur"], opt)
+        ps_best = ck["ps_best"] |> device
+        st_best = ck["st_best"]
+        l_best = ck["l_best"]
+        losses_train = ck["losses_train"]
+        losses_valid = ck["losses_valid"]
+        start_epoch = ck["epoch"] + 1
+    end
+
+    nbatch = length(trainloader)
+    total = nepoch * nbatch
+    nwarm = max(1, round(Int, warmup_frac * total))
+    # Linear warmup then cosine decay to zero.
+    schedule(s) =
+        s < nwarm ? learning_rate * s / nwarm :
+        learning_rate * (1 + cos(π * (s - nwarm) / max(1, total - nwarm))) / 2
+    step = (start_epoch - 1) * nbatch
+    epochs_since_improve = 0
 
     timing = time()
-    for iepoch in 1:nepoch, (ibatch, batch) in enumerate(trainloader)
-        x, y = batch |> device
-        _, l_train, _, train_state =
-            Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
+    for iepoch in start_epoch:nepoch
+        l_best_epoch_start = l_best
+        for (ibatch, batch) in enumerate(trainloader)
+            step += 1
+            Optimisers.adjust!(train_state.optimizer_state, schedule(step))
+            x, y = batch |> device
+            _, l_train, _, train_state =
+                Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
 
-        # Validate against the *current trained* parameters, not a stale
-        # closure-local `ps` (which never tracked the optimizer updates).
-        l_valid =
-            loss(net, train_state.parameters, train_state.states, b_valid) |> first
+            # Validate on the held-out set against the current parameters.
+            l_valid =
+                loss(net, train_state.parameters, train_state.states, b_valid) |>
+                first
+            push!(losses_train, l_train)
+            push!(losses_valid, l_valid)
+            if l_valid < l_best
+                l_best = l_valid
+                ps_best = deepcopy(train_state.parameters)
+                st_best = deepcopy(train_state.states)
+            end
 
-        @info join(
-            [
-                "iepoch = $iepoch",
-                "ibatch = $ibatch",
-                "loss (valid) = $(round(l_valid; sigdigits = 4))",
-                "loss (train) = $(round(l_train; sigdigits = 4))",
-            ],
-            ",\t",
-        )
-        flush(stderr)
+            if ibatch % log_every == 0
+                @info join(
+                    [
+                        "epoch $(iepoch)/$(nepoch)",
+                        "batch $(ibatch)/$(nbatch)",
+                        "lr = $(round(schedule(step); sigdigits = 3))",
+                        "loss (valid) = $(round(l_valid; sigdigits = 4))",
+                        "loss (train) = $(round(l_train; sigdigits = 4))",
+                    ],
+                    ",\t",
+                )
+                flush(stderr)
+            end
 
-        push!(losses_train, l_train)
-        push!(losses_valid, l_valid)
+            if !isnothing(checkpointfile) && step % checkpoint_every == 0
+                jldsave(
+                    checkpointfile;
+                    epoch = iepoch - 1, # resume re-runs at most this epoch
+                    ps_cur = train_state.parameters |> cpu_device(),
+                    st_cur = train_state.states,
+                    ps_best = ps_best |> cpu_device(),
+                    st_best,
+                    l_best,
+                    losses_train,
+                    losses_valid,
+                )
+            end
+        end
 
-        # Keep the best-validation parameters together with their states
-        if l_valid < l_best
-            l_best = l_valid
-            ps_best = deepcopy(train_state.parameters)
-            st_best = deepcopy(train_state.states)
+        # Early stopping on the held-out validation loss.
+        epochs_since_improve =
+            l_best < l_best_epoch_start ? 0 : epochs_since_improve + 1
+        if !isnothing(checkpointfile)
+            jldsave(
+                checkpointfile;
+                epoch = iepoch,
+                ps_cur = train_state.parameters |> cpu_device(),
+                st_cur = train_state.states,
+                ps_best = ps_best |> cpu_device(),
+                st_best,
+                l_best,
+                losses_train,
+                losses_valid,
+            )
+        end
+        if epochs_since_improve >= patience
+            @info "Early stopping: no validation improvement in $(patience) epochs"
+            flush(stderr)
+            break
         end
     end
     timing = time() - timing
 
-    ps = ps_best # Retain best (not last) parameters
-    st = st_best  # ... and the states captured at the same time
-    return (; ps, st, losses_train, losses_valid, timing)
+    return (; ps = ps_best, st = st_best, losses_train, losses_valid, timing)
 end
 
-function create_tbnn(setup, dotrain)
-    (; tbnn_setup) = setup
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
+"""
+Generic training orchestrator shared by all learned closures, so the three
+models differ only in architecture/loss, not in training treatment.
+
+`mode`:
+- `:scratch` — train from the initial parameters (ignore any checkpoint)
+- `:resume`  — continue from `ps-<key>-checkpoint.jld2` if present, else
+               train from scratch; periodic checkpoints make it SLURM-safe
+- `:skip`    — do not train; just load the persisted parameters
+
+A `Bool` is accepted for backwards compatibility: `true → :resume`,
+`false → :skip`.
+"""
+function create_model(setup, mode; key, buildnet, makeloss, makeloaders, wrap)
+    mode = mode isa Bool ? (mode ? :resume : :skip) : mode
+    (; outdir) = setup
+    file = joinpath(outdir, "ps-$(key).jld2")
+    checkpointfile = joinpath(outdir, "ps-$(key)-checkpoint.jld2")
+    net_stuff = buildnet()
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    net = tbnn_net(setup, tbnn_setup.layers)
-    net |> display
-    flush(stdout)
-    ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
-    file = joinpath(setup.outdir, "ps-tbnn.jld2")
-    if dotrain
-        @info "Training TBNN"
+
+    if mode != :skip
+        @info "Training $(key)"
         flush(stderr)
-        trainloader, valloader = create_dataloader_tbnn(
-            setup,
-            data;
-            nsample = 50, # Don't use all the snapshots
-            batchsize = 20,
-            rng = Xoshiro(0),
-        )
-        (; ps, st, losses_train, losses_valid, timing) = train(;
-            loss = create_loss_tbnn(g),
+        data = joinpath(outdir, "data.jld2") |> load_object
+        trainloader, valloader = makeloaders(data)
+        result = train(;
+            loss = makeloss(net_stuff, g),
             setup,
             trainloader,
             valloader,
-            nepoch = 5,
-            learning_rate = 1.0e-3,
-            net_stuff = (; net, ps, st),
+            net_stuff,
+            checkpointfile,
+            resume = mode == :resume,
         )
-        ps = ps |> cpu_device()
-        jldsave(file; ps, losses_train, losses_valid, timing)
+        jldsave(
+            file;
+            ps = result.ps |> cpu_device(),
+            st = result.st,
+            result.losses_train,
+            result.losses_valid,
+            result.timing,
+        )
+        isfile(checkpointfile) && rm(checkpointfile)
     end
-    ps, losses_train, losses_valid, timing =
-        load(file, "ps", "losses_train", "losses_valid", "timing")
-    ps = ps |> adapt(setup.backend)
-    chain = tbnn(net, ps, st, setup.Δ, g)
-    return chain, (; losses_train, losses_valid, timing)
+
+    d = load(file)
+    ps = d["ps"] |> adapt(setup.backend)
+    st = haskey(d, "st") ? d["st"] : net_stuff.st
+    chain = wrap(net_stuff, ps, st, g)
+    return chain,
+        (;
+            losses_train = d["losses_train"],
+            losses_valid = d["losses_valid"],
+            timing = d["timing"],
+        )
 end
 
-function create_equi(setup, dotrain)
-    (; equi_setup) = setup
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    net_stuff = equivariant_net(setup, equi_setup.layers)
-    st = net_stuff.st
-    file = joinpath(setup.outdir, "ps-equi.jld2")
-    if dotrain
-        @info "Training G-conv"
-        flush(stderr)
-        trainloader, valloader =
-            create_dataloader(setup, data; nsample = 50, batchsize = 20)
-        (; ps, st, losses_train, losses_valid, timing) = train(;
-            loss = create_loss(net_stuff.project),
-            setup,
-            trainloader,
-            valloader,
-            nepoch = 5,
-            learning_rate = 1.0e-3,
-            net_stuff,
-        )
-        ps = ps |> cpu_device()
-        jldsave(file; ps, losses_train, losses_valid, timing)
-    end
-    ps, losses_train, losses_valid, timing =
-        load(file, "ps", "losses_train", "losses_valid", "timing")
-    # ps = net_stuff.ps
-    ps = ps |> adapt(setup.backend)
-    ps |> cpu_device() |> ComponentArray |> length |> display
-    flush(stdout)
-    (; net, project) = net_stuff
-    chain = fullchain(setup, net, project, ps, st, setup.Δ)
-    return chain, (; losses_train, losses_valid, timing)
+function create_tbnn(setup, mode = :resume)
+    precision = setup.train_setup.precision
+    return create_model(
+        setup, mode;
+        key = :tbnn,
+        buildnet = function ()
+            net = tbnn_net(setup, setup.tbnn_setup.layers)
+            net |> display
+            flush(stdout)
+            f = precision === Float32 ? f32 : f64
+            ps, st =
+                Lux.setup(Xoshiro(setup.train_setup.seed), net) |> f |>
+                adapt(setup.backend)
+            return (; net, ps, st, project = identity)
+        end,
+        makeloss = (ns, g) -> create_loss_tbnn(g),
+        makeloaders = data -> create_dataloader_tbnn(
+            setup, data;
+            setup.train_setup.nsample,
+            setup.train_setup.batchsize,
+            rng = Xoshiro(setup.train_setup.seed),
+        ),
+        wrap = (ns, ps, st, g) -> tbnn(ns.net, ps, st, setup.Δ, g, precision),
+    )
 end
 
-function create_conv(setup, dotrain)
-    (; conv_setup) = setup
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    net_stuff = cnn(setup, conv_setup.layers; conv_setup.same_as_equi)
-    st = net_stuff.st
-    file = joinpath(setup.outdir, "ps-conv.jld2")
-    if dotrain
-        @info "Training Conv"
-        flush(stderr)
-        trainloader, valloader =
-            create_dataloader(setup, data; nsample = 50, batchsize = 20)
-        (; ps, st, losses_train, losses_valid, timing) = train(;
-            loss = create_loss(net_stuff.project),
-            setup,
-            trainloader,
-            valloader,
-            nepoch = 5,
-            learning_rate = 1.0e-3,
-            net_stuff,
-        )
-        ps = ps |> cpu_device()
-        jldsave(file; ps, losses_train, losses_valid, timing)
-    end
-    # ps = net_stuff.ps
-    ps, losses_train, losses_valid, timing =
-        load(file, "ps", "losses_train", "losses_valid", "timing")
-    ps = ps |> adapt(setup.backend)
-    ps |> cpu_device() |> ComponentArray |> length |> display
-    flush(stdout)
-    (; net, project) = net_stuff
-    chain = fullchain(setup, net, project, ps, st, setup.Δ)
-    return chain, (; losses_train, losses_valid, timing)
+function create_equi(setup, mode = :resume)
+    return create_model(
+        setup, mode;
+        key = :equi,
+        buildnet = () -> equivariant_net(setup, setup.equi_setup.layers),
+        makeloss = (ns, g) -> create_loss(ns.project),
+        makeloaders = data -> create_dataloader(
+            setup, data;
+            setup.train_setup.nsample,
+            setup.train_setup.batchsize,
+        ),
+        wrap = (ns, ps, st, g) ->
+        fullchain(setup, ns.net, ns.project, ps, st, setup.Δ),
+    )
+end
+
+function create_conv(setup, mode = :resume)
+    return create_model(
+        setup, mode;
+        key = :conv,
+        buildnet = () ->
+        cnn(setup, setup.conv_setup.layers; setup.conv_setup.same_as_equi),
+        makeloss = (ns, g) -> create_loss(ns.project),
+        makeloaders = data -> create_dataloader(
+            setup, data;
+            setup.train_setup.nsample,
+            setup.train_setup.batchsize,
+        ),
+        wrap = (ns, ps, st, g) ->
+        fullchain(setup, ns.net, ns.project, ps, st, setup.Δ),
+    )
 end

@@ -1,9 +1,10 @@
 function equivariant_net(setup, nchan)
-    (; D, backend) = setup
+    (; D, backend, train_setup) = setup
     dev = adapt(backend)
     # dev = identity
-    rng = Xoshiro(0)
-    T, f = Float64, f64
+    rng = Xoshiro(train_setup.seed)
+    T = train_setup.precision
+    f = T === Float32 ? f32 : f64
     nten = D^2
     (; elements) = group_stuff(D)
     (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
@@ -114,11 +115,11 @@ end
 
 "Same as `equivariant_net` but without the weight projection."
 function cnn(setup, nchan; same_as_equi)
-    (; D, backend) = setup
+    (; D, backend, train_setup) = setup
     dev = adapt(backend)
     # dev = identity
-    rng = Xoshiro(0)
-    f = f64
+    rng = Xoshiro(train_setup.seed)
+    f = train_setup.precision === Float32 ? f32 : f64
     nt_nonsym = D^2
     nt = D == 2 ? 3 : 6
     (; elements) = group_stuff(D)
@@ -166,7 +167,8 @@ end
 
 # Wrap a trained network into a model usable as a closure inside `les!`.
 function fullchain(setup, net, project, ps, st, Δ)
-    (; D) = setup
+    (; D, train_setup) = setup
+    P = train_setup.precision
     ps = project(ps)
 
     # x is the VGT
@@ -177,7 +179,8 @@ function fullchain(setup, net, project, ps, st, Δ)
         x = reshape(x, s..., 1) # Add singleton sample dimension
         A2 = sum(abs2, x; dims = D + 1) # VGT squared norm
         @. x /= (sqrt(A2) + eps(T)) # Normalize input gradient
-        y = net(x, ps, st) |> first # Apply model
+        y = net(P.(x), ps, st) |> first # Apply model in net precision
+        y = T.(y) # Back to solver precision
         @. y *= Δ^2 * A2 # Scale output with dimensional stuff
         return reshape(y, s[1:D]..., :) # Remove singleton sample dimension
     end
@@ -343,17 +346,18 @@ function tbnn_net(setup, nchan)
     )
 end
 
-tbnn(net, ps, st, Δ, g) = function model(u, A)
+tbnn(net, ps, st, Δ, g, precision = Float32) = function model(u, A)
     nx = space_ndrange(g)
     nt = tensordim(g)
     nb = nbasis(g)
 
-    # Compute invariants and (O(1)) basis tensors
+    # Compute invariants and (O(1)) basis tensors (solver precision)
     invariants, basis, a2 = build_tensorbasis(A, g)
+    T = eltype(basis)
 
-    # Compute coefficients
+    # Compute coefficients in net precision, then back to solver precision
     invariants = reshape(invariants, size(invariants)..., 1) # One sample
-    w = net(invariants, ps, st) |> first
+    w = T.(net(precision.(invariants), ps, st) |> first)
 
     # Basis contraction
     b = reshape(basis, :, nt, nb)

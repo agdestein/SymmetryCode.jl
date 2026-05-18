@@ -271,32 +271,30 @@ function sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     return make_tracefree!(τ, g_les)
 end
 
-"Fraction of (time-ordered) snapshots held out — as the *last* snapshots — for validation."
-const VAL_FRACTION = 0.2
-
 """
 Split per-snapshot `(x, y)` pairs into a training and a held-out validation
-`DataLoader`. The split is time-based: the last `VAL_FRACTION` of the
-(time-ordered) snapshots become the validation set. In 3D one spatial axis is
-folded into the batch dimension (the pointwise models use no neighbor
-information) so each snapshot is cheaper. Used by every model's dataloader so
-all closures see the same train/val partition.
+`DataLoader`. The split is time-based: the last `val_fraction` of the
+(time-ordered) snapshots become the validation set. The last spatial axis is
+folded into the batch dimension (the pointwise 1x1 models use no neighbor
+information) so each snapshot is cheap and 2D gets as many samples as 3D; a
+singleton keeps the `Conv` seeing `D` spatial dims. Arrays are converted to
+`precision`. Used by every model's dataloader so all closures see the same
+train/val partition and float type.
 """
-function split_loaders(snaps, D, batchsize; rng = nothing)
+function split_loaders(snaps, D, batchsize; rng = nothing, val_fraction = 0.2, precision = Float32)
     n = length(snaps)
     @assert n >= 2 "need at least 2 snapshots to form a train/val split"
-    nval = clamp(round(Int, VAL_FRACTION * n), 1, n - 1)
+    nval = clamp(round(Int, val_fraction * n), 1, n - 1)
     function build(s)
         x = stack(first, s)
         y = stack(last, s)
-        if D == 3
-            x = permutedims(x, (1, 2, 4, 3, 5))
-            y = permutedims(y, (1, 2, 4, 3, 5))
-            nx = size(x, 1)
-            x = reshape(x, nx, nx, 1, size(x, 3), :)
-            y = reshape(y, nx, nx, 1, size(y, 3), :)
-        end
-        return (x, y)
+        cax = D + 1                                    # channel axis
+        perm = (ntuple(identity, D - 1)..., cax, D, D + 2)
+        x = permutedims(x, perm)
+        y = permutedims(y, perm)
+        x = reshape(x, size(x)[1:(D - 1)]..., 1, size(x, D), :)
+        y = reshape(y, size(y)[1:(D - 1)]..., 1, size(y, D), :)
+        return (precision.(x), precision.(y))
     end
     xt, yt = build(snaps[1:(n - nval)])
     xv, yv = build(snaps[(n - nval + 1):n])
@@ -343,7 +341,10 @@ function create_dataloader(setup, data; nsample, batchsize)
         @. y ./= (Δ^2 * A2 + eps(T)) # Normalize output stress
         (x, y) |> cpu_device()
     end
-    return split_loaders(snaps, D, batchsize)
+    return split_loaders(
+        snaps, D, batchsize;
+        setup.train_setup.val_fraction, setup.train_setup.precision,
+    )
 end
 
 function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
@@ -379,5 +380,8 @@ function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
         y = y |> cpu_device()
         x, y
     end
-    return split_loaders(snaps, D, batchsize; rng)
+    return split_loaders(
+        snaps, D, batchsize;
+        rng, setup.train_setup.val_fraction, setup.train_setup.precision,
+    )
 end
