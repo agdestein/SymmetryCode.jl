@@ -50,15 +50,12 @@ let
     u = load("$(setup.outdir)/dns.jld2", "u") |> u -> map(copy, u) |> adapt(setup.backend)
     g = S.Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
     v = S.spacescalarfield(g)
-    p = plan_rfft(v)
-    fac = S.get_fft_fac(g)
+    p = S.getplan(g)
     if D == 2
-        ldiv!(v, p, u.x)
-        v .*= fac
+        S.to_phys!(v, u.x, p, g)
         field = v |> Array
     else
-        ldiv!(v, p, u.z)
-        v .*= fac
+        S.to_phys!(v, u.z, p, g)
         field = v[:, :, end] |> Array
     end
     fig, _ = heatmap(field; colormap = :RdBu)
@@ -73,15 +70,12 @@ let
     u = map(copy, data.inputs[1]) |> adapt(setup.backend)
     g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     v = S.spacescalarfield(g)
-    p = plan_rfft(v)
-    fac = S.get_fft_fac(g)
+    p = S.getplan(g)
     if D == 2
-        ldiv!(v, p, u.x)
-        v .*= fac
+        S.to_phys!(v, u.x, p, g)
         field = v |> Array
     else
-        ldiv!(v, p, u.z)
-        v .*= fac
+        S.to_phys!(v, u.z, p, g)
         field = v[:, :, end] |> Array
     end
     fig, _ = heatmap(field; colormap = :RdBu)
