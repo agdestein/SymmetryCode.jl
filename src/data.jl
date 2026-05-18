@@ -271,6 +271,44 @@ function sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     return make_tracefree!(τ, g_les)
 end
 
+"Fraction of (time-ordered) snapshots held out — as the *last* snapshots — for validation."
+const VAL_FRACTION = 0.2
+
+"""
+Split per-snapshot `(x, y)` pairs into a training and a held-out validation
+`DataLoader`. The split is time-based: the last `VAL_FRACTION` of the
+(time-ordered) snapshots become the validation set. In 3D one spatial axis is
+folded into the batch dimension (the pointwise models use no neighbor
+information) so each snapshot is cheaper. Used by every model's dataloader so
+all closures see the same train/val partition.
+"""
+function split_loaders(snaps, D, batchsize; rng = nothing)
+    n = length(snaps)
+    @assert n >= 2 "need at least 2 snapshots to form a train/val split"
+    nval = clamp(round(Int, VAL_FRACTION * n), 1, n - 1)
+    function build(s)
+        x = stack(first, s)
+        y = stack(last, s)
+        if D == 3
+            x = permutedims(x, (1, 2, 4, 3, 5))
+            y = permutedims(y, (1, 2, 4, 3, 5))
+            nx = size(x, 1)
+            x = reshape(x, nx, nx, 1, size(x, 3), :)
+            y = reshape(y, nx, nx, 1, size(y, 3), :)
+        end
+        return (x, y)
+    end
+    xt, yt = build(snaps[1:(n - nval)])
+    xv, yv = build(snaps[(n - nval + 1):n])
+    trainloader = if isnothing(rng)
+        DataLoader((xt, yt); batchsize, shuffle = true, partial = false)
+    else
+        DataLoader((xt, yt); batchsize, shuffle = true, partial = false, rng)
+    end
+    valloader = DataLoader((xv, yv); batchsize, shuffle = false, partial = true)
+    return trainloader, valloader
+end
+
 function create_dataloader(setup, data; nsample, batchsize)
     (; D, Δ) = setup
     g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
@@ -305,19 +343,7 @@ function create_dataloader(setup, data; nsample, batchsize)
         @. y ./= (Δ^2 * A2 + eps(T)) # Normalize output stress
         (x, y) |> cpu_device()
     end
-    x = stack(first, snaps)
-    y = stack(last, snaps)
-    if D == 3
-        # Put one of the spatial dimensions into the batch dimension,
-        # so that each snapshot is smaller. The models do not use
-        # neighboring information anyway.
-        x = permutedims(x, (1, 2, 4, 3, 5))
-        y = permutedims(y, (1, 2, 4, 3, 5))
-        nx = size(x, 1)
-        x = reshape(x, nx, nx, 1, size(x, 3), :)
-        y = reshape(y, nx, nx, 1, size(y, 3), :)
-    end
-    return DataLoader((x, y); batchsize, shuffle = true, partial = false)
+    return split_loaders(snaps, D, batchsize)
 end
 
 function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
@@ -330,6 +356,7 @@ function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
     plan = plan_rfft(ττ.xx)
     nsample_use = min(nsample, length(data.inputs))
     fac = get_fft_fac(g)
+    T = typeof(setup.l)
     snaps = map(1:nsample_use) do j
         ucpu, τcpu = data.inputs[j], data.outputs[j]
         foreach(copyto!, u, ucpu)
@@ -340,24 +367,17 @@ function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
             ldiv!(ττ, plan, τ) # Inverse RFFT
             ττ .*= fac
         end
-        i, b = build_tensorbasis(G, g, Δ)
+        i, b, a2 = build_tensorbasis(G, g)
+        y = reshape(stack(ττ), nx..., tensordim(g))
+        a2 = reshape(a2, nx..., 1)
+        # Normalize output stress by Δ^2 * |A|^2, exactly as create_dataloader
+        # does, so TBNN regresses the same normalized target as equi/conv.
+        @. y = y / (Δ^2 * a2 + eps(T))
         i = i |> cpu_device()
         b = reshape(b, nx..., :) |> cpu_device()
         x = cat(i, b; dims = D + 1)
-        y = reshape(stack(ττ), nx..., tensordim(g)) |> cpu_device()
+        y = y |> cpu_device()
         x, y
     end
-    x = stack(first, snaps)
-    y = stack(last, snaps)
-    if D == 3
-        # Put one of the spatial dimensions into the batch dimension,
-        # so that each snapshot is smaller. The models do not use
-        # neighboring information anyway.
-        x = permutedims(x, (1, 2, 4, 3, 5))
-        y = permutedims(y, (1, 2, 4, 3, 5))
-        nxx = nx[1]
-        x = reshape(x, nxx, nxx, 1, size(x, 3), :)
-        y = reshape(y, nxx, nxx, 1, size(y, 3), :)
-    end
-    return DataLoader((x, y); batchsize, shuffle = true, partial = false, rng)
+    return split_loaders(snaps, D, batchsize; rng)
 end

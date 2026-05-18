@@ -34,7 +34,7 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
     return l, st, (;)
 end
 
-function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
+function train(; loss, setup, trainloader, valloader, nepoch, learning_rate, net_stuff)
     (; backend) = setup
     (; net, ps, st) = net_stuff
     device = adapt(backend)
@@ -46,13 +46,13 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
     let ts = Training.TrainState(
             net, deepcopy(ps_init), deepcopy(st), AdamW(learning_rate),
         )
-        x, y = first(dataloader) |> device
+        x, y = first(trainloader) |> device
         Training.single_train_step!(AutoZygote(), loss, (x, y), ts)
     end
 
     opt = AdamW(learning_rate)
     train_state = Training.TrainState(net, deepcopy(ps_init), st, opt)
-    b_valid = first(dataloader) |> device
+    b_valid = first(valloader) |> device
     ps_best = deepcopy(train_state.parameters)
     st_best = deepcopy(train_state.states)
     l_best = Inf
@@ -60,7 +60,7 @@ function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
     losses_valid = zeros(0)
 
     timing = time()
-    for iepoch in 1:nepoch, (ibatch, batch) in enumerate(dataloader)
+    for iepoch in 1:nepoch, (ibatch, batch) in enumerate(trainloader)
         x, y = batch |> device
         _, l_train, _, train_state =
             Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
@@ -106,24 +106,22 @@ function create_tbnn(setup, dotrain)
     net |> display
     flush(stdout)
     ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
-    for p in ps
-        # Initial weights are too large
-        hasfield(typeof(p), :weight) && (p.weight .*= 0.1)
-    end
     file = joinpath(setup.outdir, "ps-tbnn.jld2")
     if dotrain
         @info "Training TBNN"
         flush(stderr)
+        trainloader, valloader = create_dataloader_tbnn(
+            setup,
+            data;
+            nsample = 50, # Don't use all the snapshots
+            batchsize = 20,
+            rng = Xoshiro(0),
+        )
         (; ps, st, losses_train, losses_valid, timing) = train(;
             loss = create_loss_tbnn(g),
             setup,
-            dataloader = create_dataloader_tbnn(
-                setup,
-                data;
-                nsample = 50, # Don't use all the snapshots
-                batchsize = 20,
-                rng = Xoshiro(0),
-            ),
+            trainloader,
+            valloader,
             nepoch = 5,
             learning_rate = 1.0e-3,
             net_stuff = (; net, ps, st),
@@ -147,10 +145,13 @@ function create_equi(setup, dotrain)
     if dotrain
         @info "Training G-conv"
         flush(stderr)
+        trainloader, valloader =
+            create_dataloader(setup, data; nsample = 50, batchsize = 20)
         (; ps, st, losses_train, losses_valid, timing) = train(;
             loss = create_loss(net_stuff.project),
             setup,
-            dataloader = create_dataloader(setup, data; nsample = 50, batchsize = 20),
+            trainloader,
+            valloader,
             nepoch = 5,
             learning_rate = 1.0e-3,
             net_stuff,
@@ -173,19 +174,18 @@ function create_conv(setup, dotrain)
     (; conv_setup) = setup
     data = joinpath(setup.outdir, "data.jld2") |> load_object
     net_stuff = cnn(setup, conv_setup.layers; conv_setup.same_as_equi)
-    for ps in net_stuff.ps
-        # Initialize weights are too large
-        hasfield(typeof(ps), :weight) && (ps.weight .*= 0.1)
-    end
     st = net_stuff.st
     file = joinpath(setup.outdir, "ps-conv.jld2")
     if dotrain
         @info "Training Conv"
         flush(stderr)
+        trainloader, valloader =
+            create_dataloader(setup, data; nsample = 50, batchsize = 20)
         (; ps, st, losses_train, losses_valid, timing) = train(;
             loss = create_loss(net_stuff.project),
             setup,
-            dataloader = create_dataloader(setup, data; nsample = 50, batchsize = 20),
+            trainloader,
+            valloader,
             nepoch = 5,
             learning_rate = 1.0e-3,
             net_stuff,

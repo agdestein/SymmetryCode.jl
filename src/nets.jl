@@ -70,11 +70,14 @@ function equivariant_net(setup, nchan)
         )...,
         sink = Conv(kern, nreg * nchan[end] => nten; use_bias = false),
         symm = WrappedFunction() do σ
+            # Symmetrize *and* remove the trace, so the prediction lives in
+            # the same deviatoric space as the (trace-free) DNS target.
             if D == 2
                 xx = selectdim(σ, 3, 1:1)
-                xy = (selectdim(σ, 3, 2:2) + selectdim(σ, 3, 3:3)) / 2
                 yy = selectdim(σ, 3, 4:4)
-                cat(xx, yy, xy; dims = 3)
+                xy = (selectdim(σ, 3, 2:2) + selectdim(σ, 3, 3:3)) / 2
+                t = (xx + yy) / 2
+                cat(xx - t, yy - t, xy; dims = 3)
             else
                 xx = selectdim(σ, 4, 1:1)
                 yy = selectdim(σ, 4, 5:5)
@@ -82,7 +85,8 @@ function equivariant_net(setup, nchan)
                 xy = (selectdim(σ, 4, 2:2) + selectdim(σ, 4, 4:4)) / 2
                 yz = (selectdim(σ, 4, 6:6) + selectdim(σ, 4, 8:8)) / 2
                 zx = (selectdim(σ, 4, 3:3) + selectdim(σ, 4, 7:7)) / 2
-                cat(xx, yy, zz, xy, yz, zx; dims = 4)
+                t = (xx + yy + zz) / 3
+                cat(xx - t, yy - t, zz - t, xy, yz, zx; dims = 4)
             end
         end,
     )
@@ -90,18 +94,18 @@ function equivariant_net(setup, nchan)
     ps =
         (;
         lift = (;
-            weight = kaiming_uniform(rng, T, nten, nchan[1]),
+            weight = glorot_uniform(rng, T, nten, nchan[1]),
             bias = zeros(T, nchan[1]),
         ),
         map(
             i ->
             Symbol(:mid_, i) => (;
-                weight = kaiming_uniform(rng, T, nreg, nchan[i + 1], nchan[i]),
+                weight = glorot_uniform(rng, T, nreg, nchan[i + 1], nchan[i]),
                 bias = zeros(T, nchan[i + 1]),
             ),
             1:(length(nchan) - 1),
         )...,
-        sink = (; weight = kaiming_uniform(rng, T, nten, nchan[end])),
+        sink = (; weight = glorot_uniform(rng, T, nten, nchan[end])),
         symm = (;),
     ) |> dev
     st = map(Returns((;)), ps)
@@ -133,7 +137,26 @@ function cnn(setup, nchan; same_as_equi)
             1:(length(nchan) - 1),
         )...,
         sink = Conv(kern, nreg * nchan[end] => nt; use_bias = false),
-        symm = WrappedFunction(identity),
+        symm = WrappedFunction() do σ
+            # Remove the trace so the prediction lives in the same
+            # deviatoric space as the (trace-free) DNS target.
+            if D == 2
+                xx = selectdim(σ, 3, 1:1)
+                yy = selectdim(σ, 3, 2:2)
+                xy = selectdim(σ, 3, 3:3)
+                t = (xx + yy) / 2
+                cat(xx - t, yy - t, xy; dims = 3)
+            else
+                xx = selectdim(σ, 4, 1:1)
+                yy = selectdim(σ, 4, 2:2)
+                zz = selectdim(σ, 4, 3:3)
+                xy = selectdim(σ, 4, 4:4)
+                yz = selectdim(σ, 4, 5:5)
+                zx = selectdim(σ, 4, 6:6)
+                t = (xx + yy + zz) / 3
+                cat(xx - t, yy - t, zz - t, xy, yz, zx; dims = 4)
+            end
+        end,
     )
     net |> display
     ps, st = Lux.setup(rng, net) |> f |> dev
@@ -224,12 +247,13 @@ end
 @inline deviator(σ::SMatrix{2, 2}) = σ - tr(σ) / 2 * one(σ)
 @inline deviator(σ::SMatrix{3, 3}) = σ - tr(σ) / 3 * one(σ)
 
-@kernel function tb_kernel!(invariants, basis, grads, Δ, g::Grid{2})
+@kernel function tb_kernel!(invariants, basis, a2, grads, g::Grid{2})
     nb, ni = nbasis(g), ninvariant(g)
     I = @index(Global, Cartesian)
     Gxx, Gyx, Gxy, Gyy = grads.xx[I], grads.yx[I], grads.xy[I], grads.yy[I]
     A = @SMatrix [Gxx Gxy; Gyx Gyy]
     A2 = sum(abs2, A)
+    a2[I] = A2
     A = A / (sqrt(A2) + eps(eltype(A))) # Normalize gradient
     S, R = (A + A') / 2, (A - A') / 2
     i, b = getinvariants(g, S, R), getbasis(g, S, R)
@@ -237,17 +261,16 @@ end
         invariants[I, iinv] = i[iinv]
     end
     for ibas in Base.OneTo(nb)
-        # Convert symmetric 2x2 tensor b to
-        # flattened symmetric tensor [xx, yy, xy].
-        # Also premultiply by Δ^2 * |A|^2, since the output tensor is
-        # Δ^2 * |A|^2 * coeffs * basis
-        basis[I, 1, ibas] = b[ibas][1, 1] * A2 * Δ^2
-        basis[I, 2, ibas] = b[ibas][2, 2] * A2 * Δ^2
-        basis[I, 3, ibas] = b[ibas][1, 2] * A2 * Δ^2
+        # Flatten symmetric 2x2 basis tensor to [xx, yy, xy]. The basis is
+        # left O(1); the Δ^2 * |A|^2 factor that maps coeffs*basis to the
+        # physical stress is applied in `tbnn` / the dataloader instead.
+        basis[I, 1, ibas] = b[ibas][1, 1]
+        basis[I, 2, ibas] = b[ibas][2, 2]
+        basis[I, 3, ibas] = b[ibas][1, 2]
     end
 end
 
-@kernel function tb_kernel!(invariants, basis, grads, Δ, g::Grid{3})
+@kernel function tb_kernel!(invariants, basis, a2, grads, g::Grid{3})
     ni, nb = ninvariant(g), nbasis(g)
     I = @index(Global, Cartesian)
     Axx, Axy, Axz = grads.xx[I], grads.xy[I], grads.xz[I]
@@ -255,6 +278,7 @@ end
     Azx, Azy, Azz = grads.zx[I], grads.zy[I], grads.zz[I]
     A = @SMatrix [Axx Axy Axz; Ayx Ayy Ayz; Azx Azy Azz]
     A2 = sum(abs2, A)
+    a2[I] = A2
     A = A / (sqrt(A2) + eps(eltype(A))) # Normalize gradient
     S, R = (A + A') / 2, (A - A') / 2
     i, b = getinvariants(g, S, R), getbasis(g, S, R)
@@ -262,25 +286,27 @@ end
         invariants[I, iinv] = i[iinv]
     end
     for ibas in Base.OneTo(nb)
-        # Convert symmetric 3x3 tensor b to flattened symmetric tensor [xx, yy, zz, xy, yz, zx]
-        # Also premultiply by Δ^2 * |A|^2, since the output tensor is
-        # Δ^2 * |A|^2 * coeffs * basis
-        basis[I, 1, ibas] = b[ibas][1, 1] * A2 * Δ^2
-        basis[I, 2, ibas] = b[ibas][2, 2] * A2 * Δ^2
-        basis[I, 3, ibas] = b[ibas][3, 3] * A2 * Δ^2
-        basis[I, 4, ibas] = b[ibas][1, 2] * A2 * Δ^2
-        basis[I, 5, ibas] = b[ibas][2, 3] * A2 * Δ^2
-        basis[I, 6, ibas] = b[ibas][3, 1] * A2 * Δ^2
+        # Flatten symmetric 3x3 basis tensor to [xx, yy, zz, xy, yz, zx].
+        # The basis is left O(1); the Δ^2 * |A|^2 factor that maps
+        # coeffs*basis to the physical stress is applied in `tbnn` /
+        # the dataloader instead.
+        basis[I, 1, ibas] = b[ibas][1, 1]
+        basis[I, 2, ibas] = b[ibas][2, 2]
+        basis[I, 3, ibas] = b[ibas][3, 3]
+        basis[I, 4, ibas] = b[ibas][1, 2]
+        basis[I, 5, ibas] = b[ibas][2, 3]
+        basis[I, 6, ibas] = b[ibas][3, 1]
     end
 end
 
-function build_tensorbasis(grad, g, Δ)
+function build_tensorbasis(grad, g)
     T = typeof(g.l)
     nx, nb, ni, nt = space_ndrange(g), nbasis(g), ninvariant(g), tensordim(g)
     basis = KernelAbstractions.zeros(g.backend, T, nx..., nt, nb)
     invariants = KernelAbstractions.zeros(g.backend, T, nx..., ni)
-    apply!(tb_kernel!, g, (invariants, basis, grad, Δ, g); ndrange = nx)
-    return invariants, basis
+    a2 = KernelAbstractions.zeros(g.backend, T, nx...)
+    apply!(tb_kernel!, g, (invariants, basis, a2, grad, g); ndrange = nx)
+    return invariants, basis, a2
 end
 
 function getgradient(u, g)
@@ -322,8 +348,8 @@ tbnn(net, ps, st, Δ, g) = function model(u, A)
     nt = tensordim(g)
     nb = nbasis(g)
 
-    # Compute invariants and basis tensors
-    invariants, basis = build_tensorbasis(A, g, Δ)
+    # Compute invariants and (O(1)) basis tensors
+    invariants, basis, a2 = build_tensorbasis(A, g)
 
     # Compute coefficients
     invariants = reshape(invariants, size(invariants)..., 1) # One sample
@@ -333,6 +359,10 @@ tbnn(net, ps, st, Δ, g) = function model(u, A)
     b = reshape(basis, :, nt, nb)
     w = reshape(w, :, 1, nb)
     b .*= w
-    m = sum(b; dims = 3)
-    return reshape(m, nx..., nt)
+    m = reshape(sum(b; dims = 3), nx..., nt)
+
+    # Map the normalized prediction back to the physical sub-filter stress
+    a2 = reshape(a2, nx..., 1)
+    @. m = m * Δ^2 * a2
+    return m
 end
