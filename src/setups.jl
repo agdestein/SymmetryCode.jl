@@ -51,6 +51,9 @@ setup_laptop() = getsetup(;
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0),
+    tbnn_setup = (;), # Eventually put setup here
+    equi_setup = (; layers = [4, 4, 4, 8]),
+    conv_setup = (; layers = [16, 32, 64], same_as_equi = false),
 )
 
 "3D forced HIT, small (n_dns=256). ~10 min on an RTX 4090; quick prototyping."
@@ -65,6 +68,9 @@ setup_turbulator_small() = getsetup(;
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
     datagen = (; nstep = 30, tstop = 5.0),
+    tbnn_setup = (;), # Eventually put setup here
+    equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
+    conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
 )
 
 "3D forced HIT, medium (n_dns=384). Recommended default on a 24 GB GPU (RTX 4090)."
@@ -80,17 +86,8 @@ setup_turbulator_medium() = getsetup(;
     warmup = (; totalenergy = 0.2, tstop = 20.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0),
     tbnn_setup = (;), # Eventually put setup here
-    equi_setup = (;
-        # layers = [12, 16, 16, 24], # 40_328 actual params
-        # layers = [9, 8, 8, 16], # 12_544 actual params
-        layers = [4, 4, 4, 8], # 3_200 actual params
-    ),
-    conv_setup = (;
-        # layers = [48, 128, 128, 128], # 40_550 parameters
-        # layers = [48, 64, 64, 64], # 12_320 parameters
-        layers = [16, 32, 64], # 3_200 parameters
-        same_as_equi = false,
-    ),
+    equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
+    conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
 )
 
 "3D forced HIT, large (n_dns=512). Tight on a 24 GB GPU; closest to paper-quality."
@@ -106,6 +103,9 @@ setup_turbulator_large() =
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 30.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0),
+    tbnn_setup = (;), # Eventually put setup here
+    equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
+    conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
 )
 
 "3D forced HIT, large (n_dns=810). Fits in a 90 GB datacenter GPU (H100 on Snellius)."
@@ -121,6 +121,9 @@ function setup_snellius()
         cfl = 0.35,
         warmup = (; totalenergy = 0.2, tstop = 40.0, seed = 0),
         datagen = (; nstep = 50, tstop = 10.0),
+        tbnn_setup = (;), # Eventually put setup here
+        equi_setup = (; layers = [9, 8, 8, 16]), # 12_544 actual params
+        conv_setup = (; layers = [48, 64, 64, 64], same_as_equi = false), # 12_320 parameters
     )
     outdir = "/projects/prjs1757/SymmetryOutput/visc=$(s.visc)_n=$(s.n_dns)" |> mkpath
     plotdir = joinpath(@__DIR__, "..", "output", "snellius") |> mkpath
