@@ -6,21 +6,22 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Research code for the paper "Comparison of Data-Driven Symmetry-Preserving Closure Models for Large-Eddy Simulation" (Agdestein & Sanderse, 2026). It is a pseudo-spectral incompressible Navier–Stokes solver in 2D/3D with classical and learned LES closure models, plus the analysis and plotting pipeline used to generate the paper's figures.
 
-CI only runs CompatHelper. The repository is driven from the REPL via `main.jl`.
+CI only runs CompatHelper. The repository is driven from the REPL via two scripts run in order: `create-data.jl` then `run-les.jl`.
 
 ## Commands
 
 ```bash
 julia --project=. -e 'using SymmetryCode'   # precompile; the primary smoke check
 julia --project=test test/runtests.jl       # run the test suite
-julia --project main.jl                     # run the whole pipeline (long; usually run interactively)
-sbatch job.sh                               # SLURM submission; runs main.jl on a single H100
+julia --project create-data.jl              # stage 1: DNS warmup + (ubar,τ) data generation
+julia --project run-les.jl                  # stage 2: closure training + LES rollout + analysis
+sbatch job.sh                               # SLURM submission on a single H100
 runic -i .                                  # format all code in place (run from repo root)
 ```
 
 The test environment is a separate project under `test/` that uses `[sources] SymmetryCode = {path = ".."}` to depend on the dev checkout — `Pkg.instantiate` from `test/` is enough to set it up.
 
-`main.jl` is the canonical pipeline driver. It is structured as a script meant to be evaluated section by section in a REPL — sections create artifacts (`output/<name>/dns.jld2`, `data.jld2`, `ps-*.jld2`, `u-post-*.jld2`, `kde_*.jld2`, …) that downstream sections consume. Reruns short-circuit if the artifact already exists for that setup.
+`create-data.jl` and `run-les.jl` are the canonical pipeline drivers, run in that order. Each is structured as a script meant to be evaluated section by section in a REPL — sections create artifacts (`output/<name>/dns.jld2`, `data.jld2`, `ps-*.jld2`, `u-post-*.jld2`, `kde_*.jld2`, …) that downstream sections consume. Reruns short-circuit if the artifact already exists for that setup. `create-data.jl` covers DNS warmup (`create_dns`) and `(ubar,τ)` data generation (`create_data`) plus their plots, producing `dns.jld2` and `data.jld2`. `run-les.jl` consumes `data.jld2`: it defines and trains the closure models, runs the LES rollouts (`solve_les`), and does the post-hoc analysis and plotting.
 
 Code is formatted with [Runic.jl](https://github.com/fredrikekre/Runic.jl) (no per-repo config); run `runic -i .` from the repo root before committing.
 

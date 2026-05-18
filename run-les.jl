@@ -4,18 +4,16 @@ flush(stderr)
 using Adapt
 using CairoMakie
 using CUDA, cuDNN
-using FFTW
 using JLD2
-using LinearAlgebra
-using Random
-using StaticArrays
-using Statistics
+using Statistics: mean
 using WGLMakie
 
 import SymmetryCode as S
 
+# Warmup plot
 lines([1, 2, 3])
 
+# Choose setup
 setup = S.setup_laptop()
 setup = S.setup_turbulator_small()
 setup = S.setup_turbulator_medium()
@@ -23,117 +21,9 @@ setup = S.setup_turbulator_large()
 setup = S.setup_snellius()
 setup |> pairs
 
-# Warmup simulation
-S.create_dns(setup)
-
-# Show statistics after warm-up
-let
-    statistics = load("$(setup.outdir)/dns.jld2", "statistics")
-    s = statistics[end]
-    s |> pairs |> display
-    flush(stdout)
-end
-
-# Plot DNS spectrum
-S.plot_spectrum_dns(setup)
-
-# Plot time series
-S.plot_evolution_dns(setup)
-
-# # Plot dissipation vs finite difference of energy
-# S.plot_dissipation_finite_difference(setup)
-
-S.create_data(setup);
-
-# data = joinpath(setup.outdir, "data.jld2") |> load_object;
-
-let
-    (; D) = setup
-    u = load("$(setup.outdir)/dns.jld2", "u") |> u -> map(copy, u) |> adapt(setup.backend)
-    g = S.Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    v = S.spacescalarfield(g)
-    p = plan_rfft(v)
-    fac = S.get_fft_fac(g)
-    if D == 2
-        ldiv!(v, p, u.x)
-        v .*= fac
-        field = v |> Array
-    else
-        ldiv!(v, p, u.z)
-        v .*= fac
-        field = v[:, :, end] |> Array
-    end
-    fig, _ = heatmap(field; colormap = :RdBu)
-    save("$(setup.plotdir)/dnsfield.png", fig)
-    fig
-end
-
-let
-    (; D) = setup
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    u = map(copy, data.inputs[1]) |> adapt(setup.backend)
-    g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    v = S.spacescalarfield(g)
-    p = plan_rfft(v)
-    fac = S.get_fft_fac(g)
-    if D == 2
-        ldiv!(v, p, u.x)
-        v .*= fac
-        field = v |> Array
-    else
-        ldiv!(v, p, u.z)
-        v .*= fac
-        field = v[:, :, end] |> Array
-    end
-    fig, _ = heatmap(field; colormap = :RdBu)
-    save("$(setup.plotdir)/dnsfield_filtered.png", fig)
-    fig
-end
-
-# Base.summarysize(data) * 1.0e-9
-#
-# data |> pairs
-#
-# getindex.(data.statistics_dns, :diss)
-# getindex.(data.statistics_dns, :uavg) .^ 2 / 2 * 3
-# getindex.(data.statistics_dns, :Re_tay)
-# getindex.(data.statistics_dns, :t_int)
-# getindex.(data.statistics_dns, :l_int)
-# getindex.(data.statistics_dns, :l_kol)
-
-S.plot_evolution_data(setup)
-
-let
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    fig = Figure()
-    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity")
-    s = data.statistics_dns
-    t = data.times
-    for (key, label) in [
-            (:diss, "Dissipation"),
-            (:uavg, "Kinetic Energy"),
-            (:Re_tay, "Taylor Reynolds"),
-            (:t_int, "Integral time"),
-        ]
-        y = getindex.(s, key)
-        lines!(ax, t, y ./ maximum(y); label)
-    end
-    eps = 0.1
-    ylims!(ax, -eps, 1 + eps)
-    Legend(
-        fig[0, 1],
-        ax;
-        tellwidth = false,
-        tellheight = true,
-        framevisible = false,
-        horizontal = true,
-        nbanks = 4,
-    )
-    save(joinpath(setup.plotdir, "evolution_data.pdf"), fig; backend = CairoMakie)
-    fig
-end
-
-S.plot_spectrum_data(setup)
+#######################
+# Define closure models
+#######################
 
 m_nomo = let
     g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
@@ -151,20 +41,13 @@ m_dynsmag = S.create_dynamic_smagorinsky(
     S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
 )
 
-# m_vers = create_verstappen(
-#     sqrt(3 / 2) / π, # 0.3898, in original paper
-#     # 0.527, # Higher value from Trias "building proper invariants" paper
-#     setup.Δ,
-#     Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
-# )
-
 m_clar = S.create_clark(setup.Δ, S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
 
-m_tbnn, train_tbnn = S.create_tbnn(setup, false);
+m_tbnn, train_tbnn = S.create_tbnn(setup, true);
 
-# m_equi, train_equi = S.create_equi(setup, true);
+m_equi, train_equi = S.create_equi(setup, true);
 
-m_conv, train_conv = S.create_conv(setup, false);
+m_conv, train_conv = S.create_conv(setup, true);
 
 S.plot_training(setup, train_tbnn, train_equi, train_conv)
 
@@ -177,6 +60,10 @@ map(
     ),
 ) |> pairs |> display
 flush(stdout)
+
+#######################
+# Deploy closure models
+#######################
 
 S.solve_les(
     setup,

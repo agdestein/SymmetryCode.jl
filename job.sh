@@ -20,4 +20,6 @@
 echo "Slurm job ID: $SLURM_JOB_ID"
 echo "Slurm array task ID: $SLURM_ARRAY_TASK_ID"
 
-julia --project main.jl
+# First create data, then run LES
+julia --project create-data.jl
+julia --project run-les.jl
