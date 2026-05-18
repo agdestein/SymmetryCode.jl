@@ -25,6 +25,8 @@ The test environment is a separate project under `test/` that uses `[sources] Sy
 
 Code is formatted with [Runic.jl](https://github.com/fredrikekre/Runic.jl) (no per-repo config); run `runic -i .` from the repo root before committing.
 
+This is a single-developer repository: commit directly to `main`. No feature branch is needed even though `main` is the default branch.
+
 ## Pipeline
 
 ```
