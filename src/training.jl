@@ -4,7 +4,7 @@ create_loss(project) = function loss(net, ps, st, (x, y))
     ps = project(ps)
     yhat = net(x, ps, st) |> first
     # l = MSELoss()(yhat, y) # (x, y) pair is already normalized
-    l = sum(abs2, yhat - y) / sum(abs2, y)
+    l = sum(abs2, yhat - y) / (sum(abs2, y) + eps(eltype(y)))
     return l, st, (;)
 end
 
@@ -30,67 +30,71 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
     m = reshape(m, nx..., nt, :)
 
     # l = MSELoss()(m, y)
-    l = sum(abs2, m - y) / sum(abs2, y)
+    l = sum(abs2, m - y) / (sum(abs2, y) + eps(eltype(y)))
     return l, st, (;)
 end
 
 function train(; loss, setup, dataloader, nepoch, learning_rate, net_stuff)
     (; backend) = setup
     (; net, ps, st) = net_stuff
-    ps = deepcopy(ps)
     device = adapt(backend)
+    ps_init = deepcopy(ps)
+
+    # Warmup: compile the train step on a throwaway state so the timed
+    # loop is measured accurately *and* starts from the initial parameters
+    # (the previous code left this warmup update in the real state).
+    let ts = Training.TrainState(
+            net, deepcopy(ps_init), deepcopy(st), AdamW(learning_rate),
+        )
+        x, y = first(dataloader) |> device
+        Training.single_train_step!(AutoZygote(), loss, (x, y), ts)
+    end
+
     opt = AdamW(learning_rate)
-    train_state = Training.TrainState(net, ps, st, opt)
+    train_state = Training.TrainState(net, deepcopy(ps_init), st, opt)
     b_valid = first(dataloader) |> device
-    ps_best = deepcopy(ps)
+    ps_best = deepcopy(train_state.parameters)
+    st_best = deepcopy(train_state.states)
     l_best = Inf
     losses_train = zeros(0)
     losses_valid = zeros(0)
 
-    # Warmup step
-    x, y = first(dataloader) |> device
-    _, l_train, _, train_state =
-        Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
-    l_valid = loss(net, ps, st, b_valid) |> first
-
     timing = time()
-    i = 0
     for iepoch in 1:nepoch, (ibatch, batch) in enumerate(dataloader)
-        i += 1
         x, y = batch |> device
-        # loss(net, ps, st, (x, y)); error()
         _, l_train, _, train_state =
             Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
-        if ibatch % 1 == 0
-            # Check performance on validation batch
-            l_valid = loss(net, ps, st, b_valid) |> first
 
-            # Log
-            @info join(
-                [
-                    "iepoch = $iepoch",
-                    "ibatch = $ibatch",
-                    "loss (valid) = $(round(l_valid; sigdigits = 4))",
-                    "loss (train) = $(round(l_train; sigdigits = 4))",
-                ],
-                ",\t",
-            )
-            flush(stderr)
+        # Validate against the *current trained* parameters, not a stale
+        # closure-local `ps` (which never tracked the optimizer updates).
+        l_valid =
+            loss(net, train_state.parameters, train_state.states, b_valid) |> first
 
-            push!(losses_train, l_train)
-            push!(losses_valid, l_valid)
+        @info join(
+            [
+                "iepoch = $iepoch",
+                "ibatch = $ibatch",
+                "loss (valid) = $(round(l_valid; sigdigits = 4))",
+                "loss (train) = $(round(l_train; sigdigits = 4))",
+            ],
+            ",\t",
+        )
+        flush(stderr)
 
-            # Keep current best parameters
-            if l_valid < l_best
-                l_best = l_valid
-                ps_best = deepcopy(train_state.parameters)
-            end
+        push!(losses_train, l_train)
+        push!(losses_valid, l_valid)
+
+        # Keep the best-validation parameters together with their states
+        if l_valid < l_best
+            l_best = l_valid
+            ps_best = deepcopy(train_state.parameters)
+            st_best = deepcopy(train_state.states)
         end
     end
     timing = time() - timing
 
     ps = ps_best # Retain best (not last) parameters
-    st = train_state.states # Note: If st is non-empty, need to make "best"-mechanism for states
+    st = st_best  # ... and the states captured at the same time
     return (; ps, st, losses_train, losses_valid, timing)
 end
 
@@ -102,8 +106,9 @@ function create_tbnn(setup, dotrain)
     net |> display
     flush(stdout)
     ps, st = Lux.setup(Xoshiro(0), net) |> f64 |> adapt(setup.backend)
-    for l in ps
-        l.weight .*= 0.1
+    for p in ps
+        # Initial weights are too large
+        hasfield(typeof(p), :weight) && (p.weight .*= 0.1)
     end
     file = joinpath(setup.outdir, "ps-tbnn.jld2")
     if dotrain
