@@ -70,7 +70,7 @@ end
 
 let
     (; D) = setup
-    data = joinpath(setup.outdir, "data.jld2") |> load_object;
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
     u = map(copy, data.inputs[1]) |> adapt(setup.backend)
     g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     v = S.spacescalarfield(g)
@@ -104,7 +104,7 @@ end
 S.plot_evolution_data(setup)
 
 let
-    data = joinpath(setup.outdir, "data.jld2") |> load_object;
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
     fig = Figure()
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity")
     s = data.statistics_dns
@@ -206,7 +206,7 @@ S.solve_les(
     ),
 )
 
-round(data.timing; digits = 1)
+# round(data.timing; digits = 1)
 
 let
     keys = [
@@ -228,14 +228,27 @@ let
     flush(stdout)
 end
 
-les_stat = S.get_les_statistics(setup, upostfiles);
-save_object("$(setup.outdir)/les_stat.jld2", les_stat)
+let
+    keys = [
+        :nomo,
+        :smag,
+        :dynsmag,
+        # :vers,
+        :clar,
+        # :tbnn,
+        # :equi,
+        # :conv,
+    ]
+    les_stat = S.get_les_statistics(setup, keys)
+    save_object("$(setup.outdir)/les_stat.jld2", les_stat)
+end
 
 les_stat = load_object("$(setup.outdir)/les_stat.jld2");
 
 map(s -> round(mean(s.e_post); sigdigits = 4), les_stat) |> pairs
 
 let
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
     fig = Figure(; size = (400, 360))
     ax = Axis(
         fig[1, 1];
@@ -424,6 +437,30 @@ S.plot_velocities(setup, :z)
 
 S.plot_sfs(setup)
 
-S.compute_qr(setup, data, upostfiles)
+S.compute_qr(
+    setup,
+    [
+        :ref,
+        :nomo,
+        :smag,
+        :dynsmag,
+        :clar,
+        # :tbnn,
+        # :equi,
+        # :conv,
+    ],
+)
 
-S.plot_qr(setup)
+S.plot_qr(
+    setup,
+    [
+        :ref,
+        :nomo,
+        :smag,
+        :dynsmag,
+        :clar,
+        # :tbnn,
+        # :equi,
+        # :conv,
+    ],
+)

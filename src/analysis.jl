@@ -237,8 +237,11 @@ end
     r[I] = -tr(G * G * G) / 3
 end
 
-function compute_qr(setup, data, upostfiles)
+function compute_qr(setup, modelkeys)
     (; D, l, n_les, backend) = setup
+
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+
     g = Grid{D}(; l, n = n_les, backend)
     Ghat = scalarfield(g)
     G = spacetensorfield_nonsym(g)
@@ -249,7 +252,7 @@ function compute_qr(setup, data, upostfiles)
 
     t_kol = mean(x -> x.t_kol, data.statistics_les)
 
-    modelkeys = [:ref, keys(upostfiles)...]
+    upostfiles = get_upostfiles(setup)
 
     for k in modelkeys
         @info "Computing Q-R for $(k)"

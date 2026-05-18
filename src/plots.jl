@@ -129,7 +129,7 @@ function plot_densities(setup; dolog)
     if name == "laptop"
         xlims!(ax.xx, -0.1, 0.3)
         ylims!(ax.xx, 2.0e-2, 3.0e2)
-    elseif name == "turbulator"
+    elseif startswith(name, "turbulator")
         xlims!(ax.xx, -0.2, 0.2)
         ylims!(ax.xx, 2.0e-4, 3.0e2)
     elseif name == "snellius"
@@ -141,7 +141,7 @@ function plot_densities(setup; dolog)
     if name == "laptop"
         xlims!(ax.xy, -0.1, 0.1)
         ylims!(ax.xy, 1.0e-1, 5.0e2)
-    elseif name == "turbulator"
+    elseif startswith(name, "turbulator")
         xlims!(ax.xy, -0.15, 0.15)
         ylims!(ax.xy, 1.0e-3, 3.0e2)
     elseif name == "snellius"
@@ -153,7 +153,7 @@ function plot_densities(setup; dolog)
     if name == "laptop"
         xlims!(ax.diss, -0.3, 0.3)
         ylims!(ax.diss, 1.0e-1, 1.0e2)
-    elseif name == "turbulator"
+    elseif startswith(name, "turbulator")
         xlims!(ax.diss, -0.5, 0.15)
         ylims!(ax.diss, 1.0e-3, 1.0e2)
     elseif name == "snellius"
@@ -262,18 +262,8 @@ function plot_velocities(setup, comp)
     return fig
 end
 
-function plot_qr(setup)
+function plot_qr(setup, modelkeys)
     (; name) = setup
-    modelkeys = [
-        :ref,
-        :nomo,
-        :smag,
-        :dynsmag,
-        :clar,
-        # :tbnn,
-        # :equi,
-        # :conv,
-    ]
     qr = map(key -> key => load_object("$(setup.outdir)/qr_$(key).jld2"), modelkeys)
     qr = NamedTuple(qr)
 
@@ -342,7 +332,7 @@ function plot_qr(setup)
         rtest2 = @. -2 / 3 / sqrt(3) * (-qtest)^(3 / 2)
         lines!(ax, rtest1, qtest; color = colors.line)
         lines!(ax, rtest2, qtest; color = colors.line)
-        if name == "turbulator"
+        if startswith(name, "turbulator")
             xlims!(ax, -1.5, 1.5)
             ylims!(ax, -3, 3)
         elseif name == "snellius"

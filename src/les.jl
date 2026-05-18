@@ -147,10 +147,11 @@ function solve_les!(u; times, grid, visc, model, cfl)
     return states
 end
 
-function get_les_statistics(setup, files)
+function get_les_statistics(setup, keys)
     (; D, l, n_les, backend, visc) = setup
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
+    files = get_upostfiles(setup)
 
     g = Grid{D}(; l, n = n_les, backend)
     dissfield_les = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
@@ -158,7 +159,8 @@ function get_les_statistics(setup, files)
     u_ref = data.inputs
     u_les_gpu = vectorfield(g)
     u_ref_gpu = vectorfield(g)
-    return map(files) do f
+    return map(keys) do k
+        f = files[k]
         @info "Reading $(f)"
         flush(stderr)
         u_les = f |> load_object |> x -> x.u
@@ -178,8 +180,8 @@ function get_les_statistics(setup, files)
             spec = spectrum(u_les_gpu, g, stuff)
             return spec.s
         end
-        (; e_post, s)
-    end
+        k => (; e_post, s)
+    end |> NamedTuple
 end
 
 function getdissipation(g, u, m)
