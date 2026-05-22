@@ -243,6 +243,13 @@ function create_data(setup)
     return nothing
 end
 
+"""
+Compute the deviatoric sub-filter stress for one DNS velocity snapshot.
+
+This is the data-generation definition of the target:
+`τ = overline(u_i u_j) - ubar_i ubar_j`, optionally Gaussian-filtered, then
+made trace-free to match the learned closures' output space.
+"""
 function sfs(u, g_dns, g_les, Δ)
     c_dns = getcache(g_dns)
     c_les = getcache(g_les)
@@ -268,6 +275,8 @@ function sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
     nonlinearity!(σbar2, c_les.vi_vj, c_les.v, ubar, c_les.plan, g_les)
     foreach(i -> (τ[i] .= σbar1[i] .- σbar2[i]), 1:tensordim(g_dns))
     foreach(τ -> apply!(twothirds!, g_les, (τ, g_les)), τ)
+    # The isotropic part of SFS stress can be absorbed into pressure in the
+    # incompressible equations, so training and inference use deviatoric τ.
     return make_tracefree!(τ, g_les)
 end
 
@@ -337,6 +346,8 @@ function create_dataloader(setup, data; nsample, batchsize)
         x = stack(GG)
         y = stack(ττ)
         A2 = sum(abs2, x; dims = D + 1) # VGT squared norm
+        # The nets learn an O(1), dimensionless mapping; inference in
+        # `fullchain` multiplies by the same Δ^2 * |∇u|^2 factor.
         @. x ./= (sqrt(A2) + eps(T)) # Normalize input gradient
         @. y ./= (Δ^2 * A2 + eps(T)) # Normalize output stress
         (x, y) |> cpu_device()

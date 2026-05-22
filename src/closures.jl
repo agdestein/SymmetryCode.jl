@@ -134,6 +134,13 @@ end
     mm[I] = Mxx * Mxx + Myy * Myy + Mzz * Mzz + 2 * Mxy * Mxy + 2 * Myz * Myz + 2 * Mzx * Mzx
 end
 
+"""
+Create the dynamic Smagorinsky closure using a box-averaged Lilly coefficient.
+
+The model allocates its scratch buffers once and returns a closure of `(u, G)`;
+`G` is accepted for the shared closure interface but the dynamic model computes
+the strain fields it needs from `u` and its test-filtered copy.
+"""
 function create_dynamic_smagorinsky(Δ, g)
     space = spacescalarfield(g)
     spect = scalarfield(g)

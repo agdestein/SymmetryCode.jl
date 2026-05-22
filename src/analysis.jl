@@ -120,6 +120,12 @@ function compute_densities(setup, modelkeys)
     return nothing
 end
 
+"""
+Compare predicted SFS stresses against the filtered DNS target snapshot-wise.
+
+The no-model baseline is defined as zero SFS stress, giving relative error one
+and zero cross-correlation by construction.
+"""
 function apriori_error(setup, modelkeys)
     (; D, l, n_les, backend) = setup
 
@@ -171,6 +177,12 @@ function apriori_error(setup, modelkeys)
     end |> NamedTuple
 end
 
+"""
+Measure whether each closure commutes with every octahedral transformation.
+
+For each group element this compares `R(model(G))` with `model(R(G))`, using
+the physical-space transformation helpers from `symmetry.jl`.
+"""
 function apriori_equivariance_error(; u, setup, models)
     (; D, l, n_les, backend) = setup
     (; elements, permutations, signs) = group_stuff(D)
@@ -237,6 +249,12 @@ end
     r[I] = -tr(G * G * G) / 3
 end
 
+"""
+Compute Q-R invariant KDEs from post-processed velocity-gradient fields.
+
+The saved samples are nondimensionalized by the mean Kolmogorov time of the
+LES-filtered reference data before density estimation.
+"""
 function compute_qr(setup, modelkeys)
     (; D, l, n_les, backend) = setup
 

@@ -90,6 +90,8 @@ function solve_les!(u; times, grid, visc, model, cfl)
         )
     end
 
+    # Match DNS/data generation: low-shell energy is clamped instead of adding
+    # an explicit forcing term to the RHS.
     shells = energy_shells(grid, [1, 2], u)
 
     # Storage for states on CPU
@@ -127,6 +129,8 @@ function solve_les!(u; times, grid, visc, model, cfl)
                 #     ",\t",
                 # )
                 flush(stderr)
+                # Bail out on clearly unstable rollouts, but keep the snapshots
+                # accumulated so far so downstream comparisons can still run.
                 forever = Δt < 1.0e-8
                 boom = e > 1.0e5
                 if forever || boom

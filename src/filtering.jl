@@ -1,5 +1,11 @@
 # LES filters operating on RFFT-shaped spectral arrays.
 
+"""
+Map an index from a coarse RFFT array into the matching fine-grid index.
+
+The first spectral axis is the real-FFT half axis (`0:kmax`), while the other
+axes carry wrapped negative frequencies. `is1` marks that special first axis.
+"""
 @inline function cutoff_index(nbar, n, i, is1)
     imax = div(nbar, 2) + is1
     isneg = i > imax
@@ -42,6 +48,8 @@ end
     w = exp(-Δ^2 * k2 / 24)
     nshell = 2
     kbound2 = (2π / g.l * (nshell + 1))^2
+    # The low shells are later energy-clamped as forcing; filtering them would
+    # fight that forcing and change the intended large-scale energy injection.
     w = ifelse(k2 < kbound2, one(w), w) # Don't filter forced shells
     u[I] *= w
 end
@@ -52,6 +60,8 @@ end
     w = exp(-Δ^2 * k2 / 24)
     nshell = 2
     kbound2 = (2π / g.l * (nshell + 1))^2
+    # The low shells are later energy-clamped as forcing; filtering them would
+    # fight that forcing and change the intended large-scale energy injection.
     w = ifelse(k2 < kbound2, one(w), w) # Don't filter forced shells
     u[I] *= w
 end

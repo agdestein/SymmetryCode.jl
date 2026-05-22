@@ -82,6 +82,13 @@ function group_stuff(D)
 end
 
 
+"""
+Construct Reynolds operators for equivariant weight spaces.
+
+Each matrix averages over the octahedral group action. Eigenvectors with
+eigenvalue one span the admissible weight subspace used to lift/mix/sink
+features in `equivariant_net`.
+"""
 function get_weight_projectors(D)
     (; permutations, signs, elements, cayley) = group_stuff(D)
     nelement = length(elements)
@@ -188,6 +195,12 @@ function forward_vector_fourier(uu, g)
     return u
 end
 
+"""
+Apply one octahedral group element to a physical-space vector field.
+
+The array is permuted/flipped first (moving the sample points), then each
+stored vector is multiplied by the same roto-reflection matrix.
+"""
 function transform_vector(u, g, (p, s))
     T, D = typeof(g.l), dim(g)
     u_sa = SVector{D, T}.(u...)
@@ -203,6 +216,12 @@ function transform_vector(u, g, (p, s))
     end
 end
 
+"""
+Apply one octahedral group element to a symmetric physical tensor field.
+
+Uses the tensor rule `T -> R*T*R'` after moving the grid points, preserving the
+packed symmetric component layout used by the solver.
+"""
 function transform_tensor(t, g, (p, s))
     T, D = typeof(g.l), dim(g)
     SM = SMatrix{D, D, T, D^2}

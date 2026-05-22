@@ -1,3 +1,11 @@
+"""
+Build the octahedral-equivariant 1x1 Conv network.
+
+Trainable weights live in a small unconstrained basis; `project` expands them
+into full convolution weights by applying the group projectors from
+`symmetry.jl`. The returned `ps` are therefore not directly usable by Lux until
+they have passed through `project`.
+"""
 function equivariant_net(setup, nchan)
     (; D, backend, train_setup) = setup
     dev = adapt(backend)
@@ -165,7 +173,13 @@ function cnn(setup, nchan; same_as_equi)
     return (; project, net, ps, st)
 end
 
-# Wrap a trained network into a model usable as a closure inside `les!`.
+"""
+Wrap a trained Conv-style network into a closure with solver-facing units.
+
+The dataloader trained the network on normalized gradients and normalized
+stress. This wrapper repeats that normalization at inference and scales the
+prediction back to physical `τ` before `les!` transforms it to spectral space.
+"""
 function fullchain(setup, net, project, ps, st, Δ)
     (; D, train_setup) = setup
     P = train_setup.precision
@@ -302,6 +316,12 @@ end
     end
 end
 
+"""
+Build normalized TBNN inputs from a physical-space velocity gradient.
+
+Returns invariants, basis tensors, and the unnormalized `|∇u|^2`; callers use
+the latter to restore the physical `Δ^2 |∇u|^2` stress scale.
+"""
 function build_tensorbasis(grad, g)
     T = typeof(g.l)
     nx, nb, ni, nt = space_ndrange(g), nbasis(g), ninvariant(g), tensordim(g)
