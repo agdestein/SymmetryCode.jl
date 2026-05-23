@@ -23,7 +23,8 @@ setup = S.setup_turbulator_small()
 # setup = S.setup_turbulator_medium()
 # setup = S.setup_turbulator_large()
 # setup = S.setup_snellius()
-setup |> pairs
+
+S.tabulate("Problem setup", setup)
 
 config = (;
     # Closures included in every multi-model step. Order propagates to plots.
