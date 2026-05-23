@@ -76,6 +76,35 @@ function plot_training(setup, train_tbnn, train_equi, train_conv)
     return fig
 end
 
+function plot_error_post(setup, les_stat)
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    fig = Figure(; size = (400, 360))
+    ax = Axis(
+        fig[1, 1];
+        xlabel = "Time",
+        ylabel = "Relative error",
+    )
+    t = data.times
+    labels = getlabels()
+    for k in keys(les_stat)
+        e = les_stat[k].e_post
+        ntime = length(e)
+        lines!(ax, t[1:ntime], e; label = labels[k])
+    end
+    Legend(
+        fig[0, 1],
+        ax;
+        tellwidth = false,
+        tellheight = true,
+        framevisible = false,
+        horizontal = true,
+        nbanks = 3,
+    )
+    rowgap!(fig.layout, 5)
+    save("$(setup.plotdir)/error_post.pdf", fig; backend = CairoMakie)
+    return fig
+end
+
 function plot_densities(setup, mkeys; dolog)
     (; outdir, plotdir, name) = setup
     yscale = dolog ? log10 : identity

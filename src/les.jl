@@ -46,7 +46,7 @@ get_upostfiles(setup) = map(
     ),
 )
 
-function solve_les(setup, models)
+function solve_les(setup, models; force = false)
     (; D, l, n_les, backend, visc, cfl) = setup
     grid = Grid{D}(; l, n = n_les, backend)
 
@@ -58,6 +58,12 @@ function solve_les(setup, models)
     # Solve LES for each model
     u_model = vectorfield(grid)
     for key in keys(models)
+        file = files[key]
+        if !force && isfile(file)
+            @info "Skipping LES for $(key): $(file) already exists"
+            flush(stderr)
+            continue
+        end
         @info "Solving LES with $(key)"
         flush(stderr)
         model = models[key]
@@ -74,7 +80,7 @@ function solve_les(setup, models)
         t = time() - t
 
         # Save results
-        save_object(files[key], (; data.times, u = snapshots, timing = t))
+        save_object(file, (; data.times, u = snapshots, timing = t))
     end
     return
 end

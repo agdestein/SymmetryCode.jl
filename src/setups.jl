@@ -146,6 +146,29 @@ setup_turbulator_large() =
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
 )
 
+"""
+Build only the closure models named in `active`, in the requested order.
+
+Trainable closures load their parameters via `create_*(setup, train_mode)`
+(`:skip` reads `ps-<key>.jld2` without retraining); classical closures are
+constructed against a fresh LES `Grid`. Keys not in `active` are never
+instantiated.
+"""
+function build_models(setup, active; train_mode = :skip)
+    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    build = (;
+        nomo = () -> (_, _) -> fill!(stack(spacetensorfield(g)), 0),
+        dynsmag = () -> create_dynamic_smagorinsky(setup.Δ, g),
+        clar = () -> create_clark(setup.Δ, g),
+        smag = () -> create_smagorinsky(0.1, setup.Δ, g),
+        vers = () -> create_verstappen(1.0, setup.Δ, g),
+        tbnn = () -> create_tbnn(setup, train_mode)[1],
+        equi = () -> create_equi(setup, train_mode)[1],
+        conv = () -> create_conv(setup, train_mode)[1],
+    )
+    return NamedTuple(k => build[k]() for k in active)
+end
+
 "3D forced HIT, large (n_dns=810). Fits in a 90 GB datacenter GPU (H100 on Snellius)."
 function setup_snellius()
     s = (;

@@ -13,351 +13,164 @@ import SymmetryCode as S
 # Warmup plot
 lines([1, 2, 3])
 
-# Choose setup
-setup = S.setup_laptop()
+#######################
+# Setup + experiment config
+#######################
+
+# Pick one. `getsetup` derives output paths automatically.
+# setup = S.setup_laptop()
 setup = S.setup_turbulator_small()
-setup = S.setup_turbulator_medium()
-setup = S.setup_turbulator_large()
-setup = S.setup_snellius()
+# setup = S.setup_turbulator_medium()
+# setup = S.setup_turbulator_large()
+# setup = S.setup_snellius()
 setup |> pairs
 
-#######################
-# Define closure models
-#######################
+config = (;
+    # Closures included in every multi-model step. Order propagates to plots.
+    # Available: :nomo, :dynsmag, :clar, :smag, :vers, :tbnn, :equi, :conv.
+    models = [:nomo, :dynsmag, :clar, :tbnn, :conv],
 
-m_nomo = let
-    g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    m_nomo(_, _) = fill!(stack(S.spacetensorfield(g)), 0)
-end
+    # How to load trainable closures (:skip loads ps-<key>.jld2 without
+    # retraining; :resume continues from a checkpoint; :scratch retrains).
+    train_mode = :skip,
 
-# m_smag = S.create_smagorinsky(
-#     0.1,
-#     setup.Δ,
-#     S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
-# )
+    # Pipeline stages to execute. Cached stages skip per-key when their
+    # artifact already exists under setup.outdir — see :force for invalidation.
+    experiments = [
+        :training_summary,   # print training wall-time per learned model
+        :rollouts,           # solve_les -> u-post-<key>.jld2
+        :les_stats,          # get_les_statistics -> les_stat.jld2 + error-vs-t plot
+        :spectrum_les,       # LES energy-spectrum plot
+        :sfs,                # predict_sfs -> sfs_<key>.jld2
+        :densities,          # compute_densities + plot_densities
+        :apriori,            # apriori_error (prints table; not persisted)
+        :equi_prior,         # apriori_equivariance_error + plot
+        :equi_post,          # apost_equivariance_error + plot
+        :velocities,         # plot_velocities slice grid
+        :sfs_plot,           # plot_sfs tensor-field snapshots
+        :qr,                 # compute_qr + plot_qr
+        # :dissipation,      # get_dissipation_errors (loads DNS field)
+    ],
 
-m_dynsmag = S.create_dynamic_smagorinsky(
-    setup.Δ,
-    S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
+    # Stage labels here force a re-compute regardless of cache. Uncomment
+    # a line below (or `push!(config.force, :qr)` at the REPL) to invalidate.
+    # Only the cached stages are listed; the others have nothing to invalidate.
+    force = Set{Symbol}([
+        # :rollouts,
+        # :les_stats,
+        # :sfs,
+        # :densities,
+        # :equi_prior,
+        # :equi_post,
+        # :qr,
+    ]),
 )
 
-m_clar = S.create_clark(setup.Δ, S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
-
-m_tbnn, train_tbnn = S.create_tbnn(setup, :skip);
-
-# m_equi, train_equi = S.create_equi(setup, :resume);
-
-m_conv, train_conv = S.create_conv(setup, :skip);
-
-# S.plot_training(setup, train_tbnn, train_equi, train_conv)
-
-map(
-    t -> round(t; digits = 1),
-    (;
-        tbnn = train_tbnn.timing,
-        equi = train_equi.timing,
-        conv = train_conv.timing,
-    ),
-) |> pairs |> display
-flush(stdout)
-
 #######################
-# Deploy closure models
+# Build closure models
 #######################
 
-S.solve_les(
-    setup,
-    (;
-        nomo = m_nomo,
-        # smag = m_smag,
-        dynsmag = m_dynsmag,
-        # vers = m_vers,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        # equi = m_equi,
-        conv = m_conv,
-    ),
-)
+models = S.build_models(setup, config.models; config.train_mode)
 
-# round(data.timing; digits = 1)
+#######################
+# Pipeline
+#######################
 
-let
-    keys = [
-        :nomo,
-        # :smag,
-        :dynsmag,
-        # :vers,
-        :clar,
-        :tbnn,
-        # :equi,
-        :conv,
-    ]
-    files = S.get_upostfiles(setup)
-    map(keys) do k
-        t = load_object(files[k]).timing
-        tround = round(t; digits = 1)
-        k => tround
-    end |> NamedTuple |> pairs |> display
+if :training_summary in config.experiments
+    @info "Training wall-time (seconds) per learned model"
+    learned = filter(in([:tbnn, :equi, :conv]), config.models)
+    pairs(NamedTuple(map(learned) do k
+        file = joinpath(setup.outdir, "ps-$(k).jld2")
+        k => isfile(file) ? round(load(file)["timing"]; digits = 1) : :missing
+    end)) |> display
     flush(stdout)
 end
 
-let
-    keys = [
-        :nomo,
-        # :smag,
-        :dynsmag,
-        # :vers,
-        :clar,
-        :tbnn,
-        # :equi,
-        :conv,
-    ]
-    les_stat = S.get_les_statistics(setup, keys)
-    save_object("$(setup.outdir)/les_stat.jld2", les_stat)
+if :rollouts in config.experiments
+    S.solve_les(setup, models; force = :rollouts in config.force)
+    upostfiles = S.get_upostfiles(setup)
+    @info "LES rollout wall-time (seconds) per model"
+    pairs(NamedTuple(map(keys(models)) do k
+        k => round(load_object(upostfiles[k]).timing; digits = 1)
+    end)) |> display
+    flush(stdout)
 end
 
-les_stat = load_object("$(setup.outdir)/les_stat.jld2");
-
-map(s -> round(mean(s.e_post); sigdigits = 4), les_stat) |> pairs
-
-let
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    fig = Figure(; size = (400, 360))
-    ax = Axis(
-        fig[1, 1];
-        xlabel = "Time",
-        ylabel = "Relative error",
-        # yscale = log10,
-        # xscale = log10,
-    )
-    t = data.times
-    labels = S.getlabels()
-    for k in keys(les_stat)
-        e = les_stat[k].e_post
-        ntime = length(e)
-        lines!(ax, t[1:ntime], e; label = labels[k])
-    end
-    # eps = 0.1
-    # ylims!(ax, -eps, 1 + eps)
-    Legend(
-        fig[0, 1],
-        ax;
-        tellwidth = false,
-        tellheight = true,
-        framevisible = false,
-        horizontal = true,
-        nbanks = 3,
-    )
-    # ylims!(ax, -0.03, 0.5)
-    rowgap!(fig.layout, 5)
-    save("$(setup.plotdir)/error_post.pdf", fig; backend = CairoMakie)
-    fig
+if :les_stats in config.experiments
+    les_stat =
+        S.get_les_statistics_cached(setup, keys(models); force = :les_stats in config.force)
+    @info "Time-mean relative LES error vs filtered DNS, per model"
+    pairs(map(s -> round(mean(s.e_post); sigdigits = 4), les_stat)) |> display
+    flush(stdout)
+    S.plot_error_post(setup, les_stat)
 end
 
-# Plot LES spectrum
-S.plot_spectrum_les(setup, les_stat)
-
-S.predict_sfs(
-    setup,
-    (;
-        #
-        # smag = m_smag,
-        dynsmag = m_dynsmag,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        # equi = m_equi,
-        conv = m_conv,
-    ),
-)
-
-S.compute_densities(
-    setup, [
-        # :smag,
-        :dynsmag,
-        :clar,
-        :tbnn,
-        # :equi,
-        :conv,
-    ]
-)
-
-S.plot_densities(
-    setup, [
-        :ref,
-        # :smag,
-        :dynsmag,
-        :clar,
-        :tbnn,
-        # :equi,
-        :conv,
-    ]; dolog = true
-)
-
-prediction_error_prior = let
-    modelkeys = [
-        :nomo,
-        # :smag,
-        :dynsmag,
-        :clar,
-        :tbnn,
-        # :equi,
-        :conv,
-    ]
-    S.apriori_error(setup, modelkeys)
+if :spectrum_les in config.experiments
+    les_stat = S.get_les_statistics_cached(setup, keys(models))
+    S.plot_spectrum_les(setup, les_stat)
 end
 
-map(x -> round(x.relerr; sigdigits = 4), prediction_error_prior) |> pairs
-map(x -> round(x.crosscor; sigdigits = 4), prediction_error_prior) |> pairs
-
-##############################
-# A-priori equivariance errors
-##############################
-
-S.apriori_equivariance_error(setup, 
-    (;
-        # smag = m_smag,
-        dynsmag = m_dynsmag,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        # equi = m_equi,
-        conv = m_conv,
-    ),
-)
-
-equi_errors_prior = load_object("$(setup.outdir)/equi-errors-prior.jld2")
-
-equi_errors_prior |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs |> display
-flush(stdout)
-
-##################################
-# A-posteriori equivariance errors
-##################################
-
-let
-    models = (;
-        nomo = m_nomo,
-        # smag = m_smag,
-        dynsmag = m_dynsmag,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        # equi = m_equi,
-        conv = m_conv,
-    )
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    ustart = data[1][end] |> adapt(setup.backend)
-    (; indices) = S.group_stuff(setup.D)
-    errors =
-        map(keys(models)) do key
-        model = models[key]
-        @info "Computing equivariance error for $(key)"
-        e = map(indices) do i
-            @info "Element $(i) of $(length(indices))"
-            flush(stderr)
-            S.test_equivariance_post(
-                setup,
-                ustart,
-                model;
-                groupindex = i,
-                tstop = 1.0e-1,
-                dolog = false,
-            )
-        end
-        key => e
-    end |> NamedTuple
-    file = "$(setup.outdir)/equi-errors-post.jld2"
-    save_object(file, errors)
+if :sfs in config.experiments
+    sfs_models = NamedTuple(k => models[k] for k in keys(models) if k != :nomo)
+    S.predict_sfs(setup, sfs_models; force = :sfs in config.force)
 end
 
-equi_errors_post = load_object("$(setup.outdir)/equi-errors-post.jld2")
+if :densities in config.experiments
+    sfs_keys = filter(!=(:nomo), config.models)
+    S.compute_densities(setup, sfs_keys; force = :densities in config.force)
+    S.plot_densities(setup, [:ref; sfs_keys]; dolog = true)
+end
 
-equi_errors_post |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
-flush(stdout)
+if :apriori in config.experiments
+    err = S.apriori_error(setup, config.models)
+    @info "A-priori relative SFS error per model"
+    pairs(map(x -> round(x.relerr; sigdigits = 4), err)) |> display
+    @info "A-priori SFS cross-correlation per model"
+    pairs(map(x -> round(x.crosscor; sigdigits = 4), err)) |> display
+    flush(stdout)
+end
 
-let
-    for (errs, name) in [
-            (equi_errors_prior, "equi-errors-prior.pdf"),
-            (equi_errors_post, "equi-errors-post.pdf"),
-        ]
-        fig = S.plot_equivariance_errors(errs)
-        save("$(setup.plotdir)/$(name)", fig; backend = CairoMakie)
-        display(fig)
-    end
+if :equi_prior in config.experiments
+    equi_models = NamedTuple(k => models[k] for k in keys(models) if k != :nomo)
+    errs =
+        S.apriori_equivariance_error(setup, equi_models; force = :equi_prior in config.force)
+    @info "Mean a-priori equivariance error (over group elements) per model"
+    pairs(map(x -> round(mean(x); sigdigits = 4), errs)) |> display
+    flush(stdout)
+    fig = S.plot_equivariance_errors(errs)
+    save("$(setup.plotdir)/equi-errors-prior.pdf", fig; backend = CairoMakie)
+end
+
+if :equi_post in config.experiments
+    errs = S.apost_equivariance_error(setup, models; force = :equi_post in config.force)
+    @info "Mean a-posteriori equivariance error (over group elements) per model"
+    pairs(map(x -> round(mean(x); sigdigits = 4), errs)) |> display
+    flush(stdout)
+    fig = S.plot_equivariance_errors(errs)
+    save("$(setup.plotdir)/equi-errors-post.pdf", fig; backend = CairoMakie)
+end
+
+if :velocities in config.experiments
+    S.plot_velocities(setup, :z, [:ref; config.models])
+end
+
+if :sfs_plot in config.experiments
+    S.plot_sfs(setup, filter(!=(:nomo), config.models))
+end
+
+if :qr in config.experiments
+    qr_keys = [:ref; config.models]
+    S.compute_qr(setup, qr_keys; force = :qr in config.force)
+    S.plot_qr(setup, qr_keys)
+end
+
+if :dissipation in config.experiments
+    u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
+    diss = S.get_dissipation_errors(; setup, u_dns, models)
+    @info "Median SFS dissipation per model (including :ref baseline)"
+    pairs(map(x -> round(x; sigdigits = 4), diss)) |> display
+    flush(stdout)
 end
 
 @info "Done."
 flush(stderr)
-exit()
-
-##################################
-# Dissipation
-##################################
-
-dissipation_errors = let
-    u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-    models = (;
-        nomo = m_nomo,
-        # smag = m_smag,
-        dynsmag = m_dynsmag,
-        # vers = m_vers,
-        clar = m_clar,
-        tbnn = m_tbnn,
-        conv = m_conv,
-        equi = m_equi,
-    )
-    S.get_dissipation_errors(; setup, u_dns, models)
-end;
-
-dissipation_errors |> e -> map(x -> round(x; sigdigits = 4), e) |> pairs
-
-let
-    keys = [
-        # :dns,
-        :ref,
-        :nomo,
-        # :smag,
-        :dynsmag,
-        :clar,
-        :tbnn,
-        # :equi,
-        :conv,
-    ]
-    # S.plot_velocities(setup, :x, keys)
-    S.plot_velocities(setup, :z, keys)
-end
-
-S.plot_sfs(
-    setup, [
-        # :smag,
-        :dynsmag,
-        :clar,
-        :tbnn,
-        # :equi,
-        :conv,
-    ],
-)
-
-S.compute_qr(
-    setup, [
-        :ref,
-        :nomo,
-        # :smag,
-        :dynsmag,
-        :clar,
-        :tbnn,
-        # :equi,
-        :conv,
-    ],
-)
-
-S.plot_qr(
-    setup, [
-        :ref,
-        :nomo,
-        # :smag,
-        :dynsmag,
-        :clar,
-        :tbnn,
-        # :equi,
-        :conv,
-    ],
-)

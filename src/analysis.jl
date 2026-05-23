@@ -3,7 +3,7 @@
 # and Q-R invariant joint distributions.
 
 "Compute distribution of tensor components and dissipation coefficients."
-function predict_sfs(setup, models)
+function predict_sfs(setup, models; force = false)
     (; outdir, D, l, n_les, backend) = setup
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
@@ -15,6 +15,12 @@ function predict_sfs(setup, models)
     AA = spacetensorfield_nonsym(g)
 
     for (key, m) in pairs(models)
+        file = "$(outdir)/sfs_$(key).jld2"
+        if !force && isfile(file)
+            @info "Skipping SFS for $(key): $(file) already exists"
+            flush(stderr)
+            continue
+        end
         @info "Computing SFS for $(key)"
         flush(stderr)
         τ_series = map(data.inputs) do ucpu
@@ -32,13 +38,13 @@ function predict_sfs(setup, models)
             # Prediction by LES model
             unstack_symtensor(m(u, AA), g) |> cpu_device()
         end
-        save_object("$(outdir)/sfs_$(key).jld2", τ_series)
+        save_object(file, τ_series)
     end
     return
 end
 
 "Compute distribution of tensor components and dissipation coefficients."
-function compute_densities(setup, modelkeys)
+function compute_densities(setup, modelkeys; force = false)
     (; outdir, name, D, l, n_les, backend, Δ) = setup
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
@@ -53,6 +59,12 @@ function compute_densities(setup, modelkeys)
     AA = spacetensorfield_nonsym(g)
 
     for mkey in [:ref, modelkeys...]
+        kde_files = ["$(outdir)/kde_$(mkey)_$(fkey).jld2" for fkey in (:xx, :xy, :diss)]
+        if !force && all(isfile, kde_files)
+            @info "Skipping densities for $(mkey): cached"
+            flush(stderr)
+            continue
+        end
         @info "Computing SFS quantities for $(mkey)"
         flush(stderr)
 
@@ -183,7 +195,13 @@ Measure whether each closure commutes with every octahedral transformation.
 For each group element this compares `R(model(G))` with `model(R(G))`, using
 the physical-space transformation helpers from `symmetry.jl`.
 """
-function apriori_equivariance_error(setup, models)
+function apriori_equivariance_error(setup, models; force = false)
+    file = "$(setup.outdir)/equi-errors-prior.jld2"
+    if !force && isfile(file)
+        @info "Skipping a-priori equivariance errors: $(file) already exists"
+        flush(stderr)
+        return load_object(file)
+    end
     (; D, l, n_les, backend) = setup
     (; elements, permutations, signs) = group_stuff(D)
     g = Grid{D}(; l, n = n_les, backend)
@@ -212,8 +230,9 @@ function apriori_equivariance_error(setup, models)
         end
         key => err
     end
-    file = "$(setup.outdir)/equi-errors-prior.jld2"
-    save_object(file, NamedTuple(errors))
+    result = NamedTuple(errors)
+    save_object(file, result)
+    return result
 end
 
 function get_dissipation_errors(; setup, u_dns, models)
@@ -263,8 +282,19 @@ Compute Q-R invariant KDEs from post-processed velocity-gradient fields.
 The saved samples are nondimensionalized by the mean Kolmogorov time of the
 LES-filtered reference data before density estimation.
 """
-function compute_qr(setup, modelkeys)
+function compute_qr(setup, modelkeys; force = false)
     (; D, l, n_les, backend) = setup
+
+    # Skip per-key if all artifacts already exist
+    pending = filter(modelkeys) do k
+        file = "$(setup.outdir)/qr_$(k).jld2"
+        if !force && isfile(file)
+            @info "Skipping Q-R for $(k): $(file) already exists"
+            return false
+        end
+        return true
+    end
+    isempty(pending) && return nothing
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
 
@@ -280,7 +310,7 @@ function compute_qr(setup, modelkeys)
 
     upostfiles = get_upostfiles(setup)
 
-    for k in modelkeys
+    for k in pending
         @info "Computing Q-R for $(k)"
         u_series = if k == :ref
             data.inputs
@@ -315,4 +345,59 @@ function compute_qr(setup, modelkeys)
         save_object(file, (; dens.x, dens.y, dens.density))
     end
     return nothing
+end
+
+"""
+Measure whether each closure commutes with octahedral transformations,
+when run *forward in time* from a filtered-DNS initial condition.
+
+Persists the resulting NamedTuple of per-element errors to
+`equi-errors-post.jld2` under `setup.outdir`.
+"""
+function apost_equivariance_error(setup, models; force = false, tstop = 1.0e-1)
+    file = "$(setup.outdir)/equi-errors-post.jld2"
+    if !force && isfile(file)
+        @info "Skipping a-posteriori equivariance errors: $(file) already exists"
+        flush(stderr)
+        return load_object(file)
+    end
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    ustart = data.inputs[end] |> adapt(setup.backend)
+    (; indices) = group_stuff(setup.D)
+    errors = map(keys(models)) do key
+        model = models[key]
+        @info "Computing a-posteriori equi errors for $(key)"
+        flush(stderr)
+        e = map(indices) do i
+            @info "Element $(i) of $(length(indices))"
+            flush(stderr)
+            test_equivariance_post(
+                setup, ustart, model;
+                groupindex = i, tstop, dolog = false,
+            )
+        end
+        key => e
+    end |> NamedTuple
+    save_object(file, errors)
+    return errors
+end
+
+"""
+Persist+cache wrapper around `get_les_statistics`.
+
+The aggregate is written to `les_stat.jld2` under `setup.outdir`. With
+`force=false` (default) and the file present, the cached NamedTuple is
+returned without recomputing — useful when iterating on plots that
+consume it. Set `force=true` (or delete the file) after changing the
+active model set.
+"""
+function get_les_statistics_cached(setup, modelkeys; force = false)
+    file = "$(setup.outdir)/les_stat.jld2"
+    if !force && isfile(file)
+        @info "Loading cached LES statistics from $(file)"
+        return load_object(file)
+    end
+    les_stat = get_les_statistics(setup, modelkeys)
+    save_object(file, les_stat)
+    return les_stat
 end
