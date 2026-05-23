@@ -9,6 +9,7 @@ getlabels() = (;
     dynsmag = "Dyn. Smag.",
     vers = "Verstappen",
     clar = "Clark",
+    bard = "Bardina",
     tbnn = "TBNN",
     equi = "G-Conv",
     conv = "MLP",
@@ -277,7 +278,7 @@ function plot_qr(setup, modelkeys)
     qr = map(key -> key => load_object("$(setup.outdir)/qr_$(key).jld2"), modelkeys)
     qr = NamedTuple(qr)
 
-    fig = Figure(; size = (600, 440))
+    fig = Figure(; size = (700, 440))
     labels = getlabels()
     colorvec = Makie.wong_colors()
     lescolor = 2
@@ -290,6 +291,7 @@ function plot_qr(setup, modelkeys)
         dynsmag = colorvec[lescolor],
         vers = colorvec[lescolor],
         clar = colorvec[lescolor],
+        bard = colorvec[lescolor],
         tbnn = colorvec[lescolor],
         conv = colorvec[lescolor],
         equi = colorvec[lescolor],
@@ -370,6 +372,7 @@ function plot_equivariance_errors(setup, errs; tag::Symbol)
         smag = Cycled(2),
         dynsmag = Cycled(2),
         clar = Cycled(3),
+        bard = Cycled(3),
         tbnn = Cycled(4),
         equi = Cycled(5),
         conv = Cycled(6),
@@ -380,6 +383,7 @@ function plot_equivariance_errors(setup, errs; tag::Symbol)
         smag = :circle,
         dynsmag = :circle,
         clar = :rect,
+        bard = :star5,
         tbnn = :diamond,
         equi = :rtriangle,
         conv = :x,

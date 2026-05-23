@@ -184,6 +184,7 @@ function build_models(setup, active; train_mode = :skip)
         clar = () -> create_clark(setup.Δ, g),
         smag = () -> create_smagorinsky(0.1, setup.Δ, g),
         vers = () -> create_verstappen(1.0, setup.Δ, g),
+        bard = () -> create_bardina(2.0, setup.Δ, g),
         tbnn = () -> create_tbnn(setup, train_mode)[1],
         equi = () -> create_equi(setup, train_mode)[1],
         conv = () -> create_conv(setup, train_mode)[1],

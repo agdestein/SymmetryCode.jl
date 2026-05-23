@@ -28,7 +28,7 @@ S.tabulate("Problem setup", setup)
 
 config = (;
     # Closures included in every multi-model step. Order propagates to plots.
-    # Available: :nomo, :dynsmag, :clar, :smag, :vers, :tbnn, :equi, :conv.
+    # Available: :nomo, :dynsmag, :clar, :smag, :vers, :bard, :tbnn, :equi, :conv.
     models = [
         :nomo,
         # :smag,

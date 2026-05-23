@@ -70,6 +70,50 @@ function create_verstappen(C, Δ, g)
     return (u, G) -> run_closure_kernel(verstappen_kernel!, (G, C, Δ), g)
 end
 
+"""
+Create the Bardina scale-similarity closure
+`τ_ij = G̃ * (u_i u_j) - (G̃ * u_i)(G̃ * u_j)`,
+with test filter width `Δ̃ = s · Δ`.
+
+The output is made trace-free to match the deviatoric SFS convention shared by
+the rest of the pipeline.
+"""
+function create_bardina(s, Δ, g)
+    space = spacescalarfield(g)
+    utilde = vectorfield(g)        # Test-filtered velocity (spectral)
+    v = spacevectorfield(g)
+    σ = tensorfield(g)             # u_i u_j   (spectral)
+    σtilde = tensorfield(g)        # ũ_i ũ_j  (spectral)
+    τpack = stack(spacetensorfield(g))
+    τ = unstack_symtensor(τpack, g)
+    plan = plan_rfft(space)
+    Δtilde = s * Δ
+
+    function model(u, G)
+        for (utilde, u) in zip(utilde, u)
+            copyto!(utilde, u)
+            apply!(gaussianfilter!, g, (utilde, Δtilde, g))
+            apply!(twothirds!, g, (utilde, g))
+        end
+
+        nonlinearity!(σ, space, v, u, plan, g)
+        nonlinearity!(σtilde, space, v, utilde, plan, g)
+        for σ in σ
+            apply!(gaussianfilter!, g, (σ, Δtilde, g))
+            apply!(twothirds!, g, (σ, g))
+        end
+        for (τ, σ, σtilde) in zip(τ, σ, σtilde)
+            to_phys!(τ, σ, plan, g)
+            to_phys!(space, σtilde, plan, g)
+            τ .-= space
+        end
+
+        make_tracefree!(τ, g)
+        return τpack
+    end
+    return model
+end
+
 @kernel function smagorinsky_tensor!(τ, S, Δ, g::Grid{2})
     I = @index(Global, Cartesian)
     Sxx, Syy, Sxy = S.xx[I], S.yy[I], S.xy[I]
