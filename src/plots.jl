@@ -11,7 +11,7 @@ getlabels() = (;
     clar = "Clark",
     tbnn = "TBNN",
     equi = "G-Conv",
-    conv = "Conv",
+    conv = "MLP",
 )
 
 """

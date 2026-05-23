@@ -1,10 +1,31 @@
-"""
-Build the octahedral-equivariant 1x1 Conv network.
+# Network architectures for the learned closures.
+#
+# All three nets (`equivariant_net`, `mlp`, `tbnn_net`) are *pointwise* MLPs
+# in physical space: they predict τ at each grid point from local features,
+# with no spatial mixing. They are built via Lux's `Conv` primitive with a
+# 1×1 (2D) or 1×1×1 (3D) kernel — not for spatial convolution, but so all
+# three share the same layer-shape convention and `equivariant_net` can use
+# the Conv weight layout that its group-weight-tying requires.
+#
+# - `equivariant_net` is a *group* convolution over the symmetry group of
+#   the cube (dihedral D₄ in 2D, octahedral O_h in 3D); each layer holds
+#   |G| copies of unconstrained weights, tied by `project_*`.
+# - `mlp` is the non-equivariant baseline: identical architecture without
+#   weight projection.
+# - `tbnn_net` predicts coefficients of the trace-free tensor basis from
+#   the gradient invariants (Pope-style TBNN).
 
-Trainable weights live in a small unconstrained basis; `project` expands them
-into full convolution weights by applying the group projectors from
-`symmetry.jl`. The returned `ps` are therefore not directly usable by Lux until
-they have passed through `project`.
+"""
+Build a group convolution over the symmetry group of the cube — the
+dihedral group D₄ in 2D, the octahedral group O_h in 3D (both of order
+|G| = `length(elements)`).
+
+A group convolution is realized here as a pointwise MLP whose channel
+count is a multiple of |G|: each layer holds |G| copies of unconstrained
+weights, and `project_*` ties them via the group projectors from
+`symmetry.jl` so the layer commutes with every group element. The
+returned `ps` are the unconstrained basis; Lux sees the projected weights
+only after they pass through `project`.
 """
 function equivariant_net(setup, nchan)
     (; D, backend, train_setup) = setup
@@ -29,6 +50,9 @@ function equivariant_net(setup, nchan)
     copyto!(proj_sink_ps.weight, e_sink)
     proj_mid_ps, _ = Lux.setup(rng, proj_mid) |> f |> dev
     copyto!(proj_mid_ps.weight, e_mid)
+    # Pointwise: kernel = 1 in every spatial dim. The Conv primitive is used
+    # for the weight layout that the group projection needs; the spatial
+    # mixing happens upstream (the input is the velocity gradient).
     kern = ntuple(Returns(1), D)
     function project_lift(ps)
         w, b = ps.weight, ps.bias
@@ -121,8 +145,14 @@ function equivariant_net(setup, nchan)
     return (; project, net, ps, st)
 end
 
-"Same as `equivariant_net` but without the weight projection."
-function cnn(setup, nchan; same_as_equi)
+"""
+Plain pointwise MLP — the non-equivariant baseline. Same depth and per-layer
+widths as `equivariant_net`, but with no weight projection so each layer is
+free to learn arbitrary mixing across channels. With `same_as_equi=true`,
+the hidden widths are multiplied by |G| so the parameter count matches and
+the comparison isolates the effect of equivariance from raw capacity.
+"""
+function mlp(setup, nchan; same_as_equi)
     (; D, backend, train_setup) = setup
     dev = adapt(backend)
     # dev = identity
@@ -136,6 +166,9 @@ function cnn(setup, nchan; same_as_equi)
     else
         1
     end
+    # Pointwise MLP via Lux's Conv primitive (1×1 kernel) so the layer
+    # shape matches equivariant_net exactly — only the weight projection
+    # is missing here.
     kern = ntuple(Returns(1), D)
     net = Chain(;
         lift = Conv(kern, nt_nonsym => nreg * nchan[1], gelu),
@@ -174,7 +207,8 @@ function cnn(setup, nchan; same_as_equi)
 end
 
 """
-Wrap a trained Conv-style network into a closure with solver-facing units.
+Wrap a trained pointwise network (`equivariant_net` or `mlp`) into a
+closure with solver-facing units.
 
 The dataloader trained the network on normalized gradients and normalized
 stress. This wrapper repeats that normalization at inference and scales the
@@ -349,12 +383,13 @@ end
 
 """
 Build the TBNN coefficient network from a vector of hidden-layer widths
-`nchan`. Mirrors `equivariant_net` / `cnn`: the input layer maps the
+`nchan`. Mirrors `equivariant_net` / `mlp`: the input layer maps the
 invariants to `nchan[1]`, middle layers map `nchan[i] => nchan[i+1]`, and
 the (bias-free) output layer maps `nchan[end]` to the basis coefficients.
 """
 function tbnn_net(setup, nchan)
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+    # Pointwise MLP via 1×1 Conv, same convention as `equivariant_net` / `mlp`.
     kern = ntuple(Returns(1), setup.D)
     return Chain(
         Conv(kern, ninvariant(g) => nchan[1], gelu),

@@ -266,7 +266,7 @@ function create_conv(setup, mode = :resume)
         setup, mode;
         key = :conv,
         buildnet = () ->
-        cnn(setup, setup.conv_setup.layers; setup.conv_setup.same_as_equi),
+        mlp(setup, setup.conv_setup.layers; setup.conv_setup.same_as_equi),
         makeloss = (ns, g) -> create_loss(ns.project),
         makeloaders = data -> create_dataloader(
             setup, data;
