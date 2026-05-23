@@ -43,13 +43,13 @@ m_dynsmag = S.create_dynamic_smagorinsky(
 
 m_clar = S.create_clark(setup.Δ, S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend))
 
-m_tbnn, train_tbnn = S.create_tbnn(setup, :resume);
+m_tbnn, train_tbnn = S.create_tbnn(setup, :skip);
 
-m_equi, train_equi = S.create_equi(setup, :resume);
+# m_equi, train_equi = S.create_equi(setup, :resume);
 
-m_conv, train_conv = S.create_conv(setup, :resume);
+m_conv, train_conv = S.create_conv(setup, :skip);
 
-S.plot_training(setup, train_tbnn, train_equi, train_conv)
+# S.plot_training(setup, train_tbnn, train_equi, train_conv)
 
 map(
     t -> round(t; digits = 1),
@@ -213,23 +213,18 @@ map(x -> round(x.crosscor; sigdigits = 4), prediction_error_prior) |> pairs
 # A-priori equivariance errors
 ##############################
 
-equi_errors_prior_file = joinpath(setup.outdir, "equi-errors-prior.jld2")
-
-let
-    # u = map(copy, data.inputs) |> adapt(setup.backend)
-    models = (;
+S.apriori_equivariance_error(setup, 
+    (;
         # smag = m_smag,
         dynsmag = m_dynsmag,
         clar = m_clar,
-        # tbnn = m_tbnn,
+        tbnn = m_tbnn,
         # equi = m_equi,
-        # conv = m_conv,
-    )
-    errors = S.apriori_equivariance_error(; u, setup, models)
-    save_object(equi_errors_prior_file, errors)
-end
+        conv = m_conv,
+    ),
+)
 
-equi_errors_prior = load_object(equi_errors_prior_file)
+equi_errors_prior = load_object("$(setup.outdir)/equi-errors-prior.jld2")
 
 equi_errors_prior |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs |> display
 flush(stdout)
@@ -238,45 +233,42 @@ flush(stdout)
 # A-posteriori equivariance errors
 ##################################
 
-equi_errors_post_file = joinpath(setup.outdir, "equi-errors-post.jld2")
-
 let
-    grid = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     models = (;
         nomo = m_nomo,
         # smag = m_smag,
         dynsmag = m_dynsmag,
         clar = m_clar,
-        # tbnn = m_tbnn,
+        tbnn = m_tbnn,
         # equi = m_equi,
-        # conv = m_conv,
+        conv = m_conv,
     )
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
     ustart = data[1][end] |> adapt(setup.backend)
-    (; elements) = S.group_stuff(setup.D)
+    (; indices) = S.group_stuff(setup.D)
     errors =
         map(keys(models)) do key
         model = models[key]
         @info "Computing equivariance error for $(key)"
-        e = map(eachindex(elements)) do i
-            @info "Element $(i) of $(length(elements))"
+        e = map(indices) do i
+            @info "Element $(i) of $(length(indices))"
             flush(stderr)
-            S.test_equivariance_post(;
-                ustart,
+            S.test_equivariance_post(
                 setup,
-                grid,
-                model,
+                ustart,
+                model;
                 groupindex = i,
                 tstop = 1.0e-1,
-                cfl = 0.35,
                 dolog = false,
             )
         end
         key => e
     end |> NamedTuple
-    save_object(equi_errors_post_file, errors)
+    file = "$(setup.outdir)/equi-errors-post.jld2"
+    save_object(file, errors)
 end
 
-equi_errors_post = load_object(equi_errors_post_file)
+equi_errors_post = load_object("$(setup.outdir)/equi-errors-post.jld2")
 
 equi_errors_post |> e -> map(x -> round(mean(x); sigdigits = 4), e) |> pairs
 flush(stdout)

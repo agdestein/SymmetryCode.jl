@@ -338,6 +338,7 @@ function plot_equivariance_errors(errs)
     colors = (;
         nomo = Cycled(1),
         smag = Cycled(2),
+        dynsmag = Cycled(2),
         clar = Cycled(3),
         tbnn = Cycled(4),
         equi = Cycled(5),
@@ -347,6 +348,7 @@ function plot_equivariance_errors(errs)
     markers = (;
         nomo = :utriangle,
         smag = :circle,
+        dynsmag = :circle,
         clar = :rect,
         tbnn = :diamond,
         equi = :rtriangle,

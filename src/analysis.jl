@@ -183,29 +183,37 @@ Measure whether each closure commutes with every octahedral transformation.
 For each group element this compares `R(model(G))` with `model(R(G))`, using
 the physical-space transformation helpers from `symmetry.jl`.
 """
-function apriori_equivariance_error(; u, setup, models)
+function apriori_equivariance_error(setup, models)
     (; D, l, n_les, backend) = setup
     (; elements, permutations, signs) = group_stuff(D)
     g = Grid{D}(; l, n = n_les, backend)
-    u_ref = u.ref |> adapt(backend)
-    G = getgradient(u_ref, g)
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    u = map(copy, data.inputs[1]) |> adapt(setup.backend)
+    G = getgradient(u, g)
     errors = map(keys(models)) do key
         @info "Computing a-priori equi errors for $(key)"
         m = models[key]
-        mG = m(G)
+        # Copy: dynamic Smagorinsky reuses an internal τ buffer across calls.
+        mG = copy(m(u, G))
         mG_split = unstack_symtensor(mG, g)
         err = map(elements) do e
             ip, is = e
             p, s = permutations[ip], signs[is]
-            rG = transform_tensor_nonsym(G, g, (p, s))
-            mrG = m(rG)
+            # Rotate u in physical space, return to spectral, then recompute G
+            space_u = inverse_vector_fourier(u, g)
+            space_ru = transform_vector(space_u, g, (p, s))
+            ru = forward_vector_fourier(space_ru, g)
+            foreach(u -> apply!(twothirds!, g, (u, g)), ru)
+            rG = getgradient(ru, g)
+            mrG = m(ru, rG)
             rmG_split = transform_tensor(mG_split, g, (p, s))
             rmG = stack(rmG_split)
             norm(rmG - mrG) / norm(mrG)
         end
         key => err
     end
-    errors |> NamedTuple
+    file = "$(setup.outdir)/equi-errors-prior.jld2"
+    save_object(file, NamedTuple(errors))
 end
 
 function get_dissipation_errors(; setup, u_dns, models)

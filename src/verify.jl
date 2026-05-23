@@ -354,7 +354,11 @@ function dns_aid()
     return sum(i -> sum(abs2, v[i] - ubar[i]) / sum(abs2, ubar[i]), 1:D)
 end
 
-function test_equivariance_post(; ustart, setup, grid, model, groupindex, tstop, cfl, dolog)
+function test_equivariance_post(setup, ustart, model; groupindex, tstop, dolog)
+
+    (; cfl) = setup
+    grid = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+
     # Group element
     (; elements, permutations, signs) = group_stuff(setup.D)
     ip, is = elements[groupindex]
@@ -367,9 +371,18 @@ function test_equivariance_post(; ustart, setup, grid, model, groupindex, tstop,
     ru = forward_vector_fourier(space_ru, grid)
     foreach(u -> apply!(twothirds!, grid, (u, grid)), ru)
 
+    cache = getcache(grid)
+    if !isnothing(model)
+        # Allocate velocity gradient for closure
+        cache = (;
+            cache...,
+            G = tensorfield_nonsym(grid),
+            GG = spacetensorfield_nonsym(grid),
+        )
+    end
+
     # Time stepping
     (; visc) = setup
-    cache = (; getcache(grid)..., G = tensorfield_nonsym(grid))
     t = zero(tstop)
     i = 0
     while t < tstop
