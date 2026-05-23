@@ -30,11 +30,11 @@ m_nomo = let
     m_nomo(_, _) = fill!(stack(S.spacetensorfield(g)), 0)
 end
 
-m_smag = S.create_smagorinsky(
-    0.1,
-    setup.Δ,
-    S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
-)
+# m_smag = S.create_smagorinsky(
+#     0.1,
+#     setup.Δ,
+#     S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend),
+# )
 
 m_dynsmag = S.create_dynamic_smagorinsky(
     setup.Δ,
@@ -69,7 +69,7 @@ S.solve_les(
     setup,
     (;
         nomo = m_nomo,
-        smag = m_smag,
+        # smag = m_smag,
         dynsmag = m_dynsmag,
         # vers = m_vers,
         clar = m_clar,
@@ -84,7 +84,7 @@ S.solve_les(
 let
     keys = [
         :nomo,
-        :smag,
+        # :smag,
         :dynsmag,
         # :vers,
         :clar,
@@ -104,7 +104,7 @@ end
 let
     keys = [
         :nomo,
-        :smag,
+        # :smag,
         :dynsmag,
         # :vers,
         :clar,
@@ -161,7 +161,7 @@ S.predict_sfs(
     setup,
     (;
         #
-        smag = m_smag,
+        # smag = m_smag,
         dynsmag = m_dynsmag,
         clar = m_clar,
         tbnn = m_tbnn,
@@ -172,7 +172,7 @@ S.predict_sfs(
 
 S.compute_densities(
     setup, [
-        :smag,
+        # :smag,
         :dynsmag,
         :clar,
         :tbnn,
@@ -184,7 +184,7 @@ S.compute_densities(
 S.plot_densities(
     setup, [
         :ref,
-        :smag,
+        # :smag,
         :dynsmag,
         :clar,
         :tbnn,
@@ -196,7 +196,7 @@ S.plot_densities(
 prediction_error_prior = let
     modelkeys = [
         :nomo,
-        :smag,
+        # :smag,
         :dynsmag,
         :clar,
         :tbnn,
@@ -218,7 +218,7 @@ equi_errors_prior_file = joinpath(setup.outdir, "equi-errors-prior.jld2")
 let
     # u = map(copy, data.inputs) |> adapt(setup.backend)
     models = (;
-        smag = m_smag,
+        # smag = m_smag,
         dynsmag = m_dynsmag,
         clar = m_clar,
         # tbnn = m_tbnn,
@@ -244,7 +244,8 @@ let
     grid = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     models = (;
         nomo = m_nomo,
-        smag = m_smag,
+        # smag = m_smag,
+        dynsmag = m_dynsmag,
         clar = m_clar,
         # tbnn = m_tbnn,
         # equi = m_equi,
@@ -303,8 +304,9 @@ dissipation_errors = let
     u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
     models = (;
         nomo = m_nomo,
-        smag = m_smag,
-        vers = m_vers,
+        # smag = m_smag,
+        dynsmag = m_dynsmag,
+        # vers = m_vers,
         clar = m_clar,
         tbnn = m_tbnn,
         conv = m_conv,
@@ -320,7 +322,7 @@ let
         # :dns,
         :ref,
         :nomo,
-        :smag,
+        # :smag,
         :dynsmag,
         :clar,
         :tbnn,
@@ -333,7 +335,7 @@ end
 
 S.plot_sfs(
     setup, [
-        :smag,
+        # :smag,
         :dynsmag,
         :clar,
         :tbnn,
@@ -346,7 +348,7 @@ S.compute_qr(
     setup, [
         :ref,
         :nomo,
-        :smag,
+        # :smag,
         :dynsmag,
         :clar,
         :tbnn,
@@ -359,7 +361,7 @@ S.plot_qr(
     setup, [
         :ref,
         :nomo,
-        :smag,
+        # :smag,
         :dynsmag,
         :clar,
         :tbnn,
