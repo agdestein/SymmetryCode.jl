@@ -146,6 +146,28 @@ setup_turbulator_large() =
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
 )
 
+"3D forced HIT, large (n_dns=810). Fits in a 90 GB datacenter GPU (H100 on Snellius)."
+function setup_snellius()
+    s = (;
+        name = "snellius",
+        D = 3,
+        l = 2π,
+        n_dns = 810,
+        n_les = 128,
+        Δ_factor = 3,
+        visc = 1.5e-4,
+        cfl = 0.35,
+        warmup = (; totalenergy = 0.2, tstop = 40.0, seed = 0),
+        datagen = (; nstep = 50, tstop = 10.0),
+        tbnn_setup = (; layers = [64, 64, 128]), # 13_760 params
+        equi_setup = (; layers = [9, 8, 8, 16]), # 12_544 actual params
+        conv_setup = (; layers = [48, 64, 64, 64], same_as_equi = false), # 12_320 parameters
+    )
+    outdir = "/projects/prjs1757/SymmetryOutput/visc=$(s.visc)_n=$(s.n_dns)" |> mkpath
+    plotdir = joinpath(@__DIR__, "..", "output", "snellius") |> mkpath
+    return getsetup(; s..., outdir, plotdir)
+end
+
 """
 Build only the closure models named in `active`, in the requested order.
 
@@ -167,26 +189,4 @@ function build_models(setup, active; train_mode = :skip)
         conv = () -> create_conv(setup, train_mode)[1],
     )
     return NamedTuple(k => build[k]() for k in active)
-end
-
-"3D forced HIT, large (n_dns=810). Fits in a 90 GB datacenter GPU (H100 on Snellius)."
-function setup_snellius()
-    s = (;
-        name = "snellius",
-        D = 3,
-        l = 2π,
-        n_dns = 810,
-        n_les = 128,
-        Δ_factor = 3,
-        visc = 1.5e-4,
-        cfl = 0.35,
-        warmup = (; totalenergy = 0.2, tstop = 40.0, seed = 0),
-        datagen = (; nstep = 50, tstop = 10.0),
-        tbnn_setup = (; layers = [64, 64, 128]), # 13_760 params
-        equi_setup = (; layers = [9, 8, 8, 16]), # 12_544 actual params
-        conv_setup = (; layers = [48, 64, 64, 64], same_as_equi = false), # 12_320 parameters
-    )
-    outdir = "/projects/prjs1757/SymmetryOutput/visc=$(s.visc)_n=$(s.n_dns)" |> mkpath
-    plotdir = joinpath(@__DIR__, "..", "output", "snellius") |> mkpath
-    return getsetup(; s..., outdir, plotdir)
 end
