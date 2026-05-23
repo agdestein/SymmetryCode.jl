@@ -28,7 +28,16 @@ setup |> pairs
 config = (;
     # Closures included in every multi-model step. Order propagates to plots.
     # Available: :nomo, :dynsmag, :clar, :smag, :vers, :tbnn, :equi, :conv.
-    models = [:nomo, :dynsmag, :clar, :tbnn, :conv],
+    models = [
+        :nomo,
+        # :smag,
+        # :vers,
+        :dynsmag,
+        :clar,
+        :tbnn,
+        # :equi,
+        :conv,
+    ],
 
     # How to load trainable closures (:skip loads ps-<key>.jld2 without
     # retraining; :resume continues from a checkpoint; :scratch retrains).
@@ -55,15 +64,17 @@ config = (;
     # Stage labels here force a re-compute regardless of cache. Uncomment
     # a line below (or `push!(config.force, :qr)` at the REPL) to invalidate.
     # Only the cached stages are listed; the others have nothing to invalidate.
-    force = Set{Symbol}([
-        # :rollouts,
-        # :les_stats,
-        # :sfs,
-        # :densities,
-        # :equi_prior,
-        # :equi_post,
-        # :qr,
-    ]),
+    force = Set{Symbol}(
+        [
+            # :rollouts,
+            # :les_stats,
+            # :sfs,
+            # :densities,
+            # :equi_prior,
+            # :equi_post,
+            # :qr,
+        ]
+    ),
 )
 
 #######################
@@ -79,10 +90,10 @@ models = S.build_models(setup, config.models; config.train_mode)
 if :training_summary in config.experiments
     @info "Training wall-time (seconds) per learned model"
     learned = filter(in([:tbnn, :equi, :conv]), config.models)
-    pairs(NamedTuple(map(learned) do k
+    map(learned) do k
         file = joinpath(setup.outdir, "ps-$(k).jld2")
         k => isfile(file) ? round(load(file)["timing"]; digits = 1) : :missing
-    end)) |> display
+    end |> NamedTuple |> pairs |> display
     flush(stdout)
 end
 
@@ -90,9 +101,9 @@ if :rollouts in config.experiments
     S.solve_les(setup, models; force = :rollouts in config.force)
     upostfiles = S.get_upostfiles(setup)
     @info "LES rollout wall-time (seconds) per model"
-    pairs(NamedTuple(map(keys(models)) do k
+    map(keys(models)) do k
         k => round(load_object(upostfiles[k]).timing; digits = 1)
-    end)) |> display
+    end |> NamedTuple |> pairs |> display
     flush(stdout)
 end
 
@@ -100,7 +111,7 @@ if :les_stats in config.experiments
     les_stat =
         S.get_les_statistics_cached(setup, keys(models); force = :les_stats in config.force)
     @info "Time-mean relative LES error vs filtered DNS, per model"
-    pairs(map(s -> round(mean(s.e_post); sigdigits = 4), les_stat)) |> display
+    map(s -> round(mean(s.e_post); sigdigits = 4), les_stat) |> pairs |> display
     flush(stdout)
     S.plot_error_post(setup, les_stat)
 end
@@ -124,9 +135,9 @@ end
 if :apriori in config.experiments
     err = S.apriori_error(setup, config.models)
     @info "A-priori relative SFS error per model"
-    pairs(map(x -> round(x.relerr; sigdigits = 4), err)) |> display
+    map(x -> round(x.relerr; sigdigits = 4), err) |> pairs |> display
     @info "A-priori SFS cross-correlation per model"
-    pairs(map(x -> round(x.crosscor; sigdigits = 4), err)) |> display
+    map(x -> round(x.crosscor; sigdigits = 4), err) |> pairs |> display
     flush(stdout)
 end
 
@@ -135,7 +146,7 @@ if :equi_prior in config.experiments
     errs =
         S.apriori_equivariance_error(setup, equi_models; force = :equi_prior in config.force)
     @info "Mean a-priori equivariance error (over group elements) per model"
-    pairs(map(x -> round(mean(x); sigdigits = 4), errs)) |> display
+    map(x -> round(mean(x); sigdigits = 4), errs) |> pairs |> display
     flush(stdout)
     fig = S.plot_equivariance_errors(errs)
     save("$(setup.plotdir)/equi-errors-prior.pdf", fig; backend = CairoMakie)
@@ -144,7 +155,7 @@ end
 if :equi_post in config.experiments
     errs = S.apost_equivariance_error(setup, models; force = :equi_post in config.force)
     @info "Mean a-posteriori equivariance error (over group elements) per model"
-    pairs(map(x -> round(mean(x); sigdigits = 4), errs)) |> display
+    map(x -> round(mean(x); sigdigits = 4), errs) |> pairs |> display
     flush(stdout)
     fig = S.plot_equivariance_errors(errs)
     save("$(setup.plotdir)/equi-errors-post.pdf", fig; backend = CairoMakie)
@@ -168,7 +179,7 @@ if :dissipation in config.experiments
     u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
     diss = S.get_dissipation_errors(; setup, u_dns, models)
     @info "Median SFS dissipation per model (including :ref baseline)"
-    pairs(map(x -> round(x; sigdigits = 4), diss)) |> display
+    map(x -> round(x; sigdigits = 4), diss) |> pairs |> display
     flush(stdout)
 end
 
