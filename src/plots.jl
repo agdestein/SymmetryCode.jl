@@ -5,7 +5,8 @@ getlabels() = (;
     ref = "Filtered DNS",
     nomo = "No-model",
     smag = "Smagorinsky",
-    dynsmag = "Dynamic Smagorinsky",
+    # dynsmag = "Dynamic Smagorinsky",
+    dynsmag = "Dyn. Smag.",
     vers = "Verstappen",
     clar = "Clark",
     tbnn = "TBNN",
@@ -353,7 +354,7 @@ function plot_qr(setup, modelkeys)
     return fig
 end
 
-function plot_equivariance_errors(errs)
+function plot_equivariance_errors(setup, errs; tag::Symbol)
     fig = Figure(; size = (400, 340))
     ax = Axis(
         fig[1, 1];
@@ -406,6 +407,7 @@ function plot_equivariance_errors(errs)
         nbanks = 3,
     )
     rowgap!(fig.layout, 5)
+    save("$(setup.plotdir)/equi-errors-$(tag).pdf", fig; backend = CairoMakie)
     return fig
 end
 

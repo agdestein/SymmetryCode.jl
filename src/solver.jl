@@ -8,6 +8,63 @@
 # using KernelAbstractions
 # using Random
 
+"""
+Skip-if-cached predicate for per-key compute loops. Returns `true` and
+logs a skip message when `file` already exists and `force=false`.
+
+Typical use inside a `for key in keys`-style loop:
+
+    skip_if_cached(file; force, label = "Q-R for \$(key)") && continue
+"""
+function skip_if_cached(file; force = false, label = basename(file))
+    if !force && isfile(file)
+        @info "Skipping $(label): cached at $(file)"
+        flush(stderr)
+        return true
+    end
+    return false
+end
+
+"""
+Cache-or-compute wrapper for a single-artifact computation. If `file`
+exists and `force=false`, load and return it. Otherwise call `compute()`
+and return its result; `compute` is responsible for persisting to `file`.
+
+    cached(file; force) do
+        result = expensive()
+        save_object(file, result)
+        result
+    end
+"""
+function cached(compute, file; force = false, label = basename(file))
+    if !force && isfile(file)
+        @info "Loading cached $(label) from $(file)"
+        flush(stderr)
+        return load_object(file)
+    end
+    return compute()
+end
+
+"""
+Pretty-print a NamedTuple of scalars under a heading, with per-element
+rounding. Use in scripts to surface a labeled summary table without the
+`@info` / `map(round, ...) |> pairs |> display` / `flush(stdout)` boilerplate.
+
+Pass `digits=N` for fixed-point rounding (e.g. timings), or the default
+`sigdigits=4` for relative quantities. Non-numeric values pass through.
+"""
+function tabulate(label, nt; sigdigits = 4, digits = nothing)
+    rounder = isnothing(digits) ?
+        (x -> x isa Number ? round(x; sigdigits) : x) :
+        (x -> x isa Number ? round(x; digits) : x)
+    disps = map(rounder, nt)
+    @info label disps...
+    # pairs(map(rounder, nt)) |> display
+    flush(stdout)
+    flush(stderr)
+    return nothing
+end
+
 "Cartesian grid of a squared/cubic periodic domain."
 struct Grid{D, T, B}
     "Domain side length."

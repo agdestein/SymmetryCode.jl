@@ -16,11 +16,7 @@ function predict_sfs(setup, models; force = false)
 
     for (key, m) in pairs(models)
         file = "$(outdir)/sfs_$(key).jld2"
-        if !force && isfile(file)
-            @info "Skipping SFS for $(key): $(file) already exists"
-            flush(stderr)
-            continue
-        end
+        skip_if_cached(file; force, label = "SFS for $(key)") && continue
         @info "Computing SFS for $(key)"
         flush(stderr)
         τ_series = map(data.inputs) do ucpu
@@ -60,6 +56,7 @@ function compute_densities(setup, modelkeys; force = false)
 
     for mkey in [:ref, modelkeys...]
         kde_files = ["$(outdir)/kde_$(mkey)_$(fkey).jld2" for fkey in (:xx, :xy, :diss)]
+        # Three artifacts per mkey, so this stays inline rather than using skip_if_cached.
         if !force && all(isfile, kde_files)
             @info "Skipping densities for $(mkey): cached"
             flush(stderr)
@@ -197,42 +194,39 @@ the physical-space transformation helpers from `symmetry.jl`.
 """
 function apriori_equivariance_error(setup, models; force = false)
     file = "$(setup.outdir)/equi-errors-prior.jld2"
-    if !force && isfile(file)
-        @info "Skipping a-priori equivariance errors: $(file) already exists"
-        flush(stderr)
-        return load_object(file)
-    end
-    (; D, l, n_les, backend) = setup
-    (; elements, permutations, signs) = group_stuff(D)
-    g = Grid{D}(; l, n = n_les, backend)
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    u = map(copy, data.inputs[1]) |> adapt(setup.backend)
-    G = getgradient(u, g)
-    errors = map(keys(models)) do key
-        @info "Computing a-priori equi errors for $(key)"
-        m = models[key]
-        # Copy: dynamic Smagorinsky reuses an internal τ buffer across calls.
-        mG = copy(m(u, G))
-        mG_split = unstack_symtensor(mG, g)
-        err = map(elements) do e
-            ip, is = e
-            p, s = permutations[ip], signs[is]
-            # Rotate u in physical space, return to spectral, then recompute G
-            space_u = inverse_vector_fourier(u, g)
-            space_ru = transform_vector(space_u, g, (p, s))
-            ru = forward_vector_fourier(space_ru, g)
-            foreach(u -> apply!(twothirds!, g, (u, g)), ru)
-            rG = getgradient(ru, g)
-            mrG = m(ru, rG)
-            rmG_split = transform_tensor(mG_split, g, (p, s))
-            rmG = stack(rmG_split)
-            norm(rmG - mrG) / norm(mrG)
+    return cached(file; force, label = "a-priori equivariance errors") do
+        (; D, l, n_les, backend) = setup
+        (; elements, permutations, signs) = group_stuff(D)
+        g = Grid{D}(; l, n = n_les, backend)
+        data = joinpath(setup.outdir, "data.jld2") |> load_object
+        u = map(copy, data.inputs[1]) |> adapt(setup.backend)
+        G = getgradient(u, g)
+        errors = map(keys(models)) do key
+            @info "Computing a-priori equi errors for $(key)"
+            m = models[key]
+            # Copy: dynamic Smagorinsky reuses an internal τ buffer across calls.
+            mG = copy(m(u, G))
+            mG_split = unstack_symtensor(mG, g)
+            err = map(elements) do e
+                ip, is = e
+                p, s = permutations[ip], signs[is]
+                # Rotate u in physical space, return to spectral, then recompute G
+                space_u = inverse_vector_fourier(u, g)
+                space_ru = transform_vector(space_u, g, (p, s))
+                ru = forward_vector_fourier(space_ru, g)
+                foreach(u -> apply!(twothirds!, g, (u, g)), ru)
+                rG = getgradient(ru, g)
+                mrG = m(ru, rG)
+                rmG_split = transform_tensor(mG_split, g, (p, s))
+                rmG = stack(rmG_split)
+                norm(rmG - mrG) / norm(mrG)
+            end
+            key => err
         end
-        key => err
+        result = NamedTuple(errors)
+        save_object(file, result)
+        result
     end
-    result = NamedTuple(errors)
-    save_object(file, result)
-    return result
 end
 
 function get_dissipation_errors(; setup, u_dns, models)
@@ -252,7 +246,7 @@ function get_dissipation_errors(; setup, u_dns, models)
     end
     G = getgradient(ubar, g_les)
     S = strain_from_gradient(G, g_les)
-    τ_les = map(m -> unstack_symtensor(m(G), g_les), models)
+    τ_les = map(m -> unstack_symtensor(m(ubar, G), g_les), models)
     τ_all = (; ref = τ, τ_les...)
     diss = map(τ -> contract_dissipation(τ, S, g_les), τ_all)
     return map(median, NamedTuple(diss))
@@ -285,17 +279,6 @@ LES-filtered reference data before density estimation.
 function compute_qr(setup, modelkeys; force = false)
     (; D, l, n_les, backend) = setup
 
-    # Skip per-key if all artifacts already exist
-    pending = filter(modelkeys) do k
-        file = "$(setup.outdir)/qr_$(k).jld2"
-        if !force && isfile(file)
-            @info "Skipping Q-R for $(k): $(file) already exists"
-            return false
-        end
-        return true
-    end
-    isempty(pending) && return nothing
-
     data = joinpath(setup.outdir, "data.jld2") |> load_object
 
     g = Grid{D}(; l, n = n_les, backend)
@@ -310,7 +293,9 @@ function compute_qr(setup, modelkeys; force = false)
 
     upostfiles = get_upostfiles(setup)
 
-    for k in pending
+    for k in modelkeys
+        file = "$(setup.outdir)/qr_$(k).jld2"
+        skip_if_cached(file; force, label = "Q-R for $(k)") && continue
         @info "Computing Q-R for $(k)"
         u_series = if k == :ref
             data.inputs
@@ -340,7 +325,6 @@ function compute_qr(setup, modelkeys; force = false)
             (rstack, qstack);
             npoints = (1000, 1000),
         )
-        file = "$(setup.outdir)/qr_$(k).jld2"
         @info "Saving Q-R density to $(file)"
         save_object(file, (; dens.x, dens.y, dens.density))
     end
@@ -356,30 +340,27 @@ Persists the resulting NamedTuple of per-element errors to
 """
 function apost_equivariance_error(setup, models; force = false, tstop = 1.0e-1)
     file = "$(setup.outdir)/equi-errors-post.jld2"
-    if !force && isfile(file)
-        @info "Skipping a-posteriori equivariance errors: $(file) already exists"
-        flush(stderr)
-        return load_object(file)
-    end
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    ustart = data.inputs[end] |> adapt(setup.backend)
-    (; indices) = group_stuff(setup.D)
-    errors = map(keys(models)) do key
-        model = models[key]
-        @info "Computing a-posteriori equi errors for $(key)"
-        flush(stderr)
-        e = map(indices) do i
-            @info "Element $(i) of $(length(indices))"
+    return cached(file; force, label = "a-posteriori equivariance errors") do
+        data = joinpath(setup.outdir, "data.jld2") |> load_object
+        ustart = data.inputs[end] |> adapt(setup.backend)
+        (; indices) = group_stuff(setup.D)
+        errors = map(keys(models)) do key
+            model = models[key]
+            @info "Computing a-posteriori equi errors for $(key)"
             flush(stderr)
-            test_equivariance_post(
-                setup, ustart, model;
-                groupindex = i, tstop, dolog = false,
-            )
-        end
-        key => e
-    end |> NamedTuple
-    save_object(file, errors)
-    return errors
+            e = map(indices) do i
+                @info "Element $(i) of $(length(indices))"
+                flush(stderr)
+                test_equivariance_post(
+                    setup, ustart, model;
+                    groupindex = i, tstop, dolog = false,
+                )
+            end
+            key => e
+        end |> NamedTuple
+        save_object(file, errors)
+        errors
+    end
 end
 
 """
@@ -393,11 +374,9 @@ active model set.
 """
 function get_les_statistics_cached(setup, modelkeys; force = false)
     file = "$(setup.outdir)/les_stat.jld2"
-    if !force && isfile(file)
-        @info "Loading cached LES statistics from $(file)"
-        return load_object(file)
+    return cached(file; force, label = "LES statistics") do
+        les_stat = get_les_statistics(setup, modelkeys)
+        save_object(file, les_stat)
+        les_stat
     end
-    les_stat = get_les_statistics(setup, modelkeys)
-    save_object(file, les_stat)
-    return les_stat
 end

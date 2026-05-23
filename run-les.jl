@@ -58,7 +58,7 @@ config = (;
         :velocities,         # plot_velocities slice grid
         :sfs_plot,           # plot_sfs tensor-field snapshots
         :qr,                 # compute_qr + plot_qr
-        # :dissipation,      # get_dissipation_errors (loads DNS field)
+        :dissipation,        # get_dissipation_errors (loads DNS field)
     ],
 
     # Stage labels here force a re-compute regardless of cache. Uncomment
@@ -88,31 +88,30 @@ models = S.build_models(setup, config.models; config.train_mode)
 #######################
 
 if :training_summary in config.experiments
-    @info "Training wall-time (seconds) per learned model"
     learned = filter(in([:tbnn, :equi, :conv]), config.models)
-    map(learned) do k
-        file = joinpath(setup.outdir, "ps-$(k).jld2")
-        k => isfile(file) ? round(load(file)["timing"]; digits = 1) : :missing
-    end |> NamedTuple |> pairs |> display
-    flush(stdout)
+    timings = NamedTuple(
+        map(learned) do k
+            file = joinpath(setup.outdir, "ps-$(k).jld2")
+            k => isfile(file) ? load_object(file).timing : :missing
+        end
+    )
+    S.tabulate("Training wall-time (seconds) per learned model", timings; digits = 1)
 end
 
 if :rollouts in config.experiments
     S.solve_les(setup, models; force = :rollouts in config.force)
     upostfiles = S.get_upostfiles(setup)
-    @info "LES rollout wall-time (seconds) per model"
-    map(keys(models)) do k
-        k => round(load_object(upostfiles[k]).timing; digits = 1)
-    end |> NamedTuple |> pairs |> display
-    flush(stdout)
+    timings = NamedTuple(k => load_object(upostfiles[k]).timing for k in keys(models))
+    S.tabulate("LES rollout wall-time (seconds) per model", timings; digits = 1)
 end
 
 if :les_stats in config.experiments
     les_stat =
         S.get_les_statistics_cached(setup, keys(models); force = :les_stats in config.force)
-    @info "Time-mean relative LES error vs filtered DNS, per model"
-    map(s -> round(mean(s.e_post); sigdigits = 4), les_stat) |> pairs |> display
-    flush(stdout)
+    S.tabulate(
+        "Time-mean relative LES error vs filtered DNS, per model",
+        map(s -> mean(s.e_post), les_stat),
+    )
     S.plot_error_post(setup, les_stat)
 end
 
@@ -134,34 +133,26 @@ end
 
 if :apriori in config.experiments
     err = S.apriori_error(setup, config.models)
-    @info "A-priori relative SFS error per model"
-    map(x -> round(x.relerr; sigdigits = 4), err) |> pairs |> display
-    @info "A-priori SFS cross-correlation per model"
-    map(x -> round(x.crosscor; sigdigits = 4), err) |> pairs |> display
-    flush(stdout)
+    S.tabulate("A-priori relative SFS error per model", map(x -> x.relerr, err))
+    S.tabulate("A-priori SFS cross-correlation per model", map(x -> x.crosscor, err))
 end
 
 if :equi_prior in config.experiments
     equi_models = NamedTuple(k => models[k] for k in keys(models) if k != :nomo)
     errs =
         S.apriori_equivariance_error(setup, equi_models; force = :equi_prior in config.force)
-    @info "Mean a-priori equivariance error (over group elements) per model"
-    map(x -> round(mean(x); sigdigits = 4), errs) |> pairs |> display
-    flush(stdout)
-    fig = S.plot_equivariance_errors(errs)
-    save("$(setup.plotdir)/equi-errors-prior.pdf", fig; backend = CairoMakie)
+    S.tabulate("Mean a-priori equivariance error (over group elements) per model", map(mean, errs))
+    S.plot_equivariance_errors(setup, errs; tag = :prior)
 end
 
 if :equi_post in config.experiments
     errs = S.apost_equivariance_error(setup, models; force = :equi_post in config.force)
-    @info "Mean a-posteriori equivariance error (over group elements) per model"
-    map(x -> round(mean(x); sigdigits = 4), errs) |> pairs |> display
-    flush(stdout)
-    fig = S.plot_equivariance_errors(errs)
-    save("$(setup.plotdir)/equi-errors-post.pdf", fig; backend = CairoMakie)
+    S.tabulate("Mean a-posteriori equivariance error (over group elements) per model", map(mean, errs))
+    S.plot_equivariance_errors(setup, errs; tag = :post)
 end
 
 if :velocities in config.experiments
+    S.plot_velocities(setup, :x, [:ref; config.models])
     S.plot_velocities(setup, :z, [:ref; config.models])
 end
 
@@ -178,9 +169,7 @@ end
 if :dissipation in config.experiments
     u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
     diss = S.get_dissipation_errors(; setup, u_dns, models)
-    @info "Median SFS dissipation per model (including :ref baseline)"
-    map(x -> round(x; sigdigits = 4), diss) |> pairs |> display
-    flush(stdout)
+    S.tabulate("Median SFS dissipation per model (including :ref baseline)", diss)
 end
 
 @info "Done."

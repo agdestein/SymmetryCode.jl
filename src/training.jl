@@ -200,27 +200,23 @@ function create_model(setup, mode; key, buildnet, makeloss, makeloaders, wrap)
             checkpointfile,
             resume = mode == :resume,
         )
-        jldsave(
-            file;
-            ps = result.ps |> cpu_device(),
-            st = result.st,
-            result.losses_train,
-            result.losses_valid,
-            result.timing,
+        save_object(
+            file,
+            (;
+                ps = result.ps |> cpu_device(),
+                st = result.st,
+                result.losses_train,
+                result.losses_valid,
+                result.timing,
+            ),
         )
         isfile(checkpointfile) && rm(checkpointfile)
     end
 
-    d = load(file)
-    ps = d["ps"] |> adapt(setup.backend)
-    st = haskey(d, "st") ? d["st"] : net_stuff.st
-    chain = wrap(net_stuff, ps, st, g)
-    return chain,
-        (;
-            losses_train = d["losses_train"],
-            losses_valid = d["losses_valid"],
-            timing = d["timing"],
-        )
+    d = load_object(file)
+    ps = d.ps |> adapt(setup.backend)
+    chain = wrap(net_stuff, ps, d.st, g)
+    return chain, (; d.losses_train, d.losses_valid, d.timing)
 end
 
 function create_tbnn(setup, mode = :resume)

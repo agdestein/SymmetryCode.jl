@@ -59,11 +59,7 @@ function solve_les(setup, models; force = false)
     u_model = vectorfield(grid)
     for key in keys(models)
         file = files[key]
-        if !force && isfile(file)
-            @info "Skipping LES for $(key): $(file) already exists"
-            flush(stderr)
-            continue
-        end
+        skip_if_cached(file; force, label = "LES rollout for $(key)") && continue
         @info "Solving LES with $(key)"
         flush(stderr)
         model = models[key]
