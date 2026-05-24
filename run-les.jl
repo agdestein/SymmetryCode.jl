@@ -99,18 +99,55 @@ function main()
     )
 
     #######################
-    # Train and build closure models
+    # Train learned closures
     #######################
 
-    # Train the learned closures one at a time (with GPU memory reclaimed
-    # between models) before assembling the inference closures. Both calls
-    # are no-ops for stages they don't apply to: train_models skips when
-    # train_mode = :skip, build_models always loads from ps-<key>.jld2.
+    # train_models is a no-op when train_mode = :skip; otherwise each
+    # learned closure is trained in isolation with clean() between them.
     S.train_models(setup, config.models; config.train_mode)
-    models = S.build_models(setup, config.models)
 
     #######################
-    # Pipeline
+    # Phase A — per-model compute loop
+    #######################
+    #
+    # Build exactly one closure per iteration, run every per-model
+    # artifact-producing experiment for it, then discard so the GPU
+    # footprint at any moment is bounded by a single closure's working set.
+    # Cached stages short-circuit per-key without instantiating the model.
+
+    for key in config.models
+        @info "===== compute phase: $(key) ====="
+        flush(stderr)
+        S.clean()
+        model = S.build_models(setup, [key])[key]
+
+        if :rollouts in config.experiments
+            S.solve_les(setup, key, model; force = :rollouts in config.force)
+        end
+        if key != :nomo
+            if :sfs in config.experiments
+                S.predict_sfs(setup, key, model; force = :sfs in config.force)
+            end
+            if :equi_prior in config.experiments
+                S.apriori_equivariance_error(
+                    setup, key, model;
+                    force = :equi_prior in config.force,
+                )
+            end
+        end
+        if :equi_post in config.experiments
+            S.apost_equivariance_error(
+                setup, key, model;
+                force = :equi_post in config.force,
+            )
+        end
+
+        model = nothing
+        S.clean()
+    end
+
+    #######################
+    # Phase B — aggregation and plotting (reads on-disk artifacts only)
     #######################
 
     if :training_summary in config.experiments
@@ -125,15 +162,15 @@ function main()
     end
 
     if :rollouts in config.experiments
-        S.solve_les(setup, models; force = :rollouts in config.force)
         upostfiles = S.get_upostfiles(setup)
-        timings = NamedTuple(k => load_object(upostfiles[k]).timing for k in keys(models))
+        timings = NamedTuple(k => load_object(upostfiles[k]).timing for k in config.models)
         S.tabulate("LES rollout wall-time (seconds) per model", timings; digits = 1)
     end
 
     if :les_stats in config.experiments
-        les_stat =
-            S.get_les_statistics_cached(setup, keys(models); force = :les_stats in config.force)
+        les_stat = S.get_les_statistics_cached(
+            setup, Tuple(config.models); force = :les_stats in config.force,
+        )
         S.tabulate(
             "Time-mean relative LES error vs filtered DNS, per model",
             map(s -> mean(s.e_post), les_stat),
@@ -142,19 +179,8 @@ function main()
     end
 
     if :spectrum_les in config.experiments
-        les_stat = S.get_les_statistics_cached(setup, keys(models))
+        les_stat = S.get_les_statistics_cached(setup, Tuple(config.models))
         S.plot_spectrum_les(setup, les_stat)
-    end
-
-    if :sfs in config.experiments
-        sfs_models = NamedTuple(k => models[k] for k in keys(models) if k != :nomo)
-        S.predict_sfs(setup, sfs_models; force = :sfs in config.force)
-    end
-
-    if :densities in config.experiments
-        sfs_keys = filter(!=(:nomo), config.models)
-        S.compute_densities(setup, sfs_keys; force = :densities in config.force)
-        S.plot_densities(setup, [:ref; sfs_keys]; dolog = true)
     end
 
     if :apriori in config.experiments
@@ -163,17 +189,28 @@ function main()
         S.tabulate("A-priori SFS cross-correlation per model", map(x -> x.crosscor, err))
     end
 
+    if :densities in config.experiments
+        sfs_keys = filter(!=(:nomo), config.models)
+        S.compute_densities(setup, [:ref; sfs_keys]; force = :densities in config.force)
+        S.plot_densities(setup, [:ref; sfs_keys]; dolog = true)
+    end
+
     if :equi_prior in config.experiments
-        equi_models = NamedTuple(k => models[k] for k in keys(models) if k != :nomo)
-        errs =
-            S.apriori_equivariance_error(setup, equi_models; force = :equi_prior in config.force)
-        S.tabulate("Mean a-priori equivariance error (over group elements) per model", map(mean, errs))
+        equi_keys = filter(!=(:nomo), config.models)
+        errs = S.load_equivariance_errors(setup, equi_keys, :prior)
+        S.tabulate(
+            "Mean a-priori equivariance error (over group elements) per model",
+            map(mean, errs),
+        )
         S.plot_equivariance_errors(setup, errs; tag = :prior)
     end
 
     if :equi_post in config.experiments
-        errs = S.apost_equivariance_error(setup, models; force = :equi_post in config.force)
-        S.tabulate("Mean a-posteriori equivariance error (over group elements) per model", map(mean, errs))
+        errs = S.load_equivariance_errors(setup, config.models, :post)
+        S.tabulate(
+            "Mean a-posteriori equivariance error (over group elements) per model",
+            map(mean, errs),
+        )
         S.plot_equivariance_errors(setup, errs; tag = :post)
     end
 
@@ -194,7 +231,10 @@ function main()
 
     if :dissipation in config.experiments
         u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-        diss = S.get_dissipation_errors(; setup, u_dns, models)
+        builders = NamedTuple(
+            k => () -> S.build_models(setup, [k])[k] for k in config.models
+        )
+        diss = S.get_dissipation_errors(; setup, u_dns, model_builders = builders)
         S.tabulate("Median SFS dissipation per model (including :ref baseline)", diss)
     end
 

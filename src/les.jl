@@ -46,12 +46,18 @@ get_upostfiles(setup) = map(
     ),
 )
 
-function solve_les(setup, models; force = false)
+"""
+Run the LES rollout for a single closure `model` keyed under `key`, starting
+from the first eval-window snapshot and integrating across `data.times[eval]`.
+Persists snapshots and timing to `u-post-<key>.jld2`; returns nothing.
+"""
+function solve_les(setup, key, model; force = false)
     (; D, l, n_les, backend, visc, cfl) = setup
     grid = Grid{D}(; l, n = n_les, backend)
+    file = get_upostfiles(setup)[key]
+    skip_if_cached(file; force, label = "LES rollout for $(key)") && return
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
-    files = get_upostfiles(setup)
 
     # Start the rollout at the first eval snapshot; the training window is
     # used only by the dataloaders and does not appear in any post-hoc result.
@@ -59,29 +65,22 @@ function solve_les(setup, models; force = false)
     u_les = data.inputs[eval_range[1]]
     times = data.times[eval_range]
 
-    # Solve LES for each model
+    @info "Solving LES with $(key)"
+    flush(stderr)
     u_model = vectorfield(grid)
-    for key in keys(models)
-        file = files[key]
-        skip_if_cached(file; force, label = "LES rollout for $(key)") && continue
-        @info "Solving LES with $(key)"
-        flush(stderr)
-        model = models[key]
 
-        # Do a short model warmup (so that compilation does not get included in timing)
-        twarm = [0.0, 1.0e-6]
-        foreach(copyto!, u_model, u_les)
-        solve_les!(u_model; times = twarm, grid, visc, model, cfl)
+    # Do a short model warmup (so that compilation does not get included in timing)
+    twarm = [0.0, 1.0e-6]
+    foreach(copyto!, u_model, u_les)
+    solve_les!(u_model; times = twarm, grid, visc, model, cfl)
 
-        # Solve LES
-        foreach(copyto!, u_model, u_les)
-        t = time()
-        snapshots = solve_les!(u_model; times, grid, visc, model, cfl)
-        t = time() - t
+    # Solve LES
+    foreach(copyto!, u_model, u_les)
+    t = time()
+    snapshots = solve_les!(u_model; times, grid, visc, model, cfl)
+    t = time() - t
 
-        # Save results
-        save_object(file, (; times, u = snapshots, timing = t))
-    end
+    save_object(file, (; times, u = snapshots, timing = t))
     return
 end
 

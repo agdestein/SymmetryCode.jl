@@ -2,9 +2,15 @@
 # a-priori errors, equivariance commutation errors, dissipation comparisons,
 # and Q-R invariant joint distributions.
 
-"Compute distribution of tensor components and dissipation coefficients."
-function predict_sfs(setup, models; force = false)
+"""
+Predict the SFS stress series for a single closure `model` keyed under `key`
+by applying it to every eval-window filtered-DNS snapshot. Persists the
+resulting `Vector{NamedTuple}` to `sfs_<key>.jld2`; returns nothing.
+"""
+function predict_sfs(setup, key, model; force = false)
     (; outdir, D, l, n_les, backend) = setup
+    file = "$(outdir)/sfs_$(key).jld2"
+    skip_if_cached(file; force, label = "SFS for $(key)") && return
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
     inputs_eval = data.inputs[data_ranges(setup).eval]
@@ -15,28 +21,24 @@ function predict_sfs(setup, models; force = false)
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
 
-    for (key, m) in pairs(models)
-        file = "$(outdir)/sfs_$(key).jld2"
-        skip_if_cached(file; force, label = "SFS for $(key)") && continue
-        @info "Computing SFS for $(key)"
-        flush(stderr)
-        τ_series = map(inputs_eval) do ucpu
-            GC.gc()
-            CUDA.reclaim()
+    @info "Computing SFS for $(key)"
+    flush(stderr)
+    τ_series = map(inputs_eval) do ucpu
+        GC.gc()
+        CUDA.reclaim()
 
-            # Velocity gradient in physical space
-            foreach(copyto!, u, ucpu)
-            apply!(vectorgradient!, g, (A, u, g))
-            for (AA, A) in zip(AA, A)
-                apply!(twothirds!, g, (A, g))
-                to_phys!(AA, A, plan, g)
-            end
-
-            # Prediction by LES model
-            unstack_symtensor(m(u, AA), g) |> cpu_device()
+        # Velocity gradient in physical space
+        foreach(copyto!, u, ucpu)
+        apply!(vectorgradient!, g, (A, u, g))
+        for (AA, A) in zip(AA, A)
+            apply!(twothirds!, g, (A, g))
+            to_phys!(AA, A, plan, g)
         end
-        save_object(file, τ_series)
+
+        # Prediction by LES model
+        unstack_symtensor(model(u, AA), g) |> cpu_device()
     end
+    save_object(file, τ_series)
     return
 end
 
@@ -192,49 +194,54 @@ function apriori_error(setup, modelkeys)
 end
 
 """
-Measure whether each closure commutes with every octahedral transformation.
-
-For each group element this compares `R(model(G))` with `model(R(G))`, using
-the physical-space transformation helpers from `symmetry.jl`.
+A-priori equivariance error for a single closure: compares `R(model(G))`
+with `model(R(G))` for every octahedral group element. Persists to
+`equi-errors-prior-<key>.jld2`; load all keys back with
+[`load_equivariance_errors`](@ref) for plotting.
 """
-function apriori_equivariance_error(setup, models; force = false)
-    file = "$(setup.outdir)/equi-errors-prior.jld2"
-    return cached(file; force, label = "a-priori equivariance errors") do
+function apriori_equivariance_error(setup, key, model; force = false)
+    file = "$(setup.outdir)/equi-errors-prior-$(key).jld2"
+    return cached(file; force, label = "a-priori equi errors ($(key))") do
         (; D, l, n_les, backend) = setup
         (; elements, permutations, signs) = group_stuff(D)
         g = Grid{D}(; l, n = n_les, backend)
         data = joinpath(setup.outdir, "data.jld2") |> load_object
         u = map(copy, data.inputs[data_ranges(setup).eval[1]]) |> adapt(setup.backend)
         G = getgradient(u, g)
-        errors = map(keys(models)) do key
-            @info "Computing a-priori equi errors for $(key)"
-            m = models[key]
-            # Copy: dynamic Smagorinsky reuses an internal τ buffer across calls.
-            mG = copy(m(u, G))
-            mG_split = unstack_symtensor(mG, g)
-            err = map(elements) do e
-                ip, is = e
-                p, s = permutations[ip], signs[is]
-                # Rotate u in physical space, return to spectral, then recompute G
-                space_u = inverse_vector_fourier(u, g)
-                space_ru = transform_vector(space_u, g, (p, s))
-                ru = forward_vector_fourier(space_ru, g)
-                foreach(u -> apply!(twothirds!, g, (u, g)), ru)
-                rG = getgradient(ru, g)
-                mrG = m(ru, rG)
-                rmG_split = transform_tensor(mG_split, g, (p, s))
-                rmG = stack(rmG_split)
-                norm(rmG - mrG) / norm(mrG)
-            end
-            key => err
+        @info "Computing a-priori equi errors for $(key)"
+        flush(stderr)
+        # Copy: dynamic Smagorinsky reuses an internal τ buffer across calls.
+        mG = copy(model(u, G))
+        mG_split = unstack_symtensor(mG, g)
+        err = map(elements) do e
+            ip, is = e
+            p, s = permutations[ip], signs[is]
+            # Rotate u in physical space, return to spectral, then recompute G
+            space_u = inverse_vector_fourier(u, g)
+            space_ru = transform_vector(space_u, g, (p, s))
+            ru = forward_vector_fourier(space_ru, g)
+            foreach(u -> apply!(twothirds!, g, (u, g)), ru)
+            rG = getgradient(ru, g)
+            mrG = model(ru, rG)
+            rmG_split = transform_tensor(mG_split, g, (p, s))
+            rmG = stack(rmG_split)
+            norm(rmG - mrG) / norm(mrG)
         end
-        result = NamedTuple(errors)
-        save_object(file, result)
-        result
+        save_object(file, err)
+        err
     end
 end
 
-function get_dissipation_errors(; setup, u_dns, models)
+"""
+Compute the median pointwise SFS dissipation per closure on a single DNS
+snapshot, plus the filtered-DNS reference baseline.
+
+`model_builders` is a NamedTuple of `() -> closure` thunks; each closure is
+built immediately before its forward pass and discarded (followed by
+`clean()`) before the next one. This keeps GPU residency bounded by one
+closure at a time, matching the rest of the inference pipeline.
+"""
+function get_dissipation_errors(; setup, u_dns, model_builders)
     (; D, l, n_dns, n_les, backend, Δ) = setup
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
@@ -244,17 +251,24 @@ function get_dissipation_errors(; setup, u_dns, models)
         isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
     end
     τhat = sfs(u_dns, g_dns, g_les, Δ)
-    τ = spacetensorfield(g_les)
+    τ_ref = spacetensorfield(g_les)
     plan = getplan(g_les)
-    for (τ, τhat) in zip(τ, τhat)
+    for (τ, τhat) in zip(τ_ref, τhat)
         to_phys!(τ, τhat, plan, g_les)
     end
     G = getgradient(ubar, g_les)
     S = strain_from_gradient(G, g_les)
-    τ_les = map(m -> unstack_symtensor(m(ubar, G), g_les), models)
-    τ_all = (; ref = τ, τ_les...)
-    diss = map(τ -> contract_dissipation(τ, S, g_les), τ_all)
-    return map(median, NamedTuple(diss))
+    diss_ref = median(contract_dissipation(τ_ref, S, g_les))
+    per_model = NamedTuple(
+        map(collect(pairs(model_builders))) do (k, build)
+            m = build()
+            d = median(contract_dissipation(unstack_symtensor(m(ubar, G), g_les), S, g_les))
+            m = nothing
+            clean()
+            k => d
+        end
+    )
+    return (; ref = diss_ref, per_model...)
 end
 
 @kernel function qr_kernel!(q, r, GG, g::Grid{3})
@@ -340,36 +354,43 @@ function compute_qr(setup, modelkeys; force = false)
 end
 
 """
-Measure whether each closure commutes with octahedral transformations,
-when run *forward in time* from a filtered-DNS initial condition.
-
-Persists the resulting NamedTuple of per-element errors to
-`equi-errors-post.jld2` under `setup.outdir`.
+A-posteriori equivariance error for a single closure: integrates the LES
+forward in time from a filtered-DNS IC under each octahedral group element
+and compares against the inverse-rotated reference trajectory. Persists to
+`equi-errors-post-<key>.jld2`; load all keys back with
+[`load_equivariance_errors`](@ref) for plotting.
 """
-function apost_equivariance_error(setup, models; force = false, tstop = 1.0e-1)
-    file = "$(setup.outdir)/equi-errors-post.jld2"
-    return cached(file; force, label = "a-posteriori equivariance errors") do
+function apost_equivariance_error(setup, key, model; force = false, tstop = 1.0e-1)
+    file = "$(setup.outdir)/equi-errors-post-$(key).jld2"
+    return cached(file; force, label = "a-posteriori equi errors ($(key))") do
         data = joinpath(setup.outdir, "data.jld2") |> load_object
         ustart = data.inputs[end] |> adapt(setup.backend)
         (; indices) = group_stuff(setup.D)
-        errors = map(keys(models)) do key
-            model = models[key]
-            @info "Computing a-posteriori equi errors for $(key)"
+        @info "Computing a-posteriori equi errors for $(key)"
+        flush(stderr)
+        err = map(indices) do i
+            @info "Element $(i) of $(length(indices))"
             flush(stderr)
-            e = map(indices) do i
-                @info "Element $(i) of $(length(indices))"
-                flush(stderr)
-                test_equivariance_post(
-                    setup, ustart, model;
-                    groupindex = i, tstop, dolog = false,
-                )
-            end
-            key => e
-        end |> NamedTuple
-        save_object(file, errors)
-        errors
+            test_equivariance_post(
+                setup, ustart, model;
+                groupindex = i, tstop, dolog = false,
+            )
+        end
+        save_object(file, err)
+        err
     end
 end
+
+"""
+Load per-key equivariance error series persisted by
+[`apriori_equivariance_error`](@ref) / [`apost_equivariance_error`](@ref)
+into a NamedTuple suitable for [`plot_equivariance_errors`](@ref).
+
+`tag` is `:prior` or `:post`.
+"""
+load_equivariance_errors(setup, keys, tag::Symbol) = NamedTuple(
+    k => load_object("$(setup.outdir)/equi-errors-$(tag)-$(k).jld2") for k in keys
+)
 
 """
 Persist+cache wrapper around `get_les_statistics`.
