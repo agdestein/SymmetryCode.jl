@@ -18,7 +18,8 @@ setup = S.setup_turbulator_small()
 setup = S.setup_turbulator_medium()
 setup = S.setup_turbulator_large()
 setup = S.setup_snellius()
-setup |> pairs
+
+S.tabulate("Problem setup", setup)
 
 # Warmup simulation
 S.create_dns(setup)

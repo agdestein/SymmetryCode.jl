@@ -525,13 +525,19 @@ function plot_evolution_data(setup)
     times_warmup .-= times_warmup[end] # Use negative times for warmup
     energies_warmup = map(s -> s.e, stats_warmup)
     dissipations_warmup = map(s -> s.diss, stats_warmup)
+    Re_tay_warmup = map(s -> s.Re_tay, stats_warmup)
+    t_int_warmup = map(s -> s.t_int, stats_warmup)
 
     times = data.times
     energies = map(s -> s.e, data.statistics_dns)
     dissipations = map(s -> s.diss, data.statistics_dns)
+    Re_tay = map(s -> s.Re_tay, data.statistics_dns)
+    t_int = map(s -> s.t_int, data.statistics_dns)
 
     emax = max(maximum(energies), maximum(energies_warmup))
     dmax = max(maximum(dissipations), maximum(dissipations_warmup))
+    Rmax = max(maximum(Re_tay), maximum(Re_tay_warmup))
+    tmax = max(maximum(t_int), maximum(t_int_warmup))
 
     # Create plot
     fig = Figure(; size = (400, 340))
@@ -541,6 +547,10 @@ function plot_evolution_data(setup)
     lines!(ax, times_warmup, energies_warmup / emax; linestyle = :dash, color = Cycled(1))
     lines!(ax, times, dissipations / dmax; label = "Dissipation", color = Cycled(2))
     lines!(ax, times_warmup, dissipations_warmup / dmax; linestyle = :dash, color = Cycled(2))
+    lines!(ax, times, Re_tay / Rmax; label = "Taylor Reynolds", color = Cycled(3))
+    lines!(ax, times_warmup, Re_tay_warmup / Rmax; linestyle = :dash, color = Cycled(3))
+    lines!(ax, times, t_int / tmax; label = "Integral time", color = Cycled(4))
+    lines!(ax, times_warmup, t_int_warmup / tmax; linestyle = :dash, color = Cycled(4))
     eps = 0.1
     ylims!(ax, -eps, 1 + eps)
 
