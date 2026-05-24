@@ -278,3 +278,26 @@ function create_conv(setup, mode = :resume)
         fullchain(setup, ns.net, ns.project, ps, st, setup.Δ),
     )
 end
+
+"""
+Train each learned closure (`tbnn`, `equi`, `conv`) listed in `active`,
+persisting `ps-<key>.jld2` under `setup.outdir`. Trainings run one at a
+time with `clean()` between them so GPU memory used by one model's
+dataloader / optimizer state is reclaimed before the next begins.
+
+`train_mode`: `:scratch` retrains, `:resume` continues from a checkpoint,
+`:skip` is a no-op. Non-learned keys in `active` are ignored. Call this
+before `build_models` if you need to (re)train.
+"""
+function train_models(setup, active; train_mode = :skip)
+    train_mode == :skip && return
+    creators = (; tbnn = create_tbnn, equi = create_equi, conv = create_conv)
+    learned = filter(in(keys(creators)), active)
+    isempty(learned) && return
+    clean() # drop residency from earlier work in this REPL
+    for key in learned
+        creators[key](setup, train_mode) # returned chain discarded
+        clean()
+    end
+    return
+end

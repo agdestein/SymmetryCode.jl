@@ -99,10 +99,15 @@ function main()
     )
 
     #######################
-    # Build closure models
+    # Train and build closure models
     #######################
 
-    models = S.build_models(setup, config.models; config.train_mode)
+    # Train the learned closures one at a time (with GPU memory reclaimed
+    # between models) before assembling the inference closures. Both calls
+    # are no-ops for stages they don't apply to: train_models skips when
+    # train_mode = :skip, build_models always loads from ps-<key>.jld2.
+    S.train_models(setup, config.models; config.train_mode)
+    models = S.build_models(setup, config.models)
 
     #######################
     # Pipeline

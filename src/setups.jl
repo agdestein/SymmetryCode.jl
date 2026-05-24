@@ -189,14 +189,14 @@ data_ranges(setup) = let n = setup.datagen.nstep, nt = setup.datagen.n_train
 end
 
 """
-Build only the closure models named in `active`, in the requested order.
-
-Trainable closures load their parameters via `create_*(setup, train_mode)`
-(`:skip` reads `ps-<key>.jld2` without retraining); classical closures are
+Build the inference-ready closure models named in `active`, in the requested
+order. Trainable closures (`tbnn`/`equi`/`conv`) always read their parameters
+from `ps-<key>.jld2` under `setup.outdir`; call [`train_models`](@ref) first
+if any of those files are missing or stale. Classical closures are
 constructed against a fresh LES `Grid`. Keys not in `active` are never
 instantiated.
 """
-function build_models(setup, active; train_mode = :skip)
+function build_models(setup, active)
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     build = (;
         nomo = () -> (_, _) -> fill!(stack(spacetensorfield(g)), 0),
@@ -205,9 +205,9 @@ function build_models(setup, active; train_mode = :skip)
         smag = () -> create_smagorinsky(0.1, setup.Δ, g),
         vers = () -> create_verstappen(1.0, setup.Δ, g),
         bard = () -> create_bardina(2.0, setup.Δ, g),
-        tbnn = () -> create_tbnn(setup, train_mode)[1],
-        equi = () -> create_equi(setup, train_mode)[1],
-        conv = () -> create_conv(setup, train_mode)[1],
+        tbnn = () -> create_tbnn(setup, :skip)[1],
+        equi = () -> create_equi(setup, :skip)[1],
+        conv = () -> create_conv(setup, :skip)[1],
     )
     return NamedTuple(k => build[k]() for k in active)
 end
