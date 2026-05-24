@@ -326,9 +326,10 @@ function create_dataloader(setup, data; nsample, batchsize)
     ττ = spacetensorfield(g)
     plan = plan_rfft(GG.xx)
     T = typeof(setup.l)
-    nsample_use = min(nsample, length(data.inputs))
+    train_range = data_ranges(setup).train
+    nsample_use = min(nsample, length(train_range))
     fac = get_fft_fac(g)
-    snaps = map(1:nsample_use) do j
+    snaps = map(train_range[1:nsample_use]) do j
         ucpu, τcpu = data.inputs[j], data.outputs[j]
         foreach(copyto!, u, ucpu)
         apply!(vectorgradient!, g, (G, u, g))
@@ -366,10 +367,11 @@ function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
     τ = scalarfield(g)
     ττ = spacetensorfield(g)
     plan = plan_rfft(ττ.xx)
-    nsample_use = min(nsample, length(data.inputs))
+    train_range = data_ranges(setup).train
+    nsample_use = min(nsample, length(train_range))
     fac = get_fft_fac(g)
     T = typeof(setup.l)
-    snaps = map(1:nsample_use) do j
+    snaps = map(train_range[1:nsample_use]) do j
         ucpu, τcpu = data.inputs[j], data.outputs[j]
         foreach(copyto!, u, ucpu)
         G = getgradient(u, g)

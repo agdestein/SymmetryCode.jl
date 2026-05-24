@@ -7,6 +7,7 @@ function predict_sfs(setup, models; force = false)
     (; outdir, D, l, n_les, backend) = setup
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
+    inputs_eval = data.inputs[data_ranges(setup).eval]
 
     g = Grid{D}(; l, n = n_les, backend)
     u = vectorfield(g)
@@ -19,7 +20,7 @@ function predict_sfs(setup, models; force = false)
         skip_if_cached(file; force, label = "SFS for $(key)") && continue
         @info "Computing SFS for $(key)"
         flush(stderr)
-        τ_series = map(data.inputs) do ucpu
+        τ_series = map(inputs_eval) do ucpu
             GC.gc()
             CUDA.reclaim()
 
@@ -44,6 +45,9 @@ function compute_densities(setup, modelkeys; force = false)
     (; outdir, name, D, l, n_les, backend, Δ) = setup
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
+    eval_range = data_ranges(setup).eval
+    inputs_eval = data.inputs[eval_range]
+    outputs_eval = data.outputs[eval_range]
 
     g = Grid{D}(; l, n = n_les, backend)
     u = vectorfield(g)
@@ -68,7 +72,7 @@ function compute_densities(setup, modelkeys; force = false)
         # Get SFS series
         τ_series = if mkey == :ref
             # Reference is still in spectral space
-            map(data.outputs) do τcpu
+            map(outputs_eval) do τcpu
                 for (τ, τcpu) in zip(τ, τcpu)
                     copyto!(τhat, τcpu)
                     apply!(twothirds!, g, (τhat, g))
@@ -77,14 +81,14 @@ function compute_densities(setup, modelkeys; force = false)
                 τ |> cpu_device()
             end
         else
-            # LES SFS are already in physical space
+            # LES SFS are already in physical space, eval-window only
             load_object("$(outdir)/sfs_$(mkey).jld2")
         end
 
         # Get series of the three fields of interest
         fields = map(eachindex(τ_series)) do i
             @info "Snapshot $(i) of $(length(τ_series))"
-            ucpu = data.inputs[i]
+            ucpu = inputs_eval[i]
             τcpu = τ_series[i]
 
             # Velocity gradient and strain rate (physical space)
@@ -139,6 +143,7 @@ function apriori_error(setup, modelkeys)
     (; D, l, n_les, backend) = setup
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
+    outputs_eval = data.outputs[data_ranges(setup).eval]
 
     g = Grid{D}(; l, n = n_les, backend)
 
@@ -146,7 +151,7 @@ function apriori_error(setup, modelkeys)
     τhat = scalarfield(g)
     plan = plan_rfft(τ.xx)
 
-    τ_ref = map(data.outputs) do τcpu
+    τ_ref = map(outputs_eval) do τcpu
         for (τ, τcpu) in zip(τ, τcpu)
             copyto!(τhat, τcpu)
             apply!(twothirds!, g, (τhat, g))
@@ -199,7 +204,7 @@ function apriori_equivariance_error(setup, models; force = false)
         (; elements, permutations, signs) = group_stuff(D)
         g = Grid{D}(; l, n = n_les, backend)
         data = joinpath(setup.outdir, "data.jld2") |> load_object
-        u = map(copy, data.inputs[1]) |> adapt(setup.backend)
+        u = map(copy, data.inputs[data_ranges(setup).eval[1]]) |> adapt(setup.backend)
         G = getgradient(u, g)
         errors = map(keys(models)) do key
             @info "Computing a-priori equi errors for $(key)"
@@ -280,6 +285,7 @@ function compute_qr(setup, modelkeys; force = false)
     (; D, l, n_les, backend) = setup
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
+    eval_range = data_ranges(setup).eval
 
     g = Grid{D}(; l, n = n_les, backend)
     Ghat = scalarfield(g)
@@ -289,7 +295,9 @@ function compute_qr(setup, modelkeys; force = false)
     u = vectorfield(g)
     plan = plan_rfft(G.xx)
 
-    t_kol = mean(x -> x.t_kol, data.statistics_les)
+    # Kolmogorov time from the eval window — the q,r nondimensionalization
+    # then matches the window being plotted.
+    t_kol = mean(x -> x.t_kol, data.statistics_les[eval_range])
 
     upostfiles = get_upostfiles(setup)
 
@@ -298,7 +306,7 @@ function compute_qr(setup, modelkeys; force = false)
         skip_if_cached(file; force, label = "Q-R for $(k)") && continue
         @info "Computing Q-R for $(k)"
         u_series = if k == :ref
-            data.inputs
+            data.inputs[eval_range]
         else
             load_object(upostfiles[k]).u
         end

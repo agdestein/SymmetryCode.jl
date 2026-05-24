@@ -53,7 +53,11 @@ function solve_les(setup, models; force = false)
     data = joinpath(setup.outdir, "data.jld2") |> load_object
     files = get_upostfiles(setup)
 
-    u_les = data.inputs[1]
+    # Start the rollout at the first eval snapshot; the training window is
+    # used only by the dataloaders and does not appear in any post-hoc result.
+    eval_range = data_ranges(setup).eval
+    u_les = data.inputs[eval_range[1]]
+    times = data.times[eval_range]
 
     # Solve LES for each model
     u_model = vectorfield(grid)
@@ -72,11 +76,11 @@ function solve_les(setup, models; force = false)
         # Solve LES
         foreach(copyto!, u_model, u_les)
         t = time()
-        snapshots = solve_les!(u_model; data.times, grid, visc, model, cfl)
+        snapshots = solve_les!(u_model; times, grid, visc, model, cfl)
         t = time() - t
 
         # Save results
-        save_object(file, (; data.times, u = snapshots, timing = t))
+        save_object(file, (; times, u = snapshots, timing = t))
     end
     return
 end
@@ -162,7 +166,7 @@ function get_les_statistics(setup, keys)
     g = Grid{D}(; l, n = n_les, backend)
     dissfield_les = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
     stuff = spectral_stuff(g)
-    u_ref = data.inputs
+    u_ref = data.inputs[data_ranges(setup).eval]
     u_les_gpu = vectorfield(g)
     u_ref_gpu = vectorfield(g)
     return map(keys) do k

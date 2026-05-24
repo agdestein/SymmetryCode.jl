@@ -26,6 +26,21 @@ setup = S.setup_turbulator_small()
 
 S.tabulate("Problem setup", setup)
 
+let r = S.data_ranges(setup), dg = setup.datagen
+    S.tabulate(
+        "Train/eval split (data.jld2 snapshot indices)",
+        (;
+            nstep = dg.nstep,
+            tstop = dg.tstop,
+            n_train = dg.n_train,
+            t_train = dg.tstop * dg.n_train / dg.nstep,
+            n_eval = length(r.eval),
+            eval_first = r.eval[1],
+            eval_last = r.eval[end],
+        ),
+    )
+end
+
 config = (;
     # Closures included in every multi-model step. Order propagates to plots.
     # Available: :nomo, :dynsmag, :clar, :smag, :vers, :bard, :tbnn, :equi, :conv.
@@ -42,7 +57,7 @@ config = (;
 
     # How to load trainable closures (:skip loads ps-<key>.jld2 without
     # retraining; :resume continues from a checkpoint; :scratch retrains).
-    train_mode = :skip,
+    train_mode = :scratch,
 
     # Pipeline stages to execute. Cached stages skip per-key when their
     # artifact already exists under setup.outdir — see :force for invalidation.
@@ -67,13 +82,13 @@ config = (;
     # Only the cached stages are listed; the others have nothing to invalidate.
     force = Set{Symbol}(
         [
-            # :rollouts,
-            # :les_stats,
-            # :sfs,
-            # :densities,
-            # :equi_prior,
-            # :equi_post,
-            # :qr,
+            :rollouts,
+            :les_stats,
+            :sfs,
+            :densities,
+            :equi_prior,
+            :equi_post,
+            :qr,
         ]
     ),
 )

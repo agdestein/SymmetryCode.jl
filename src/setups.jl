@@ -88,7 +88,7 @@ setup_laptop() = getsetup(;
     visc = 1.0e-4,
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
-    datagen = (; nstep = 50, tstop = 10.0),
+    datagen = (; nstep = 50, tstop = 10.0, n_train = 35),
     tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
     equi_setup = (; layers = [4, 4, 4, 8]),
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false),
@@ -105,7 +105,7 @@ setup_turbulator_small() = getsetup(;
     visc = 7.0e-4,
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
-    datagen = (; nstep = 30, tstop = 5.0),
+    datagen = (; nstep = 30, tstop = 5.0, n_train = 21),
     tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
     equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
@@ -122,7 +122,7 @@ setup_turbulator_medium() = getsetup(;
     visc = 5.0e-4,
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 20.0, seed = 0),
-    datagen = (; nstep = 50, tstop = 10.0),
+    datagen = (; nstep = 50, tstop = 10.0, n_train = 35),
     tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
     equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
@@ -140,7 +140,7 @@ setup_turbulator_large() =
     visc = 3.0e-4,
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 30.0, seed = 0),
-    datagen = (; nstep = 50, tstop = 10.0),
+    datagen = (; nstep = 50, tstop = 10.0, n_train = 35),
     tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
     equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
@@ -158,7 +158,12 @@ function setup_snellius()
         visc = 1.5e-4,
         cfl = 0.35,
         warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
-        datagen = (; nstep = 100, tstop = 20.0), # 25685 seconds
+
+        # nstep=100 over tstop=20 covers ~2.86 turnover times (t_int ≈ 7).
+        # First n_train=70 snapshots (t ∈ [0, 14] ≈ 2 t_int) are the training
+        # pool; the held-out tail (t ∈ (14, 20] ≈ 0.86 t_int) drives all
+        # post-hoc analysis (LES rollout, a-priori metrics, densities, Q-R).
+        datagen = (; nstep = 100, tstop = 20.0, n_train = 70), # 25685 seconds
         tbnn_setup = (; layers = [64, 64, 128]), # 13_760 params
         equi_setup = (; layers = [8, 8, 8, 16]), # 12_544 actual params
         conv_setup = (; layers = [48, 64, 64, 64], same_as_equi = false), # 12_320 parameters
@@ -166,6 +171,21 @@ function setup_snellius()
     outdir = "/projects/prjs1757/SymmetryOutput/visc=$(s.visc)_n=$(s.n_dns)" |> mkpath
     plotdir = joinpath(@__DIR__, "..", "output", "snellius") |> mkpath
     return getsetup(; s..., outdir, plotdir)
+end
+
+"""
+Snapshot-index split of the `(ubar, τ)` series in `data.jld2`.
+
+The first `setup.datagen.n_train` snapshots form the training pool consumed by
+`create_dataloader` / `create_dataloader_tbnn`; the remainder is the held-out
+window used by the LES rollout (`solve_les`) and every post-hoc analysis
+function. Inside the training pool, `train_setup.val_fraction` still selects a
+time-based validation tail for best-params tracking — that is unrelated to this
+held-out window.
+"""
+data_ranges(setup) = let n = setup.datagen.nstep, nt = setup.datagen.n_train
+    @assert 1 ≤ nt < n "datagen.n_train must satisfy 1 ≤ n_train < nstep"
+    (; train = 1:nt, eval = (nt + 1):n)
 end
 
 """

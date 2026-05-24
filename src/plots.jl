@@ -86,7 +86,8 @@ function plot_error_post(setup, les_stat)
         xlabel = "Time",
         ylabel = "Relative error",
     )
-    t = data.times
+    # e_post is eval-window-aligned; pull the matching times.
+    t = data.times[data_ranges(setup).eval]
     labels = getlabels()
     for k in keys(les_stat)
         e = les_stat[k].e_post
@@ -207,6 +208,11 @@ function plot_velocities(setup, comp, modelkeys)
     upostfiles = get_upostfiles(setup)
     data = joinpath(setup.outdir, "data.jld2") |> load_object
 
+    # Both reference (filtered DNS) and model rollouts live on the eval window.
+    eval_range = data_ranges(setup).eval
+    times_eval = data.times[eval_range]
+    inputs_eval = data.inputs[eval_range]
+
     fig = Figure(; size = (800, 470))
     g = Grid{D}(; l, n = n_les, backend)
     ui = scalarfield(g)
@@ -214,10 +220,8 @@ function plot_velocities(setup, comp, modelkeys)
     plan = plan_rfft(ui_space)
     labels = getlabels()
     nrow = 4
-    ntime = length(data.times)
+    ntime = length(times_eval)
     time_inds = map(x -> round(Int, x), range(1, ntime, nrow + 1))[2:end]
-    # time_inds = [20, 30, 50, 100]
-    # time_inds = [5, 10, 20, 30]
 
     # Loop over figure columns
     for (k, key) in enumerate(modelkeys)
@@ -226,7 +230,7 @@ function plot_velocities(setup, comp, modelkeys)
 
         title = labels[key]
         useries = if key == :ref
-            data.inputs
+            inputs_eval
         else
             upost = load_object(upostfiles[key])
             upost.u
@@ -239,7 +243,7 @@ function plot_velocities(setup, comp, modelkeys)
 
             ax = Axis(
                 fig[i, k];
-                ylabel = "t = $(round(data.times[t]; sigdigits = 2))",
+                ylabel = "t = $(round(times_eval[t]; sigdigits = 2))",
                 ylabelvisible = k == 1,
                 xticksvisible = false,
                 xticklabelsvisible = false,
@@ -421,6 +425,7 @@ function plot_sfs(setup, modelkeys)
     @assert D == 3 "TODO: Make this plot 2D compatible"
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
+    eval_range = data_ranges(setup).eval
 
     g = Grid{D}(; l, n = n_les, backend)
 
@@ -428,10 +433,10 @@ function plot_sfs(setup, modelkeys)
     τhat = scalarfield(g)
     plan = plan_rfft(τ.xx)
 
-    # Time index
-    t = 30
+    # Snapshot index inside the eval window (sfs_*.jld2 is eval-only).
+    t = min(30, length(eval_range))
 
-    τcpu = data.outputs[t]
+    τcpu = data.outputs[eval_range[t]]
     for (τ, τcpu) in zip(τ, τcpu)
         copyto!(τhat, τcpu)
         apply!(twothirds!, g, (τhat, g))
@@ -768,10 +773,13 @@ function plot_spectrum_les(setup, les_stat)
     (; D) = setup
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
+    eval_range = data_ranges(setup).eval
 
-    s_ref = mean(data.spectra_les)
+    # Average the reference spectrum over the same eval window the LES
+    # rollouts are evaluated on, so the two curves are comparable.
+    s_ref = mean(data.spectra_les[eval_range])
     s_les = map(stat -> mean(stat.s), les_stat)
-    r = spectrum_reference(setup, mean_of_named_tuple_series(data.statistics_dns))
+    r = spectrum_reference(setup, mean_of_named_tuple_series(data.statistics_dns[eval_range]))
     k = 2π / setup.l * eachindex(s_ref)
     labels = getlabels()
 
