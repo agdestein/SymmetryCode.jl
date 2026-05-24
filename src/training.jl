@@ -54,6 +54,7 @@ function train(;
         Training.single_train_step!(AutoZygote(), loss, (x, y), ts)
     end
 
+
     train_state = Training.TrainState(net, deepcopy(ps), st, opt)
     b_valid = first(valloader) |> device
     ps_best = deepcopy(train_state.parameters)
@@ -128,7 +129,7 @@ function train(;
                     checkpointfile;
                     epoch = iepoch - 1, # resume re-runs at most this epoch
                     ps_cur = train_state.parameters |> cpu_device(),
-                    st_cur = train_state.states,
+                    st_cur = train_state.states |> cpu_device(),
                     ps_best = ps_best |> cpu_device(),
                     st_best,
                     l_best,

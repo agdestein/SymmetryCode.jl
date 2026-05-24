@@ -160,7 +160,7 @@ function setup_snellius()
         warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
         datagen = (; nstep = 100, tstop = 20.0), # 25685 seconds
         tbnn_setup = (; layers = [64, 64, 128]), # 13_760 params
-        equi_setup = (; layers = [9, 8, 8, 16]), # 12_544 actual params
+        equi_setup = (; layers = [8, 8, 8, 16]), # 12_544 actual params
         conv_setup = (; layers = [48, 64, 64, 64], same_as_equi = false), # 12_320 parameters
     )
     outdir = "/projects/prjs1757/SymmetryOutput/visc=$(s.visc)_n=$(s.n_dns)" |> mkpath
