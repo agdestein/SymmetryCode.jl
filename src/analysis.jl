@@ -42,9 +42,52 @@ function predict_sfs(setup, key, model; force = false)
     return
 end
 
-"Compute distribution of tensor components and dissipation coefficients."
-function compute_densities(setup, modelkeys; force = false)
-    (; outdir, name, D, l, n_les, backend, Δ) = setup
+"""
+Scalar moments of a sample vector: mean, median, std, and the third
+standardized moment (skewness). No external dependency.
+"""
+function moments(x)
+    m = mean(x)
+    s = std(x)
+    return (;
+        mean = m,
+        median = median(x),
+        std = s,
+        skewness = iszero(s) ? zero(m) : mean(((xi - m) / s)^3 for xi in x),
+    )
+end
+
+"""
+Aggregate per-snapshot SFS samples into a single statistics artifact per key.
+
+For each key in `keys`, persists `sfs_stats_<key>.jld2` containing:
+
+- `kde.xx`, `kde.xy`, `kde.diss` — kernel density estimates of the τ₁₁,
+  τ₁₂, and pointwise dissipation `τᵢⱼSᵢⱼ` distributions over the eval window.
+- `diss` — `(; mean, median, std, skewness, backscatter)` of the pointwise
+  dissipation samples. `backscatter` is the fraction of points with
+  `τᵢⱼSᵢⱼ > 0`; it is exactly 0 for any closure of the form `τ = -2νₜS`
+  with `νₜ ≥ 0` (e.g. Smagorinsky), and is ≈ 0.3–0.4 for filtered HIT.
+- `apriori` — `(; relerr, crosscor)` against the filtered-DNS reference over
+  the full trace-free tensor. `(0.0, 1.0)` for `:ref`, `(1.0, 0.0)` for `:nomo`.
+
+`:ref` reads its tensor from `data.outputs[eval]` directly; other keys load
+`sfs_<key>.jld2` (produced by [`predict_sfs`](@ref)). `:nomo` is treated as
+zero SFS stress (no `sfs_nomo.jld2` is required).
+
+Replaces the legacy `compute_densities` / `apriori_error` /
+`get_dissipation_errors` trio, which all iterated the same per-snapshot
+sample collection separately.
+"""
+function compute_sfs_stats(setup, keys; force = false)
+    (; outdir, D, l, n_les, backend) = setup
+
+    todo = filter(k -> force || !isfile("$(outdir)/sfs_stats_$(k).jld2"), keys)
+    if isempty(todo)
+        @info "All SFS stats cached"
+        flush(stderr)
+        return
+    end
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
     eval_range = data_ranges(setup).eval
@@ -53,48 +96,38 @@ function compute_densities(setup, modelkeys; force = false)
 
     g = Grid{D}(; l, n = n_les, backend)
     u = vectorfield(g)
-    τ = spacetensorfield(g)
+    τ_model = spacetensorfield(g)
+    τ_ref = spacetensorfield(g)
     dissfield = spacescalarfield(g)
     τhat = scalarfield(g)
-    plan = plan_rfft(τ.xx)
+    plan = plan_rfft(τ_model.xx)
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
 
-    for mkey in [:ref, modelkeys...]
-        kde_files = ["$(outdir)/kde_$(mkey)_$(fkey).jld2" for fkey in (:xx, :xy, :diss)]
-        # Three artifacts per mkey, so this stays inline rather than using skip_if_cached.
-        if !force && all(isfile, kde_files)
-            @info "Skipping densities for $(mkey): cached"
-            flush(stderr)
-            continue
-        end
-        @info "Computing SFS quantities for $(mkey)"
+    for key in todo
+        file = "$(outdir)/sfs_stats_$(key).jld2"
+        @info "Computing SFS stats for $(key)"
         flush(stderr)
 
-        # Get SFS series
-        τ_series = if mkey == :ref
-            # Reference is still in spectral space
-            map(outputs_eval) do τcpu
-                for (τ, τcpu) in zip(τ, τcpu)
-                    copyto!(τhat, τcpu)
-                    apply!(twothirds!, g, (τhat, g))
-                    to_phys!(τ, τhat, plan, g)
-                end
-                τ |> cpu_device()
-            end
+        # Per-snapshot model source. :nomo has no file; :ref uses the
+        # spectral-space reference (re-IFFTed in the loop). Others load
+        # the cached physical-space prediction.
+        τ_series = if key in (:nomo, :ref)
+            nothing
         else
-            # LES SFS are already in physical space, eval-window only
-            load_object("$(outdir)/sfs_$(mkey).jld2")
+            load_object("$(outdir)/sfs_$(key).jld2")
         end
 
-        # Get series of the three fields of interest
-        fields = map(eachindex(τ_series)) do i
-            @info "Snapshot $(i) of $(length(τ_series))"
-            ucpu = inputs_eval[i]
-            τcpu = τ_series[i]
+        xx_samples = Float64[]
+        xy_samples = Float64[]
+        diss_samples = Float64[]
+        relerrs = Float64[]
+        crosscors = Float64[]
 
-            # Velocity gradient and strain rate (physical space)
-            foreach(copyto!, u, ucpu)
+        for i in eachindex(inputs_eval)
+            # Strain rate from ubar (model-independent; recomputed per key
+            # for memory simplicity — cheap compared to the model work).
+            foreach(copyto!, u, inputs_eval[i])
             apply!(vectorgradient!, g, (A, u, g))
             for (AA, A) in zip(AA, A)
                 apply!(twothirds!, g, (A, g))
@@ -102,95 +135,78 @@ function compute_densities(setup, modelkeys; force = false)
             end
             S = strain_from_gradient(AA, g)
 
-            # SFS: copy, dealias, and make trace-free
-            foreach(copyto!, τ, τcpu)
-            for τ in τ
-                dealias_phys!(τ, τhat, plan, g)
+            # Reference τ (spectral → physical, trace-free)
+            for (τ, τcpu) in zip(τ_ref, outputs_eval[i])
+                copyto!(τhat, τcpu)
+                apply!(twothirds!, g, (τhat, g))
+                to_phys!(τ, τhat, plan, g)
             end
-            make_tracefree!(τ, g)
+            make_tracefree!(τ_ref, g)
 
-            # Extract components and dissipation
-            τxx = τ.xx |> cpu_device()
-            τxy = τ.xy |> cpu_device()
-            dissfield .= contract_dissipation(τ, S, g)
-            diss = dissfield |> cpu_device()
-
-            (; xx = τxx, xy = τxy, diss)
-        end
-
-        # Compute kernel density estimates and save
-        for fkey in [:xx, :xy, :diss]
-            @info "Computing $(fkey)-density for $(mkey)"
-            flush(stderr)
-            samples = stack(fields) do f
-                f[fkey]
+            # Model τ
+            if key == :nomo
+                for t in τ_model
+                    fill!(t, 0)
+                end
+            elseif key == :ref
+                for (t, r) in zip(τ_model, τ_ref)
+                    copyto!(t, r)
+                end
+            else
+                foreach(copyto!, τ_model, τ_series[i])
+                for t in τ_model
+                    dealias_phys!(t, τhat, plan, g)
+                end
+                make_tracefree!(τ_model, g)
             end
-            estimate = samples |> vec |> kde
-            save_object(
-                "$(outdir)/kde_$(mkey)_$(fkey).jld2",
-                (; estimate.x, estimate.density),
-            )
+
+            # Sample the three fields of interest
+            append!(xx_samples, vec(Array(τ_model.xx)))
+            append!(xy_samples, vec(Array(τ_model.xy)))
+            dissfield .= contract_dissipation(τ_model, S, g)
+            append!(diss_samples, vec(Array(dissfield)))
+
+            # A-priori metrics over the full trace-free tensor vs reference
+            if key == :ref
+                push!(relerrs, 0.0)
+                push!(crosscors, 1.0)
+            elseif key == :nomo
+                push!(relerrs, 1.0)
+                push!(crosscors, 0.0)
+            else
+                a = Array(stack(τ_ref))
+                b = Array(stack(τ_model))
+                bb, aa = b .- mean(b), a .- mean(a)
+                push!(relerrs, norm(b - a) / norm(a))
+                push!(crosscors, dot(bb, aa) / sqrt(dot(bb, bb) * dot(aa, aa)))
+            end
         end
-    end
-    return nothing
-end
 
-"""
-Compare predicted SFS stresses against the filtered DNS target snapshot-wise.
-
-The no-model baseline is defined as zero SFS stress, giving relative error one
-and zero cross-correlation by construction.
-"""
-function apriori_error(setup, modelkeys)
-    (; D, l, n_les, backend) = setup
-
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    outputs_eval = data.outputs[data_ranges(setup).eval]
-
-    g = Grid{D}(; l, n = n_les, backend)
-
-    τ = spacetensorfield(g)
-    τhat = scalarfield(g)
-    plan = plan_rfft(τ.xx)
-
-    τ_ref = map(outputs_eval) do τcpu
-        for (τ, τcpu) in zip(τ, τcpu)
-            copyto!(τhat, τcpu)
-            apply!(twothirds!, g, (τhat, g))
-            to_phys!(τ, τhat, plan, g)
+        # Aggregate. KDE the three sample arrays (zero-variance :nomo is
+        # handled by saving an empty estimate; plot_densities filters :nomo out).
+        kde_or_empty(samples) = if iszero(std(samples))
+            (; x = Float64[], density = Float64[])
+        else
+            e = kde(samples)
+            (; x = collect(e.x), density = collect(e.density))
         end
-        τ |> cpu_device()
-    end
-
-    map(modelkeys) do key
-        @info "Computing a-priori errors for $(key)"
-        flush(stderr)
-
-        # For no-model, the SFS is zero
-        key == :nomo && return :nomo => (; relerr = 1.0, crosscor = 0.0)
-
-        # Otherwise, load LES SFS
-        τ_les = load_object("$(setup.outdir)/sfs_$(key).jld2")
-        series = map(zip(τ_les, τ_ref)) do (τ_les, τ_ref)
-            a = stack(τ_ref)
-            b = stack(τ_les)
-
-            # Make trace free
-            bdiag = selectdim(b, D + 1, 1:D)
-            trace = sum(bdiag; dims = D + 1)
-            @. bdiag -= trace / D
-
-            # Metrics
-            bb, aa = b .- mean(b), a .- mean(a)
-            relerr = norm(b - a) / norm(a)
-            crosscor = dot(bb, aa) / sqrt(dot(bb, bb) * dot(aa, aa))
-            (; relerr, crosscor)
-        end
-        key => (;
-            relerr = mean(s -> s.relerr, series),
-            crosscor = mean(s -> s.crosscor, series),
+        result = (;
+            kde = (;
+                xx = kde_or_empty(xx_samples),
+                xy = kde_or_empty(xy_samples),
+                diss = kde_or_empty(diss_samples),
+            ),
+            diss = (;
+                moments(diss_samples)...,
+                # Fraction of points with τ:S > 0 (backscatter). Exactly 0 for
+                # any closure of the form τ = -2νₜS with νₜ ≥ 0 (e.g. Smag).
+                backscatter = mean(>(0), diss_samples),
+            ),
+            apriori = (; relerr = mean(relerrs), crosscor = mean(crosscors)),
         )
-    end |> NamedTuple
+        save_object(file, result)
+    end
+    return
 end
 
 """
@@ -230,45 +246,6 @@ function apriori_equivariance_error(setup, key, model; force = false)
         save_object(file, err)
         err
     end
-end
-
-"""
-Compute the median pointwise SFS dissipation per closure on a single DNS
-snapshot, plus the filtered-DNS reference baseline.
-
-`model_builders` is a NamedTuple of `() -> closure` thunks; each closure is
-built immediately before its forward pass and discarded (followed by
-`clean()`) before the next one. This keeps GPU residency bounded by one
-closure at a time, matching the rest of the inference pipeline.
-"""
-function get_dissipation_errors(; setup, u_dns, model_builders)
-    (; D, l, n_dns, n_les, backend, Δ) = setup
-    g_dns = Grid{D}(; l, n = n_dns, backend)
-    g_les = Grid{D}(; l, n = n_les, backend)
-    ubar = vectorfield(g_les)
-    for (ubar, u_dns) in zip(ubar, u_dns)
-        apply!(cutoff!, g_les, (ubar, u_dns))
-        isnothing(Δ) || apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
-    end
-    τhat = sfs(u_dns, g_dns, g_les, Δ)
-    τ_ref = spacetensorfield(g_les)
-    plan = getplan(g_les)
-    for (τ, τhat) in zip(τ_ref, τhat)
-        to_phys!(τ, τhat, plan, g_les)
-    end
-    G = getgradient(ubar, g_les)
-    S = strain_from_gradient(G, g_les)
-    diss_ref = median(contract_dissipation(τ_ref, S, g_les))
-    per_model = NamedTuple(
-        map(collect(pairs(model_builders))) do (k, build)
-            m = build()
-            d = median(contract_dissipation(unstack_symtensor(m(ubar, G), g_les), S, g_les))
-            m = nothing
-            clean()
-            k => d
-        end
-    )
-    return (; ref = diss_ref, per_model...)
 end
 
 @kernel function qr_kernel!(q, r, GG, g::Grid{3})

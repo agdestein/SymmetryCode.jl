@@ -56,13 +56,13 @@ function main()
             :dynsmag,
             :clar,
             :tbnn,
-            :equi,
+            # :equi,
             :conv,
         ],
 
         # How to load trainable closures (:skip loads ps-<key>.jld2 without
         # retraining; :resume continues from a checkpoint; :scratch retrains).
-        train_mode = :scratch,
+        train_mode = :skip,
 
         # Pipeline stages to execute. Cached stages skip per-key when their
         # artifact already exists under setup.outdir — see :force for invalidation.
@@ -72,14 +72,12 @@ function main()
             :les_stats,          # get_les_statistics -> les_stat.jld2 + error-vs-t plot
             :spectrum_les,       # LES energy-spectrum plot
             :sfs,                # predict_sfs -> sfs_<key>.jld2
-            :densities,          # compute_densities + plot_densities
-            :apriori,            # apriori_error (prints table; not persisted)
+            :stats,              # compute_sfs_stats -> sfs_stats_<k>.jld2; KDE + bar plots + tables
             :equi_prior,         # apriori_equivariance_error + plot
             :equi_post,          # apost_equivariance_error + plot
             :velocities,         # plot_velocities slice grid
             :sfs_plot,           # plot_sfs tensor-field snapshots
             :qr,                 # compute_qr + plot_qr
-            :dissipation,        # get_dissipation_errors (loads DNS field)
         ],
 
         # Stage labels here force a re-compute regardless of cache. Uncomment
@@ -90,7 +88,7 @@ function main()
                 # :rollouts,
                 # :les_stats,
                 # :sfs,
-                # :densities,
+                :stats,
                 # :equi_prior,
                 # :equi_post,
                 # :qr,
@@ -183,16 +181,39 @@ function main()
         S.plot_spectrum_les(setup, les_stat)
     end
 
-    if :apriori in config.experiments
-        err = S.apriori_error(setup, config.models)
-        S.tabulate("A-priori relative SFS error per model", map(x -> x.relerr, err))
-        S.tabulate("A-priori SFS cross-correlation per model", map(x -> x.crosscor, err))
-    end
-
-    if :densities in config.experiments
+    if :stats in config.experiments
         sfs_keys = filter(!=(:nomo), config.models)
-        S.compute_densities(setup, [:ref; sfs_keys]; force = :densities in config.force)
+        all_keys = [:ref; config.models]
+        S.compute_sfs_stats(setup, all_keys; force = :stats in config.force)
+
+        stats = NamedTuple(
+            k => load_object("$(setup.outdir)/sfs_stats_$(k).jld2") for k in all_keys
+        )
+        S.tabulate(
+            "A-priori relative SFS error per model",
+            map(s -> s.apriori.relerr, stats),
+        )
+        S.tabulate(
+            "A-priori SFS cross-correlation per model",
+            map(s -> s.apriori.crosscor, stats),
+        )
+        S.tabulate(
+            "Median pointwise SFS dissipation per model (incl :ref baseline)",
+            map(s -> s.diss.median, stats),
+        )
+        S.tabulate(
+            "Dissipation skewness per model (negative = backscatter tail)",
+            map(s -> s.diss.skewness, stats),
+        )
+        S.tabulate(
+            "Backscatter fraction per model (τ:S > 0; 0 for Smag by construction)",
+            map(s -> s.diss.backscatter, stats),
+        )
+
         S.plot_densities(setup, [:ref; sfs_keys]; dolog = true)
+        S.plot_dissipation_bar(setup, all_keys)
+        S.plot_backscatter_bar(setup, all_keys)
+        S.plot_apriori_bar(setup, sfs_keys)
     end
 
     if :equi_prior in config.experiments
@@ -227,15 +248,6 @@ function main()
         qr_keys = [:ref; config.models]
         S.compute_qr(setup, qr_keys; force = :qr in config.force)
         S.plot_qr(setup, qr_keys)
-    end
-
-    if :dissipation in config.experiments
-        u_dns = load("$(setup.outdir)/dns.jld2", "u") |> adapt(setup.backend)
-        builders = NamedTuple(
-            k => () -> S.build_models(setup, [k])[k] for k in config.models
-        )
-        diss = S.get_dissipation_errors(; setup, u_dns, model_builders = builders)
-        S.tabulate("Median SFS dissipation per model (including :ref baseline)", diss)
     end
 
     @info "Done."

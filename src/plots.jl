@@ -138,15 +138,13 @@ function plot_densities(setup, mkeys; dolog)
         ),
     )
 
-    for fkey in [:xx, :xy, :diss], mkey in mkeys
-        dens = "$(outdir)/kde_$(mkey)_$(fkey).jld2" |> load_object
-        # if fkey == :diss && mkey == :smag
-        #     @info "Hi"
-        #     # The line at 0 is not visible for smagorinsky, append a zero
-        #     lines!(ax[fkey], [dens.x; 2 * dens.x[end]], [dens.density; 1e-10]; label = labels[mkey])
-        # else
-        lines!(ax[fkey], dens.x, max.(dens.density, 1.0e-16); label = labels[mkey])
-        # end
+    for mkey in mkeys
+        stats = load_object("$(outdir)/sfs_stats_$(mkey).jld2")
+        for fkey in [:xx, :xy, :diss]
+            dens = stats.kde[fkey]
+            isempty(dens.x) && continue   # :nomo has degenerate (all-zero) samples
+            lines!(ax[fkey], dens.x, max.(dens.density, 1.0e-16); label = labels[mkey])
+        end
     end
 
     if name == "laptop"
@@ -198,6 +196,124 @@ function plot_densities(setup, mkeys; dolog)
     # Save plot
     file = "$(plotdir)/tensor-distributions.pdf"
     @info "Saving density plot to $(file)"
+    save(file, fig; backend = CairoMakie)
+    return fig
+end
+
+"""
+Bar plot of median pointwise SFS dissipation per model, normalized by the
+filtered-DNS reference median. Bars above 1.0 are over-dissipative
+(smag/dynsmag); bars below 1.0 are under-dissipative (clark). The
+reference is shown as a horizontal dashed line at 1.0.
+
+`keys` must include `:ref` (used as the normalization baseline).
+"""
+function plot_dissipation_bar(setup, keys)
+    (; outdir, plotdir) = setup
+    labels = getlabels()
+    medians = NamedTuple(
+        k => load_object("$(outdir)/sfs_stats_$(k).jld2").diss.median for k in keys
+    )
+    @assert haskey(medians, :ref) "plot_dissipation_bar requires :ref in keys"
+    ref_med = medians.ref
+    plot_keys = filter(!=(:ref), collect(keys))
+    normalized = [medians[k] / ref_med for k in plot_keys]
+
+    fig = Figure(; size = (520, 340))
+    ax = Axis(
+        fig[1, 1];
+        xticks = (1:length(plot_keys), [labels[k] for k in plot_keys]),
+        ylabel = L"\mathrm{median}(\tau_{ij} S_{ij}) / \mathrm{median}_{\mathrm{ref}}",
+        xticklabelrotation = π / 6,
+    )
+    barplot!(ax, 1:length(plot_keys), normalized)
+    hlines!(ax, [1.0]; color = :red, linestyle = :dash, label = "Reference")
+    axislegend(ax; position = :rt, framevisible = false)
+
+    file = "$(plotdir)/dissipation-bar.pdf"
+    @info "Saving dissipation bar plot to $(file)"
+    save(file, fig; backend = CairoMakie)
+    return fig
+end
+
+"""
+Bar plot of the fraction of points where `τᵢⱼSᵢⱼ > 0` (local backscatter)
+per model. Smagorinsky-type closures of the form `τ = -2νₜS` with `νₜ ≥ 0`
+are mathematically pinned to zero; the filtered-DNS reference is shown as
+a horizontal dashed line at its absolute fraction.
+
+`keys` must include `:ref`.
+"""
+function plot_backscatter_bar(setup, keys)
+    (; outdir, plotdir) = setup
+    labels = getlabels()
+    backscatter = NamedTuple(
+        k => load_object("$(outdir)/sfs_stats_$(k).jld2").diss.backscatter for k in keys
+    )
+    @assert haskey(backscatter, :ref) "plot_backscatter_bar requires :ref in keys"
+    ref_bs = backscatter.ref
+    plot_keys = filter(!=(:ref), collect(keys))
+    bars = [backscatter[k] for k in plot_keys]
+
+    fig = Figure(; size = (520, 340))
+    ax = Axis(
+        fig[1, 1];
+        xticks = (1:length(plot_keys), [labels[k] for k in plot_keys]),
+        ylabel = L"\mathrm{fraction\ with\ } \tau_{ij} S_{ij} > 0",
+        xticklabelrotation = π / 6,
+    )
+    barplot!(ax, 1:length(plot_keys), bars)
+    hlines!(
+        ax, [ref_bs];
+        color = :red, linestyle = :dash,
+        label = "Reference ($(round(ref_bs * 100; digits = 1))%)",
+    )
+    ylims!(ax, 0, max(maximum(bars; init = 0.0), ref_bs) * 1.15)
+    axislegend(ax; position = :rt, framevisible = false)
+
+    file = "$(plotdir)/backscatter-bar.pdf"
+    @info "Saving backscatter bar plot to $(file)"
+    save(file, fig; backend = CairoMakie)
+    return fig
+end
+
+"""
+Two-panel bar plot of a-priori predictive metrics per model:
+relative L² error of the predicted SFS tensor (left, lower is better) and
+cross-correlation with the filtered-DNS reference (right, higher is better).
+
+`keys` should not include `:ref` (self-comparison is trivial).
+"""
+function plot_apriori_bar(setup, keys)
+    (; outdir, plotdir) = setup
+    labels = getlabels()
+    stats = NamedTuple(
+        k => load_object("$(outdir)/sfs_stats_$(k).jld2").apriori for k in keys
+    )
+    plot_keys = collect(keys)
+    relerrs = [stats[k].relerr for k in plot_keys]
+    crosscors = [stats[k].crosscor for k in plot_keys]
+
+    fig = Figure(; size = (820, 340))
+    xtks = (1:length(plot_keys), [labels[k] for k in plot_keys])
+    ax_re = Axis(
+        fig[1, 1];
+        xticks = xtks,
+        ylabel = "Relative L² error",
+        xticklabelrotation = π / 6,
+    )
+    barplot!(ax_re, 1:length(plot_keys), relerrs)
+    ax_cc = Axis(
+        fig[1, 2];
+        xticks = xtks,
+        ylabel = "Cross-correlation",
+        xticklabelrotation = π / 6,
+    )
+    barplot!(ax_cc, 1:length(plot_keys), crosscors)
+    ylims!(ax_cc, 0, 1)
+
+    file = "$(plotdir)/apriori-bar.pdf"
+    @info "Saving a-priori bar plot to $(file)"
     save(file, fig; backend = CairoMakie)
     return fig
 end
