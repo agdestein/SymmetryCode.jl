@@ -97,35 +97,4 @@ end
 
 S.plot_evolution_data(setup)
 
-# Plot normalized evolution of some statistics
-let
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    fig = Figure()
-    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Quantity")
-    s = data.statistics_dns
-    t = data.times
-    for (key, label) in [
-            (:diss, "Dissipation"),
-            (:uavg, "Kinetic Energy"),
-            (:Re_tay, "Taylor Reynolds"),
-            (:t_int, "Integral time"),
-        ]
-        y = getindex.(s, key)
-        lines!(ax, t, y ./ maximum(y); label)
-    end
-    eps = 0.1
-    ylims!(ax, -eps, 1 + eps)
-    Legend(
-        fig[0, 1],
-        ax;
-        tellwidth = false,
-        tellheight = true,
-        framevisible = false,
-        horizontal = true,
-        nbanks = 4,
-    )
-    save(joinpath(setup.plotdir, "evolution_data.pdf"), fig; backend = CairoMakie)
-    fig
-end
-
 S.plot_spectrum_data(setup)
