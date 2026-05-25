@@ -80,7 +80,7 @@ function plot_training(setup, mkeys)
         nbanks = length(curves),
     )
     eps = 0.1
-    ylims!(ax, -eps, 1 + eps)
+    # ylims!(ax, -eps, 1 + eps)
     rowgap!(fig.layout, 5)
     save("$(setup.plotdir)/training.pdf", fig; backend = CairoMakie)
     return fig
@@ -230,14 +230,14 @@ function plot_dissipation_bar(setup, keys)
     labels = getlabels()
     for (momkey, momlabel) in [(:median, "Median"), (:mean, "Mean")]
         moments = NamedTuple(
-            k => load_object("$(outdir)/sfs_stats_$(k).jld2").diss[momkey], median for k in keys
+            k => load_object("$(outdir)/sfs_stats_$(k).jld2").diss[momkey] for k in keys
         )
         @assert haskey(moments, :ref) "plot_dissipation_bar requires :ref in keys"
         ref_med = moments.ref
         plot_keys = filter(!=(:ref), collect(keys))
         normalized = [moments[k] / ref_med for k in plot_keys]
 
-        fig = Figure(; size = (520, 340))
+        fig = Figure(; size = (450, 340))
         ax = Axis(
             fig[1, 1];
             xticks = (1:length(plot_keys), [labels[k] for k in plot_keys]),
