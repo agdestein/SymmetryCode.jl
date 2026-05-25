@@ -19,7 +19,8 @@ setup = S.setup_turbulator_medium()
 setup = S.setup_turbulator_large()
 setup = S.setup_snellius()
 
-S.tabulate("Problem setup", setup)
+S.reset_tables(setup)
+S.tabulate(setup, "Problem setup", setup)
 
 # Warmup simulation
 S.create_dns(setup)

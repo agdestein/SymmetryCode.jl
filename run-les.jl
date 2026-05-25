@@ -26,12 +26,14 @@ function main()
     # setup = S.setup_turbulator_large()
     # setup = S.setup_snellius()
 
-    S.tabulate("Problem setup", setup)
+    S.reset_tables(setup)
+    S.tabulate(setup, "Problem setup", setup)
 
     let
         r = S.data_ranges(setup)
         dg = setup.datagen
         S.tabulate(
+            setup,
             "Train/eval split (data.jld2 snapshot indices)",
             (;
                 nstep = dg.nstep,
@@ -169,14 +171,14 @@ function main()
                 k => isfile(file) ? load_object(file).timing : :missing
             end
         )
-        S.tabulate("Training wall-time (seconds) per learned model", timings; digits = 1)
+        S.tabulate(setup, "Training wall-time (seconds) per learned model", timings; digits = 1)
         S.plot_training(setup, config.models)
     end
 
     if :rollouts in config.experiments
         upostfiles = S.get_upostfiles(setup)
         timings = NamedTuple(k => load_object(upostfiles[k]).timing for k in config.models)
-        S.tabulate("LES rollout wall-time (seconds) per model", timings; digits = 1)
+        S.tabulate(setup, "LES rollout wall-time (seconds) per model", timings; digits = 1)
     end
 
     if :les_stats in config.experiments
@@ -184,6 +186,7 @@ function main()
             setup, Tuple(config.models); force = :les_stats in config.force,
         )
         S.tabulate(
+            setup,
             "Time-mean relative LES error vs filtered DNS, per model",
             map(s -> mean(s.e_post), les_stat),
         )
@@ -204,22 +207,27 @@ function main()
             k => load_object("$(setup.outdir)/sfs_stats_$(k).jld2") for k in all_keys
         )
         S.tabulate(
+            setup,
             "A-priori relative SFS error per model",
             map(s -> s.apriori.relerr, stats),
         )
         S.tabulate(
+            setup,
             "A-priori SFS cross-correlation per model",
             map(s -> s.apriori.crosscor, stats),
         )
         S.tabulate(
+            setup,
             "Median pointwise SFS dissipation per model (incl :ref baseline)",
             map(s -> s.diss.median, stats),
         )
         S.tabulate(
+            setup,
             "Dissipation skewness per model (negative = backscatter tail)",
             map(s -> s.diss.skewness, stats),
         )
         S.tabulate(
+            setup,
             "Backscatter fraction per model (τ:S > 0; 0 for Smag by construction)",
             map(s -> s.diss.backscatter, stats),
         )
@@ -244,6 +252,7 @@ function main()
         equi_keys = filter(!=(:nomo), config.models)
         errs = S.load_equivariance_errors(setup, equi_keys, :prior)
         S.tabulate(
+            setup,
             "Mean a-priori equivariance error (over group elements) per model",
             map(mean, errs),
         )
@@ -253,6 +262,7 @@ function main()
     if :equi_post in config.experiments
         errs = S.load_equivariance_errors(setup, config.models, :post)
         S.tabulate(
+            setup,
             "Mean a-posteriori equivariance error (over group elements) per model",
             map(mean, errs),
         )

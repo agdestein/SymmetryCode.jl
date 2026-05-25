@@ -46,24 +46,40 @@ function cached(compute, file; force = false, label = basename(file))
 end
 
 """
-Pretty-print a NamedTuple of scalars under a heading, with per-element
-rounding. Use in scripts to surface a labeled summary table without the
-`@info` / `map(round, ...) |> pairs |> display` / `flush(stdout)` boilerplate.
+Pretty-print a NamedTuple of scalars under a heading, log it, and append it
+to `\$(setup.plotdir)/tables.txt` so every script-run leaves a single text
+artifact with all of its summary numbers. Call `reset_tables(setup)` once at
+the top of a pipeline script to truncate that file.
 
 Pass `digits=N` for fixed-point rounding (e.g. timings), or the default
 `sigdigits=4` for relative quantities. Non-numeric values pass through.
 """
-function tabulate(label, nt; sigdigits = 4, digits = nothing)
+function tabulate(setup, label, nt; sigdigits = 4, digits = nothing)
     rounder = isnothing(digits) ?
         (x -> x isa Number ? round(x; sigdigits) : x) :
         (x -> x isa Number ? round(x; digits) : x)
     disps = map(rounder, nt)
     @info label disps...
-    # pairs(map(rounder, nt)) |> display
     flush(stdout)
     flush(stderr)
+
+    # Append the same table to plotdir/tables.txt. Width-pad keys so the
+    # `=` column lines up; numbers print with their rounded form.
+    open(joinpath(setup.plotdir, "tables.txt"), "a") do io
+        println(io, "## ", label)
+        ks = collect(keys(disps))
+        w = isempty(ks) ? 0 : maximum(length ∘ string, ks)
+        for k in ks
+            println(io, "  ", rpad(string(k), w), " = ", disps[k])
+        end
+        println(io)
+    end
     return nothing
 end
+
+"Truncate `\$(setup.plotdir)/tables.txt`. Call once at the top of a pipeline
+script so the file accumulates entries from this run only."
+reset_tables(setup) = (open(io -> nothing, joinpath(setup.plotdir, "tables.txt"), "w"); nothing)
 
 "Cartesian grid of a squared/cubic periodic domain."
 struct Grid{D, T, B}
