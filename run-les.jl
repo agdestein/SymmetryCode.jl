@@ -213,7 +213,7 @@ function main()
         S.plot_densities(setup, [:ref; sfs_keys]; dolog = true)
         S.plot_dissipation_bar(setup, all_keys)
         S.plot_backscatter_bar(setup, all_keys)
-        S.plot_apriori_bar(setup, sfs_keys)
+        S.plot_apriori_bar(setup, config.models)
     end
 
     if :equi_prior in config.experiments

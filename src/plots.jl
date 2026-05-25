@@ -114,25 +114,31 @@ function plot_densities(setup, mkeys; dolog)
 
     # t_kol = mean(x -> x.t_kol, data.statistics_les)
 
-    fig = Figure(; size = (800, 300))
+    fig = Figure(; size = (900, 300))
     labels = getlabels()
 
     # Axes
     ax = (;
         xx = Axis(
             fig[1, 1];
-            xlabel = L"\tau_{1 1}",
+            # xlabel = L"\tau_{1 1}", xlabelsize = 20,
+            xlabel = "Stress (xx)",
             ylabel = "Density",
-            xlabelsize = 20,
             yscale,
         ),
         xy = Axis(
-            fig[1, 2]; xlabel = L"\tau_{1 2}", xlabelsize = 20, yscale,
+            fig[1, 2];
+            # xlabel = L"\tau_{1 2}", xlabelsize = 20,
+            xlabel = "Stress (xy)",
+            yscale,
             yticksvisible = false,
             yticklabelsvisible = false,
         ),
         diss = Axis(
-            fig[1, 3]; xlabel = L"\tau_{i j} S_{i j}", xlabelsize = 20, yscale,
+            fig[1, 3];
+            # xlabel = L"\tau_{i j} S_{i j}", xlabelsize = 20,
+            xlabel = "Dissipation",
+            yscale,
             yticksvisible = false,
             yticklabelsvisible = false,
         ),
@@ -223,12 +229,16 @@ function plot_dissipation_bar(setup, keys)
     ax = Axis(
         fig[1, 1];
         xticks = (1:length(plot_keys), [labels[k] for k in plot_keys]),
-        ylabel = L"\mathrm{median}(\tau_{ij} S_{ij}) / \mathrm{median}_{\mathrm{ref}}",
+        # ylabel = L"\mathrm{median}(\tau_{ij} S_{ij}) / \mathrm{median}_{\mathrm{ref}}",
+        ylabel = "Median dissipation (normalized)",
         xticklabelrotation = π / 6,
     )
-    barplot!(ax, 1:length(plot_keys), normalized)
+    barplot!(ax, 1:length(plot_keys), normalized; bar_labels = :y)
     hlines!(ax, [1.0]; color = :red, linestyle = :dash, label = "Reference")
     axislegend(ax; position = :rt, framevisible = false)
+
+    # Adjust upper limit to make space for bar label
+    ylims!(ax, 0, maximum(normalized) + 0.15)
 
     file = "$(plotdir)/dissipation-bar.pdf"
     @info "Saving dissipation bar plot to $(file)"
@@ -259,10 +269,11 @@ function plot_backscatter_bar(setup, keys)
     ax = Axis(
         fig[1, 1];
         xticks = (1:length(plot_keys), [labels[k] for k in plot_keys]),
-        ylabel = L"\mathrm{fraction\ with\ } \tau_{ij} S_{ij} > 0",
+        # ylabel = L"\mathrm{fraction\ with\ } \tau_{ij} S_{ij} > 0",
+        ylabel = "Backscatter fraction",
         xticklabelrotation = π / 6,
     )
-    barplot!(ax, 1:length(plot_keys), bars)
+    barplot!(ax, 1:length(plot_keys), bars; bar_labels = :y)
     hlines!(
         ax, [ref_bs];
         color = :red, linestyle = :dash,
@@ -299,18 +310,22 @@ function plot_apriori_bar(setup, keys)
     ax_re = Axis(
         fig[1, 1];
         xticks = xtks,
-        ylabel = "Relative L² error",
+        # ylabel = "Relative L² error",
+        ylabel = "Relative error",
         xticklabelrotation = π / 6,
     )
-    barplot!(ax_re, 1:length(plot_keys), relerrs)
+    barplot!(ax_re, 1:length(plot_keys), relerrs; bar_labels = :y)
     ax_cc = Axis(
         fig[1, 2];
         xticks = xtks,
         ylabel = "Cross-correlation",
         xticklabelrotation = π / 6,
     )
-    barplot!(ax_cc, 1:length(plot_keys), crosscors)
-    ylims!(ax_cc, 0, 1)
+    barplot!(ax_cc, 1:length(plot_keys), crosscors; bar_labels = :y)
+
+    # Adjust upper limit to make space for bar label
+    ylims!(ax_re, 0.0, 1.1)
+    ylims!(ax_cc, 0.0, 1.1)
 
     file = "$(plotdir)/apriori-bar.pdf"
     @info "Saving a-priori bar plot to $(file)"
