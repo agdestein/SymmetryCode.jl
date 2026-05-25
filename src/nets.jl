@@ -215,20 +215,17 @@ stress. This wrapper repeats that normalization at inference and scales the
 prediction back to physical `τ` before `les!` transforms it to spectral space.
 """
 function fullchain(setup, net, project, ps, st, Δ)
-    (; D, train_setup) = setup
-    P = train_setup.precision
+    (; D) = setup
     ps = project(ps)
 
     # x is the VGT
     function model(u, x)
         x = stack(x) # Convert named tuple to array
-        T = eltype(x)
         s = size(x)
         x = reshape(x, s..., 1) # Add singleton sample dimension
         A2 = sum(abs2, x; dims = D + 1) # VGT squared norm
-        @. x /= (sqrt(A2) + eps(T)) # Normalize input gradient
-        y = net(P.(x), ps, st) |> first # Apply model in net precision
-        y = T.(y) # Back to solver precision
+        @. x /= (sqrt(A2) + eps(eltype(x))) # Normalize input gradient
+        y = net(x, ps, st) |> first
         @. y *= Δ^2 * A2 # Scale output with dimensional stuff
         return reshape(y, s[1:D]..., :) # Remove singleton sample dimension
     end
@@ -401,18 +398,17 @@ function tbnn_net(setup, nchan)
     )
 end
 
-tbnn(net, ps, st, Δ, g, precision = Float32) = function model(u, A)
+tbnn(net, ps, st, Δ, g) = function model(u, A)
     nx = space_ndrange(g)
     nt = tensordim(g)
     nb = nbasis(g)
 
-    # Compute invariants and (O(1)) basis tensors (solver precision)
+    # Invariants and (O(1)) basis tensors are built in solver precision; the
+    # net weights are upcast to Float64 in create_model, so the forward pass
+    # runs uniformly in Float64.
     invariants, basis, a2 = build_tensorbasis(A, g)
-    T = eltype(basis)
-
-    # Compute coefficients in net precision, then back to solver precision
     invariants = reshape(invariants, size(invariants)..., 1) # One sample
-    w = T.(net(precision.(invariants), ps, st) |> first)
+    w = net(invariants, ps, st) |> first
 
     # Basis contraction
     b = reshape(basis, :, nt, nb)

@@ -215,7 +215,11 @@ function create_model(setup, mode; key, buildnet, makeloss, makeloaders, wrap)
     end
 
     d = load_object(file)
-    ps = d.ps |> adapt(setup.backend)
+    # Inference runs in Float64 to match the solver — training stays in
+    # train_setup.precision, but we upcast the loaded weights here so the
+    # forward pass through `wrap` is uniformly Float64. Diagnostics like the
+    # apost equivariance error would otherwise be pinned to Float32 eps.
+    ps = d.ps |> f64 |> adapt(setup.backend)
     chain = wrap(net_stuff, ps, d.st, g)
     return chain, (; d.losses_train, d.losses_valid, d.timing)
 end
@@ -242,7 +246,7 @@ function create_tbnn(setup, mode = :resume)
             setup.train_setup.batchsize,
             rng = Xoshiro(setup.train_setup.seed),
         ),
-        wrap = (ns, ps, st, g) -> tbnn(ns.net, ps, st, setup.Δ, g, precision),
+        wrap = (ns, ps, st, g) -> tbnn(ns.net, ps, st, setup.Δ, g),
     )
 end
 
