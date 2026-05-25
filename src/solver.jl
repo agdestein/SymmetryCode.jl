@@ -664,7 +664,7 @@ strain_from_gradient(G, ::Grid{3}) = (;
     zx = (G.zx .+ G.xz) ./ 2,
 )
 
-"Pointwise double-dot `τ : S` for symmetric tensors (sub-grid dissipation)."
+"Pointwise double-dot `τ : S` for symmetric tensors (sub-filter dissipation)."
 contract_dissipation(τ, S, ::Grid{2}) =
     @. τ.xx * S.xx + τ.yy * S.yy + 2 * τ.xy * S.xy
 contract_dissipation(τ, S, ::Grid{3}) =

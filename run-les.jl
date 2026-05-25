@@ -73,6 +73,8 @@ function main()
             :spectrum_les,       # LES energy-spectrum plot
             :sfs,                # predict_sfs -> sfs_<key>.jld2
             :stats,              # compute_sfs_stats -> sfs_stats_<k>.jld2; KDE + bar plots + tables
+            :budget,             # compute_budget -> budget_<k>.jld2; KE(t) + eps_sfs(t) plot
+            :spectral_transfer,  # compute_spectral_transfer -> transfer_<k>.jld2; eps_sfs(k) plot
             :equi_prior,         # apriori_equivariance_error + plot
             :equi_post,          # apost_equivariance_error + plot
             :velocities,         # plot_velocities slice grid
@@ -88,7 +90,9 @@ function main()
                 # :rollouts,
                 # :les_stats,
                 # :sfs,
-                :stats,
+                # :stats,
+                # :budget,
+                # :spectral_transfer,
                 # :equi_prior,
                 # :equi_post,
                 # :qr,
@@ -137,6 +141,15 @@ function main()
             S.apost_equivariance_error(
                 setup, key, model;
                 force = :equi_post in config.force,
+            )
+        end
+        if :budget in config.experiments
+            S.compute_budget(setup, key, model; force = :budget in config.force)
+        end
+        if :spectral_transfer in config.experiments
+            S.compute_spectral_transfer(
+                setup, key, model;
+                force = :spectral_transfer in config.force,
             )
         end
 
@@ -214,6 +227,16 @@ function main()
         S.plot_dissipation_bar(setup, all_keys)
         S.plot_backscatter_bar(setup, all_keys)
         S.plot_apriori_bar(setup, config.models)
+    end
+
+    if :budget in config.experiments
+        S.compute_budget(setup, :ref; force = :budget in config.force)
+        S.plot_budget(setup, [:ref; config.models])
+    end
+
+    if :spectral_transfer in config.experiments
+        S.compute_spectral_transfer(setup, :ref; force = :spectral_transfer in config.force)
+        S.plot_spectral_transfer(setup, [:ref; config.models])
     end
 
     if :equi_prior in config.experiments

@@ -63,11 +63,16 @@ Aggregate per-snapshot SFS samples into a single statistics artifact per key.
 For each key in `keys`, persists `sfs_stats_<key>.jld2` containing:
 
 - `kde.xx`, `kde.xy`, `kde.diss` — kernel density estimates of the τ₁₁,
-  τ₁₂, and pointwise dissipation `τᵢⱼSᵢⱼ` distributions over the eval window.
+  τ₁₂, and pointwise SFS dissipation rate `ε_sfs = -τᵢⱼSᵢⱼ` distributions
+  over the eval window. **Convention** (shared by every dissipation-flavored
+  statistic in this pipeline, including [`compute_budget`](@ref) and
+  [`compute_spectral_transfer`](@ref)): `ε_sfs > 0` is drain on resolved
+  KE; `ε_sfs < 0` is local backscatter.
 - `diss` — `(; mean, median, std, skewness, backscatter)` of the pointwise
-  dissipation samples. `backscatter` is the fraction of points with
-  `τᵢⱼSᵢⱼ > 0`; it is exactly 0 for any closure of the form `τ = -2νₜS`
-  with `νₜ ≥ 0` (e.g. Smagorinsky), and is ≈ 0.3–0.4 for filtered HIT.
+  `ε_sfs` samples. `backscatter` is the fraction of points with `ε_sfs < 0`
+  (equivalently `τᵢⱼSᵢⱼ > 0`); it is exactly 0 for any closure of the form
+  `τ = -2νₜS` with `νₜ ≥ 0` (e.g. Smagorinsky), and is ≈ 0.3–0.4 for
+  filtered HIT.
 - `apriori` — `(; relerr, crosscor)` against the filtered-DNS reference over
   the full trace-free tensor. `(0.0, 1.0)` for `:ref`, `(1.0, 0.0)` for `:nomo`.
 
@@ -160,11 +165,12 @@ function compute_sfs_stats(setup, keys; force = false)
                 make_tracefree!(τ_model, g)
             end
 
-            # Sample the three fields of interest
+            # Sample the three fields of interest.
+            # ε_sfs = -τᵢⱼSᵢⱼ is the SFS dissipation rate (positive = drain).
             append!(xx_samples, vec(Array(τ_model.xx)))
             append!(xy_samples, vec(Array(τ_model.xy)))
             dissfield .= contract_dissipation(τ_model, S, g)
-            append!(diss_samples, vec(Array(dissfield)))
+            append!(diss_samples, .-vec(Array(dissfield)))
 
             # A-priori metrics over the full trace-free tensor vs reference
             if key == :ref
@@ -198,9 +204,10 @@ function compute_sfs_stats(setup, keys; force = false)
             ),
             diss = (;
                 moments(diss_samples)...,
-                # Fraction of points with τ:S > 0 (backscatter). Exactly 0 for
-                # any closure of the form τ = -2νₜS with νₜ ≥ 0 (e.g. Smag).
-                backscatter = mean(>(0), diss_samples),
+                # Fraction of points with ε_sfs < 0 (local backscatter).
+                # Exactly 0 for any closure of the form τ = -2νₜS with
+                # νₜ ≥ 0 (e.g. Smag), since then ε_sfs = 2νₜ|S|² ≥ 0.
+                backscatter = mean(<(0), diss_samples),
             ),
             apriori = (; relerr = mean(relerrs), crosscor = mean(crosscors)),
         )
@@ -368,6 +375,208 @@ into a NamedTuple suitable for [`plot_equivariance_errors`](@ref).
 load_equivariance_errors(setup, keys, tag::Symbol) = NamedTuple(
     k => load_object("$(setup.outdir)/equi-errors-$(tag)-$(k).jld2") for k in keys
 )
+
+"""
+A-posteriori resolved KE / dissipation budget over the eval-window rollout.
+
+For each snapshot, records:
+- `ke = ⟨½ uᵢ uᵢ⟩` — resolved kinetic energy.
+- `eps_visc = ν ⟨|∇u|²⟩` — viscous dissipation on resolved scales.
+- `eps_sfs = -⟨τᵢⱼ Sᵢⱼ⟩` — SFS dissipation rate. Positive = forward
+  transfer to unresolved scales (the model removes energy from resolved
+  scales); negative = net backscatter at the integral level. Same drain
+  convention as [`compute_sfs_stats`](@ref) and
+  [`compute_spectral_transfer`](@ref).
+
+For `key == :ref`, the budget is computed from filtered-DNS state
+(`data.inputs[eval]`) and reference SFS stress (`data.outputs[eval]`);
+no `model` is needed (pass `model = nothing`). For other keys, the
+state comes from `u-post-<key>.jld2` and τ is re-evaluated by `model`
+on that rolled-out state — so the result reflects the *closure during
+integration*, not the a-priori prediction on filtered DNS.
+
+Persists `budget_<key>.jld2 :: (; t, ke, eps_visc, eps_sfs)`.
+"""
+function compute_budget(setup, key, model = nothing; force = false)
+    file = "$(setup.outdir)/budget_$(key).jld2"
+    skip_if_cached(file; force, label = "budget for $(key)") && return
+
+    (; D, l, n_les, backend, visc) = setup
+    g = Grid{D}(; l, n = n_les, backend)
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    eval_range = data_ranges(setup).eval
+    times = data.times[eval_range]
+
+    if key == :ref
+        @assert isnothing(model) ":ref budget takes no model; pass model = nothing"
+        u_series = data.inputs[eval_range]
+        τ_ref_series = data.outputs[eval_range]
+    else
+        rollout = load_object("$(setup.outdir)/u-post-$(key).jld2")
+        u_series = rollout.u
+        τ_ref_series = nothing
+    end
+
+    u = vectorfield(g)
+    A = tensorfield_nonsym(g)
+    AA = spacetensorfield_nonsym(g)
+    τphys = spacetensorfield(g)
+    τspec = tensorfield(g)
+    diss_spec = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
+    plan = plan_rfft(spacescalarfield(g))
+
+    @info "Computing budget for $(key)"
+    flush(stderr)
+
+    nsnap = length(u_series)
+    ke = zeros(nsnap)
+    eps_visc = zeros(nsnap)
+    eps_sfs = zeros(nsnap)
+
+    for i in eachindex(u_series)
+        foreach(copyto!, u, u_series[i])
+        foreach(u -> apply!(twothirds!, g, (u, g)), u)
+        ke[i] = sum(getenergy, u) / 2
+        eps_visc[i] = get_dissipation!(diss_spec, u, visc, g)
+
+        if key == :nomo
+            eps_sfs[i] = 0.0
+            continue
+        end
+
+        # Strain rate in physical space, shared by all non-nomo branches
+        apply!(vectorgradient!, g, (A, u, g))
+        for (AA, A) in zip(AA, A)
+            apply!(twothirds!, g, (A, g))
+            to_phys!(AA, A, plan, g)
+        end
+        S = strain_from_gradient(AA, g)
+
+        if key == :ref
+            for (t, tcpu) in zip(τspec, τ_ref_series[i])
+                copyto!(t, tcpu)
+                apply!(twothirds!, g, (t, g))
+            end
+            for (tp, ts) in zip(τphys, τspec)
+                to_phys!(tp, ts, plan, g)
+            end
+            make_tracefree!(τphys, g)
+            τ = τphys
+        else
+            τstack = model(u, AA)
+            τ = unstack_symtensor(τstack, g)
+        end
+
+        eps_sfs[i] = -mean(contract_dissipation(τ, S, g))
+    end
+
+    save_object(file, (; t = times, ke, eps_visc, eps_sfs))
+    return
+end
+
+"""
+Eval-window-averaged spectral SFS dissipation rate `ε_sfs(k)` for one model.
+
+Per shell, `ε_sfs(k) = -Σ_{|k'|=k} Re(û_i*(k') · (-i k'ⱼ τ̂_ij(k')))` — the
+closure-induced drain on resolved KE at wavenumber `k`. Positive = drain
+at that shell (forward transfer to unresolved scales); negative = local
+backscatter at that shell. Same drain convention as [`compute_budget`](@ref)
+and [`compute_sfs_stats`](@ref). Averaged over the eval window.
+
+`key == :ref` reads spectral τ from `data.outputs[eval]` directly (no
+model call). `key == :nomo` writes a zero curve. For other keys, τ is
+obtained by re-evaluating `model` on the LES rollout state — same
+a-posteriori convention as [`compute_budget`](@ref).
+
+Persists `transfer_<key>.jld2 :: (; k, eps_sfs)`.
+"""
+function compute_spectral_transfer(setup, key, model = nothing; force = false)
+    file = "$(setup.outdir)/transfer_$(key).jld2"
+    skip_if_cached(file; force, label = "spectral transfer for $(key)") && return
+
+    (; D, l, n_les, backend) = setup
+    g = Grid{D}(; l, n = n_les, backend)
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    eval_range = data_ranges(setup).eval
+
+    if key == :ref
+        @assert isnothing(model) ":ref transfer takes no model; pass model = nothing"
+        u_series = data.inputs[eval_range]
+        τ_ref_series = data.outputs[eval_range]
+    else
+        rollout = load_object("$(setup.outdir)/u-post-$(key).jld2")
+        u_series = rollout.u
+        τ_ref_series = nothing
+    end
+
+    u = vectorfield(g)
+    A = tensorfield_nonsym(g)
+    AA = spacetensorfield_nonsym(g)
+    τphys = spacetensorfield(g)
+    τspec = tensorfield(g)
+    clo = vectorfield(g)
+    plan = plan_rfft(spacescalarfield(g))
+    stuff = spectral_stuff(g)
+    Tlocal = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
+
+    @info "Computing spectral transfer for $(key)"
+    flush(stderr)
+
+    nshells = length(stuff.k)
+    T_accum = zeros(nshells)
+    nsnap = length(u_series)
+
+    if key == :nomo
+        save_object(file, (; k = collect(stuff.k), eps_sfs = T_accum))
+        return
+    end
+
+    for i in eachindex(u_series)
+        foreach(copyto!, u, u_series[i])
+        foreach(u -> apply!(twothirds!, g, (u, g)), u)
+
+        if key == :ref
+            for (t, tcpu) in zip(τspec, τ_ref_series[i])
+                copyto!(t, tcpu)
+                apply!(twothirds!, g, (t, g))
+            end
+        else
+            apply!(vectorgradient!, g, (A, u, g))
+            for (AA, A) in zip(AA, A)
+                apply!(twothirds!, g, (A, g))
+                to_phys!(AA, A, plan, g)
+            end
+            τstack = model(u, AA)
+            foreach(copyto!, τphys, unstack_symtensor(τstack, g))
+            make_tracefree!(τphys, g)
+            for (ts, tp) in zip(τspec, τphys)
+                to_spec!(ts, tp, plan, g)
+                apply!(twothirds!, g, (ts, g))
+            end
+        end
+
+        # clo_i = -i kⱼ τ̂_ij is the closure contribution to ∂ₜ û_i;
+        # `tensordivergence!` writes exactly that into a vector field.
+        apply!(tensordivergence!, g, (clo, τspec, g))
+
+        if D == 3
+            @. Tlocal = real(conj(u.x) * clo.x + conj(u.y) * clo.y + conj(u.z) * clo.z)
+        else
+            @. Tlocal = real(conj(u.x) * clo.x + conj(u.y) * clo.y)
+        end
+
+        for (j, shell) in enumerate(stuff.shells)
+            T_accum[j] += sum(view(Tlocal, shell))
+        end
+    end
+
+    # T_accum holds the per-mode contribution to ∂ₜ(½|û|²) summed over
+    # shells (positive = backscatter). Negate to switch to the drain
+    # convention `ε_sfs(k)` shared by the rest of the pipeline.
+    eps_sfs = .-T_accum ./ nsnap
+    save_object(file, (; k = collect(stuff.k), eps_sfs))
+    return
+end
 
 """
 Persist+cache wrapper around `get_les_statistics`.

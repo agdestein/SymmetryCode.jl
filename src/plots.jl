@@ -136,8 +136,8 @@ function plot_densities(setup, mkeys; dolog)
         ),
         diss = Axis(
             fig[1, 3];
-            # xlabel = L"\tau_{i j} S_{i j}", xlabelsize = 20,
-            xlabel = "Dissipation",
+            # xlabel = L"-\tau_{i j} S_{i j}", xlabelsize = 20,
+            xlabel = "SFS dissipation rate",
             yscale,
             yticksvisible = false,
             yticklabelsvisible = false,
@@ -176,15 +176,16 @@ function plot_densities(setup, mkeys; dolog)
         ylims!(ax.xy, 4.0e-4, 4.0e2)
     end
 
-    # Dissipation
+    # SFS dissipation rate ε_sfs = -τᵢⱼSᵢⱼ: positive = drain (the bulk of
+    # the distribution for any sane closure); negative = local backscatter.
     if name == "laptop"
         xlims!(ax.diss, -0.3, 0.3)
         ylims!(ax.diss, 1.0e-1, 1.0e2)
     elseif startswith(name, "turbulator")
-        xlims!(ax.diss, -0.5, 0.15)
+        xlims!(ax.diss, -0.15, 0.5)
         ylims!(ax.diss, 1.0e-3, 1.0e2)
     elseif name == "snellius"
-        xlims!(ax.diss, -0.5, 0.12)
+        xlims!(ax.diss, -0.12, 0.5)
         ylims!(ax.diss, 4.0e-4, 4.0e2)
     end
 
@@ -207,11 +208,12 @@ function plot_densities(setup, mkeys; dolog)
 end
 
 """
-Bar plot of median pointwise SFS dissipation per model, normalized by the
-filtered-DNS reference median. Bars above 1.0 are over-dissipative
-(smag/dynsmag); bars below 1.0 are under-dissipative (clark). The
-reference is shown as a horizontal dashed line at 1.0.
+Bar plot of median pointwise SFS dissipation rate `ε_sfs = -τᵢⱼSᵢⱼ` per
+model, normalized by the filtered-DNS reference median. Bars above 1.0 are
+over-dissipative (smag/dynsmag); bars below 1.0 are under-dissipative
+(clark). The reference is shown as a horizontal dashed line at 1.0.
 
+Drain convention (positive = drain); same as [`compute_sfs_stats`](@ref).
 `keys` must include `:ref` (used as the normalization baseline).
 """
 function plot_dissipation_bar(setup, keys)
@@ -247,10 +249,12 @@ function plot_dissipation_bar(setup, keys)
 end
 
 """
-Bar plot of the fraction of points where `τᵢⱼSᵢⱼ > 0` (local backscatter)
-per model. Smagorinsky-type closures of the form `τ = -2νₜS` with `νₜ ≥ 0`
-are mathematically pinned to zero; the filtered-DNS reference is shown as
-a horizontal dashed line at its absolute fraction.
+Bar plot of the local backscatter fraction per model — the fraction of
+points where the pointwise SFS dissipation rate `ε_sfs = -τᵢⱼSᵢⱼ` is
+negative (equivalently, `τᵢⱼSᵢⱼ > 0`). Smagorinsky-type closures of the
+form `τ = -2νₜS` with `νₜ ≥ 0` are mathematically pinned to zero; the
+filtered-DNS reference is shown as a horizontal dashed line at its
+absolute fraction.
 
 `keys` must include `:ref`.
 """
@@ -329,6 +333,88 @@ function plot_apriori_bar(setup, keys)
 
     file = "$(plotdir)/apriori-bar.pdf"
     @info "Saving a-priori bar plot to $(file)"
+    save(file, fig; backend = CairoMakie)
+    return fig
+end
+
+"""
+Two-panel plot of the a-posteriori resolved-KE budget over the eval window:
+left = `ke(t) = ⟨½ uᵢuᵢ⟩`, right = SFS dissipation rate
+`ε_sfs(t) = -⟨τᵢⱼ Sᵢⱼ⟩` (positive = drain on resolved KE; negative = net
+backscatter). Same drain convention as [`plot_densities`](@ref),
+[`plot_dissipation_bar`](@ref), and [`plot_spectral_transfer`](@ref).
+
+`keys` should include `:ref` and any closure keys. Reads `budget_<k>.jld2`.
+"""
+function plot_budget(setup, keys)
+    (; outdir, plotdir) = setup
+    labels = getlabels()
+    fig = Figure(; size = (820, 360))
+    ax_ke = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Resolved KE")
+    ax_eps = Axis(fig[1, 2]; xlabel = "Time", ylabel = "SFS dissipation rate")
+    for k in keys
+        b = load_object("$(outdir)/budget_$(k).jld2")
+        lines!(ax_ke, b.t .- b.t[1], b.ke; label = labels[k])
+        lines!(ax_eps, b.t .- b.t[1], b.eps_sfs; label = labels[k])
+    end
+    Legend(
+        fig[0, :], ax_ke;
+        tellwidth = false, tellheight = true, framevisible = false,
+        horizontal = true, nbanks = 3,
+    )
+    rowgap!(fig.layout, 5)
+    file = "$(plotdir)/budget.pdf"
+    @info "Saving budget plot to $(file)"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
+    return fig
+end
+
+"""
+Spectral SFS dissipation rate `ε_sfs(k)` (positive = drain at that shell;
+negative = local backscatter at that shell) averaged over the eval window.
+Compares the closure's spectral footprint against the filtered-DNS
+reference; reveals whether a model dissipates at the correct wavenumbers
+(e.g. Smag's bias toward over-dissipation near the cutoff). Same drain
+convention as [`plot_budget`](@ref) and [`plot_densities`](@ref). Reads
+`transfer_<k>.jld2`.
+
+The axes match the energy-spectrum plots: wavenumber rescaled by the
+small-scale length (Kolmogorov η in 3D, Kraichnan η_K in 2D); dissipation
+rescaled by the eval-window-mean total energy dissipation rate `ε`, so
+`Σ_k ε_sfs(k)/ε ≈ 1` for a balanced closure.
+"""
+function plot_spectral_transfer(setup, keys)
+    (; outdir, plotdir) = setup
+    labels = getlabels()
+    data = joinpath(outdir, "data.jld2") |> load_object
+    eval_range = data_ranges(setup).eval
+    stats = mean_of_named_tuple_series(data.statistics_dns[eval_range])
+    r = spectrum_reference(setup, stats)
+    ε = stats.diss
+
+    fig = Figure(; size = (520, 360))
+    ax = Axis(
+        fig[1, 1];
+        xscale = log10,
+        xlabel = "Wavenumber",
+        ylabel = "Spectral SFS dissipation rate",
+    )
+    for k in keys
+        k == :nomo && continue
+        t = load_object("$(outdir)/transfer_$(k).jld2")
+        lines!(ax, r.kscale * t.k, t.eps_sfs ./ ε; label = labels[k])
+    end
+    hlines!(ax, [0.0]; color = :gray, linestyle = :dash)
+    Legend(
+        fig[0, 1], ax;
+        tellwidth = false, tellheight = true, framevisible = false,
+        horizontal = true, nbanks = 3,
+    )
+    rowgap!(fig.layout, 5)
+    file = "$(plotdir)/spectral-transfer.pdf"
+    @info "Saving spectral transfer plot to $(file)"
+    flush(stderr)
     save(file, fig; backend = CairoMakie)
     return fig
 end
