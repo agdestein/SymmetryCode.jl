@@ -50,18 +50,26 @@ function spectrum_reference(setup, stats)
     return (; kscale, escale, p, C, k_ref, E_ref, kdiss = 1.0, xlabel, ylabel, label)
 end
 
-function plot_training(setup, train_tbnn, train_equi, train_conv)
-    fig = Figure(; size = (400, 340))
-    ax = Axis(
-        fig[1, 1];
-        # xscale = log10,
-        # yscale = log10,
-        xlabel = "Iteration",
-        ylabel = "Loss",
+"""
+Plot validation-loss curves for every learned closure in `mkeys` whose
+`ps-<key>.jld2` is on disk. Keys not in `(:tbnn, :equi, :conv)` and keys
+without a persisted artifact are silently skipped, so the same call works
+regardless of which subset of learned models was actually trained.
+"""
+function plot_training(setup, mkeys)
+    labels = getlabels()
+    learned = filter(in([:tbnn, :equi, :conv]), collect(mkeys))
+    curves = NamedTuple(
+        k => load_object(joinpath(setup.outdir, "ps-$(k).jld2")).losses_valid
+        for k in learned if isfile(joinpath(setup.outdir, "ps-$(k).jld2"))
     )
-    lines!(ax, train_tbnn.losses_valid; label = "TBNN")
-    lines!(ax, train_equi.losses_valid; label = "G-Conv")
-    lines!(ax, train_conv.losses_valid; label = "Conv")
+    isempty(curves) && return nothing
+
+    fig = Figure(; size = (400, 340))
+    ax = Axis(fig[1, 1]; xlabel = "Iteration", ylabel = "Loss")
+    for k in keys(curves)
+        lines!(ax, curves[k]; label = labels[k])
+    end
     Legend(
         fig[0, 1],
         ax;
@@ -69,7 +77,7 @@ function plot_training(setup, train_tbnn, train_equi, train_conv)
         tellheight = true,
         framevisible = false,
         horizontal = true,
-        nbanks = 3,
+        nbanks = length(curves),
     )
     eps = 0.1
     ylims!(ax, -eps, 1 + eps)

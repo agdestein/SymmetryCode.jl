@@ -170,6 +170,7 @@ function main()
             end
         )
         S.tabulate("Training wall-time (seconds) per learned model", timings; digits = 1)
+        S.plot_training(setup, config.models)
     end
 
     if :rollouts in config.experiments
