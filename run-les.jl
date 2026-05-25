@@ -55,9 +55,9 @@ function main()
             # :bard,
             :dynsmag,
             :clar,
-            :tbnn,
-            # :equi,
             :conv,
+            :equi,
+            :tbnn,
         ],
 
         # How to load trainable closures (:skip loads ps-<key>.jld2 without

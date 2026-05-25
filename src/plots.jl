@@ -88,6 +88,7 @@ function plot_error_post(setup, les_stat)
     )
     # e_post is eval-window-aligned; pull the matching times.
     t = data.times[data_ranges(setup).eval]
+    t .-= t[1] # Mark start time as zero
     labels = getlabels()
     for k in keys(les_stat)
         e = les_stat[k].e_post
@@ -104,7 +105,7 @@ function plot_error_post(setup, les_stat)
         nbanks = 3,
     )
     rowgap!(fig.layout, 5)
-    save("$(setup.plotdir)/error_post.pdf", fig; backend = CairoMakie)
+    save("$(setup.plotdir)/error-post.pdf", fig; backend = CairoMakie)
     return fig
 end
 
@@ -122,14 +123,14 @@ function plot_densities(setup, mkeys; dolog)
         xx = Axis(
             fig[1, 1];
             # xlabel = L"\tau_{1 1}", xlabelsize = 20,
-            xlabel = "Stress (xx)",
+            xlabel = "SFS (xx)",
             ylabel = "Density",
             yscale,
         ),
         xy = Axis(
             fig[1, 2];
             # xlabel = L"\tau_{1 2}", xlabelsize = 20,
-            xlabel = "Stress (xy)",
+            xlabel = "SFS (xy)",
             yscale,
             yticksvisible = false,
             yticklabelsvisible = false,
@@ -160,7 +161,7 @@ function plot_densities(setup, mkeys; dolog)
         xlims!(ax.xx, -0.2, 0.2)
         ylims!(ax.xx, 2.0e-4, 3.0e2)
     elseif name == "snellius"
-        xlims!(ax.xx, -0.1, 0.12)
+        xlims!(ax.xx, -0.1, 0.15)
         ylims!(ax.xx, 4.0e-4, 4.0e2)
     end
 
@@ -185,7 +186,7 @@ function plot_densities(setup, mkeys; dolog)
         xlims!(ax.diss, -0.15, 0.5)
         ylims!(ax.diss, 1.0e-3, 1.0e2)
     elseif name == "snellius"
-        xlims!(ax.diss, -0.12, 0.5)
+        xlims!(ax.diss, -0.17, 0.6)
         ylims!(ax.diss, 4.0e-4, 4.0e2)
     end
 
@@ -238,12 +239,20 @@ function plot_dissipation_bar(setup, keys)
         )
         barplot!(ax, 1:length(plot_keys), normalized; bar_labels = :y)
         hlines!(ax, [1.0]; color = :red, linestyle = :dash, label = "Reference")
-        axislegend(ax; position = :rt, framevisible = false)
+
+        # Reference
+        # axislegend(ax; position = :rt, framevisible = false)
+        Legend(
+               fig[0, :], ax;
+               tellwidth = false, tellheight = true, framevisible = false,
+               horizontal = true,
+              )
 
         # Adjust upper limit to make space for bar label
         ylims!(ax, 0, maximum(normalized) + 0.15)
+        rowgap!(fig.layout, 5)
 
-        file = "$(plotdir)/dissipation-bar-$(momkey).pdf"
+        file = "$(plotdir)/dissipation-$(momkey)-bar.pdf"
         @info "Saving dissipation bar plot to $(file)"
         save(file, fig; backend = CairoMakie)
     end
@@ -352,7 +361,7 @@ function plot_budget(setup, keys)
     (; outdir, plotdir) = setup
     labels = getlabels()
     fig = Figure(; size = (820, 360))
-    ax_ke = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Resolved KE")
+    ax_ke = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Kinetic energy")
     ax_eps = Axis(fig[1, 2]; xlabel = "Time", ylabel = "SFS dissipation rate")
     for k in keys
         b = load_object("$(outdir)/budget_$(k).jld2")
@@ -362,7 +371,7 @@ function plot_budget(setup, keys)
     Legend(
         fig[0, :], ax_ke;
         tellwidth = false, tellheight = true, framevisible = false,
-        horizontal = true, nbanks = 3,
+        horizontal = true, nbanks = 4,
     )
     rowgap!(fig.layout, 5)
     file = "$(plotdir)/budget.pdf"
@@ -400,7 +409,7 @@ function plot_spectral_transfer(setup, keys)
         fig[1, 1];
         xscale = log10,
         xlabel = "Wavenumber",
-        ylabel = "Spectral SFS dissipation rate",
+        ylabel = "SFS dissipation rate",
     )
     for k in keys
         k == :nomo && continue
@@ -462,7 +471,7 @@ function plot_velocities(setup, comp, modelkeys)
 
             ax = Axis(
                 fig[i, k];
-                ylabel = "t = $(round(times_eval[t]; sigdigits = 2))",
+                ylabel = "t = $(round(times_eval[t] - times_eval[1]; sigdigits = 2))",
                 ylabelvisible = k == 1,
                 xticksvisible = false,
                 xticklabelsvisible = false,
@@ -501,7 +510,7 @@ function plot_qr(setup, modelkeys)
     qr = map(key -> key => load_object("$(setup.outdir)/qr_$(key).jld2"), modelkeys)
     qr = NamedTuple(qr)
 
-    fig = Figure(; size = (700, 440))
+    fig = Figure(; size = (650, 440))
     labels = getlabels()
     colorvec = Makie.wong_colors()
     lescolor = 2
@@ -520,9 +529,11 @@ function plot_qr(setup, modelkeys)
         equi = colorvec[lescolor],
     )
 
-    for (k, key) in modelkeys |> enumerate
+    plotkeys = filter(!=(:ref), modelkeys)
+
+    for (k, key) in plotkeys |> enumerate
         title = labels[key]
-        j, i = CartesianIndices((4, 2))[k].I
+        j, i = CartesianIndices((3, 2))[k].I
         ax = Axis(
             fig[i, j];
             xlabelvisible = i == 2,
@@ -531,17 +542,19 @@ function plot_qr(setup, modelkeys)
             ylabelvisible = j == 1,
             yticksvisible = j == 1,
             yticklabelsvisible = j == 1,
-            xlabel = L"r",
-            ylabel = L"q",
-            xlabelsize = 20,
-            ylabelsize = 20,
+            # xlabel = L"r", xlabelsize = 20,
+            # ylabel = L"q", ylabelsize = 20,
+            xlabel = "r",
+            ylabel = "q",
             title,
         )
         if startswith(name, "turbulator")
             ran = 1.0e-3, 1.0e1
             ncat = 6
         elseif name == "snellius"
-            ran = 1.0e-4, 1.0e1
+            # ran = 1.0e-4, 1.0e1
+            # ncat = 7
+            ran = 1.0e-3, 1.0e1
             ncat = 7
         end
         # key => extrema(qr.density) |> display
@@ -571,8 +584,10 @@ function plot_qr(setup, modelkeys)
             xlims!(ax, -1.5, 1.5)
             ylims!(ax, -3, 3)
         elseif name == "snellius"
-            xlims!(ax, -2.0, 2.0)
-            ylims!(ax, -3, 4)
+            # xlims!(ax, -2.0, 2.0)
+            # ylims!(ax, -3, 4)
+            xlims!(ax, -1.2, 1.4)
+            ylims!(ax, -2.5, 3)
         end
     end
     save("$(setup.plotdir)/qr.pdf", fig; backend = CairoMakie)
@@ -791,7 +806,7 @@ function plot_evolution_data(setup)
     rowgap!(fig.layout, 10)
 
     # Save plot
-    file = joinpath(setup.plotdir, "evolution_data.pdf")
+    file = joinpath(setup.plotdir, "evolution-data.pdf")
     @info "Saving energy and dissipation time series plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
@@ -906,7 +921,7 @@ function plot_spectrum_data(setup)
     )
     rowgap!(fig.layout, 5)
 
-    save(joinpath(setup.plotdir, "spectrum_data.pdf"), fig; backend = CairoMakie)
+    save(joinpath(setup.plotdir, "spectrum-data.pdf"), fig; backend = CairoMakie)
     return fig
 end
 
