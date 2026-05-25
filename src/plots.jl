@@ -219,33 +219,35 @@ Drain convention (positive = drain); same as [`compute_sfs_stats`](@ref).
 function plot_dissipation_bar(setup, keys)
     (; outdir, plotdir) = setup
     labels = getlabels()
-    medians = NamedTuple(
-        k => load_object("$(outdir)/sfs_stats_$(k).jld2").diss.median for k in keys
-    )
-    @assert haskey(medians, :ref) "plot_dissipation_bar requires :ref in keys"
-    ref_med = medians.ref
-    plot_keys = filter(!=(:ref), collect(keys))
-    normalized = [medians[k] / ref_med for k in plot_keys]
+    for (momkey, momlabel) in [(:median, "Median"), (:mean, "Mean")]
+        moments = NamedTuple(
+            k => load_object("$(outdir)/sfs_stats_$(k).jld2").diss[momkey], median for k in keys
+        )
+        @assert haskey(moments, :ref) "plot_dissipation_bar requires :ref in keys"
+        ref_med = moments.ref
+        plot_keys = filter(!=(:ref), collect(keys))
+        normalized = [moments[k] / ref_med for k in plot_keys]
 
-    fig = Figure(; size = (520, 340))
-    ax = Axis(
-        fig[1, 1];
-        xticks = (1:length(plot_keys), [labels[k] for k in plot_keys]),
-        # ylabel = L"\mathrm{median}(\tau_{ij} S_{ij}) / \mathrm{median}_{\mathrm{ref}}",
-        ylabel = "Median dissipation (normalized)",
-        xticklabelrotation = π / 6,
-    )
-    barplot!(ax, 1:length(plot_keys), normalized; bar_labels = :y)
-    hlines!(ax, [1.0]; color = :red, linestyle = :dash, label = "Reference")
-    axislegend(ax; position = :rt, framevisible = false)
+        fig = Figure(; size = (520, 340))
+        ax = Axis(
+            fig[1, 1];
+            xticks = (1:length(plot_keys), [labels[k] for k in plot_keys]),
+            # ylabel = L"\mathrm{median}(\tau_{ij} S_{ij}) / \mathrm{median}_{\mathrm{ref}}",
+            ylabel = "$(momlabel) dissipation",
+            xticklabelrotation = π / 6,
+        )
+        barplot!(ax, 1:length(plot_keys), normalized; bar_labels = :y)
+        hlines!(ax, [1.0]; color = :red, linestyle = :dash, label = "Reference")
+        axislegend(ax; position = :rt, framevisible = false)
 
-    # Adjust upper limit to make space for bar label
-    ylims!(ax, 0, maximum(normalized) + 0.15)
+        # Adjust upper limit to make space for bar label
+        ylims!(ax, 0, maximum(normalized) + 0.15)
 
-    file = "$(plotdir)/dissipation-bar.pdf"
-    @info "Saving dissipation bar plot to $(file)"
-    save(file, fig; backend = CairoMakie)
-    return fig
+        file = "$(plotdir)/dissipation-bar-$(momkey).pdf"
+        @info "Saving dissipation bar plot to $(file)"
+        save(file, fig; backend = CairoMakie)
+    end
+    return
 end
 
 """
