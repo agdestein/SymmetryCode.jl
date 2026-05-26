@@ -11,13 +11,19 @@ CI only runs CompatHelper. The repository is driven from the REPL via two script
 ## Commands
 
 ```bash
-julia --project=. -e 'using SymmetryCode'   # precompile; the primary smoke check
-julia --project=test test/runtests.jl       # run the test suite
+julia --project=. -e 'using SymmetryCode'   # precompile; cold-load smoke check
+julia --project=test test/runtests.jl       # run the test suite (subprocess)
 julia --project create-data.jl              # stage 1: DNS warmup + (ubar,τ) data generation
 julia --project run-les.jl                  # stage 2: closure training + LES rollout + analysis
 sbatch job.sh                               # SLURM submission on a single H100
 runic -i .                                  # format all code in place (run from repo root)
 ```
+
+**REPL workflow — prefer `julia-mcp` over `julia -e ...`.** A persistent Julia session is available via the `julia-mcp` MCP server (`mcp__julia__julia_eval`, `julia_list_sessions`, `julia_restart`). Use it for smoke checks (`using SymmetryCode`), iterative debugging, running pipeline sections, and anything else that benefits from a warm session. Pass `env_path="/home/syver/Projects/SymmetryCode"` so calls land in this project's session. Fall back to `julia --project=. -e '...'` via Bash only when a true cold-load check is needed (e.g., verifying precompilation from scratch).
+
+- **Revise** is loaded automatically by julia-mcp in every session — source edits are picked up without restart. After *deleting* a function, `isdefined(M, :name)` may stay `true` while calls throw `MethodError`; that's expected (binding persists, method removed) and not a reason to restart.
+- **TestEnv** is available in the global env. `using TestEnv; TestEnv.activate()` (no args, with the SymmetryCode env active) makes `test/Project.toml` deps loadable in the live session, so `include("test/runtests.jl")` runs in-process — faster iteration than the subprocess form above.
+- Only call `julia_restart` as a last resort (segfault, GPU stuck, native-code change Revise can't patch). Restarts are slow and lose all warm state.
 
 The test environment is a separate project under `test/` that uses `[sources] SymmetryCode = {path = ".."}` to depend on the dev checkout — `Pkg.instantiate` from `test/` is enough to set it up.
 
