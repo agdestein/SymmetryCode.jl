@@ -244,6 +244,143 @@ function create_data(setup)
 end
 
 """
+Generate the `(ubar, τ)` data for a decaying Taylor-Green vortex.
+
+Same `data.jld2` schema as [`create_data`](@ref) — `inputs` (filtered DNS),
+`outputs` (reference deviatoric SFS stress `τ`), `times`, `spectra_dns/les`,
+`statistics_dns/les` — so the entire post-hoc pipeline runs unchanged. The
+differences from the forced case: the DNS is initialized from the analytic
+Taylor-Green field [`taylorgreen`](@ref) at amplitude `setup.V0` (no warm-up,
+so no `dns.jld2` is read), there is **no** `maintain_shell_energy!` (the flow
+decays freely), and `savetimes` spans the full `[0, tstop]` so the snapshots
+cover the laminar → transitional → turbulent-decay trajectory.
+"""
+function create_data_tgv(setup)
+    (; l, visc, D, n_dns, n_les, cfl, backend, outdir, datagen, Δ, V0) = setup
+    (; nstep, tstop) = datagen
+
+    @assert D == 3 "create_data_tgv expects a 3D setup"
+
+    filename = joinpath(outdir, "data.jld2")
+    skip_if_cached(filename; label = "Taylor-Green data") && return nothing
+
+    @info "Creating Taylor-Green data (V0 = $(V0), Re = $(V0 / visc))"
+    flush(stderr)
+
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
+
+    c_dns = getcache(g_dns)
+    c_les = getcache(g_les)
+
+    # Analytic Taylor-Green initial condition (no warm-up, no forcing).
+    u = taylorgreen(g_dns, c_dns.plan; V0)
+
+    # Allocate arrays
+    ubar = vectorfield(g_les)
+    σbar1 = tensorfield(g_les)
+    σbar2 = tensorfield(g_les)
+    τ = tensorfield(g_les)
+    inputs = fill(map(Array, ubar), 0)
+    outputs = fill(map(Array, τ), 0)
+    sc_dns = statscache(g_dns)
+    sc_les = statscache(g_les)
+
+    # Spectra
+    stuff_dns = spectral_stuff(g_dns)
+    stuff_les = spectral_stuff(g_les)
+    spectra_dns = fill(zeros(0), 0)
+    spectra_les = fill(zeros(0), 0)
+
+    # Compute turbulence statistics
+    statistics_dns = fill(turbulence_statistics(u, visc, g_dns, sc_dns), 0)
+    statistics_les = fill(turbulence_statistics(ubar, visc, g_les, sc_les), 0)
+
+    # Keep track of adaptive time stepping
+    times = zeros(0)
+
+    @info "Starting time stepping"
+    flush(stderr)
+
+    # Time stepping
+    savetimes = range(0.0, tstop, length = nstep)
+    t = savetimes[1]
+    timing = time()
+    for (i, tnext) in enumerate(savetimes)
+        # Step until the next save point.
+        # Skip the first step to capture the initial statistics.
+        i == 1 || while t < tnext
+            # Time step
+            Δt = cfl * propose_timestep(u, g_dns, visc, c_dns)
+            Δt = min(Δt, tnext - t)
+            t += Δt
+
+            # Evolve DNS (decaying, no forcing)
+            wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
+
+            # Log
+            if i % 1 == 0
+                e = energy(u)
+                @info join(
+                    [
+                        "i = $i",
+                        "t = $(round(t; sigdigits = 4))",
+                        "Δt = $(round(Δt; sigdigits = 4))",
+                        "energy = $(round(e; sigdigits = 4))",
+                    ],
+                    ",\t",
+                )
+                flush(stderr)
+            end
+        end
+
+        # Compute ubar and sub-filter stress
+        sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
+
+        # Save current (ubar,tau)-pair
+        push!(inputs, map(Array, ubar))
+        push!(outputs, map(Array, τ))
+
+        # Compute spectra
+        s_dns = spectrum(u, g_dns, stuff_dns)
+        s_les = spectrum(ubar, g_les, stuff_les)
+        push!(spectra_dns, s_dns.s)
+        push!(spectra_les, s_les.s)
+
+        # Compute turbulence statistics
+        stat_dns = turbulence_statistics(u, visc, g_dns, sc_dns)
+        stat_les = turbulence_statistics(ubar, visc, g_les, sc_les)
+        push!(statistics_dns, stat_dns)
+        push!(statistics_les, stat_les)
+
+        # Keep track of times
+        push!(times, t)
+    end
+
+    timing = time() - timing
+
+    # Save results
+    save_object(
+        filename,
+        (;
+            inputs,
+            outputs,
+            times,
+            spectra_dns,
+            spectra_les,
+            statistics_dns,
+            statistics_les,
+            timing,
+        ),
+    )
+
+    @info "Finished Taylor-Green data generation after $(timing) seconds"
+    flush(stderr)
+
+    return nothing
+end
+
+"""
 Compute the deviatoric sub-filter stress for one DNS velocity snapshot.
 
 This is the data-generation definition of the target:

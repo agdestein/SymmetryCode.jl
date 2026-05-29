@@ -61,7 +61,7 @@ function plot_training(setup, mkeys)
     learned = filter(in([:tbnn, :equi, :conv]), collect(mkeys))
     curves = NamedTuple(
         k => load_object(joinpath(setup.outdir, "ps-$(k).jld2")).losses_valid
-        for k in learned if isfile(joinpath(setup.outdir, "ps-$(k).jld2"))
+            for k in learned if isfile(joinpath(setup.outdir, "ps-$(k).jld2"))
     )
     isempty(curves) && return nothing
 
@@ -251,10 +251,10 @@ function plot_dissipation_bar(setup, keys)
         # Reference
         # axislegend(ax; position = :rt, framevisible = false)
         Legend(
-               fig[0, :], ax;
-               tellwidth = false, tellheight = true, framevisible = false,
-               horizontal = true,
-              )
+            fig[0, :], ax;
+            tellwidth = false, tellheight = true, framevisible = false,
+            horizontal = true,
+        )
 
         # Adjust upper limit to make space for bar label
         ylims!(ax, 0, maximum(normalized) + 0.15)
@@ -384,6 +384,86 @@ function plot_budget(setup, keys)
     rowgap!(fig.layout, 5)
     file = "$(plotdir)/budget.pdf"
     @info "Saving budget plot to $(file)"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
+    return fig
+end
+
+"""
+Read a published Taylor-Green reference table (whitespace/comma separated,
+`#` comments allowed) with columns `t*  E_k  ε`, already in the standard
+nondimensional units (`V0 = L = 1`). Returns `nothing` if the file is absent.
+"""
+function read_tgv_reference(reffile)
+    isfile(reffile) || return nothing
+    t, E, eps = Float64[], Float64[], Float64[]
+    for line in eachline(reffile)
+        s = strip(line)
+        (isempty(s) || startswith(s, "#")) && continue
+        cols = split(s, r"[,\s]+")
+        length(cols) < 3 && continue
+        push!(t, parse(Float64, cols[1]))
+        push!(E, parse(Float64, cols[2]))
+        push!(eps, parse(Float64, cols[3]))
+    end
+    return (; t, E, eps)
+end
+
+"""
+Taylor-Green dissipation benchmark: two panels in standard nondimensional units
+(`t* = t V0 / L`), left = kinetic energy `E_k / V0²`, right = dissipation rate
+`ε L / V0³`. Overlays, for the full transition:
+
+- the full-grid DNS (`data.statistics_dns`: `e`, `diss`) — the gold reference;
+- the published `Re = 1600` curve from `reffile` (if present);
+- per-key LES results as the *effective* dissipation `ε_visc + ε_sfs` evaluated
+  a-posteriori on each rollout (`budget_<k>.jld2`), where `:ref` is the
+  filtered-DNS budget and `:nomo` is resolved-viscous only (`ε_sfs = 0`).
+
+`keys` should include `:ref` and the closure keys. Requires `setup.V0`.
+"""
+function plot_dissipation_tgv(
+        setup, keys;
+        reffile = joinpath(@__DIR__, "..", "reference", "tgv_re1600.csv"),
+    )
+    (; outdir, plotdir, V0) = setup
+    labels = getlabels()
+    data = joinpath(outdir, "data.jld2") |> load_object
+
+    fig = Figure(; size = (820, 360))
+    ax_e = Axis(fig[1, 1]; xlabel = L"t^* = t V_0 / L", ylabel = L"E_k / V_0^2")
+    ax_eps = Axis(fig[1, 2]; xlabel = L"t^* = t V_0 / L", ylabel = L"\varepsilon\, L / V_0^3")
+
+    # Full-grid DNS over the whole trajectory (gold reference).
+    tdns = data.times .* V0
+    lines!(ax_e, tdns, [s.e for s in data.statistics_dns] ./ V0^2; color = :black, label = labels.dns)
+    lines!(ax_eps, tdns, [s.diss for s in data.statistics_dns] ./ V0^3; color = :black, label = labels.dns)
+
+    # Published Re=1600 reference (already nondimensional), if available.
+    ref = read_tgv_reference(reffile)
+    if isnothing(ref)
+        @warn "Taylor-Green reference not found at $(reffile); skipping published overlay"
+    else
+        lines!(ax_e, ref.t, ref.E; color = :gray, linestyle = :dash, label = "Ref. Re=1600")
+        lines!(ax_eps, ref.t, ref.eps; color = :gray, linestyle = :dash, label = "Ref. Re=1600")
+    end
+
+    # LES closures: effective dissipation ε_visc + ε_sfs on each rollout.
+    for k in keys
+        b = load_object("$(outdir)/budget_$(k).jld2")
+        t = b.t .* V0
+        lines!(ax_e, t, b.ke ./ V0^2; label = labels[k])
+        lines!(ax_eps, t, (b.eps_visc .+ b.eps_sfs) ./ V0^3; label = labels[k])
+    end
+
+    Legend(
+        fig[0, :], ax_eps;
+        tellwidth = false, tellheight = true, framevisible = false,
+        horizontal = true, nbanks = 4,
+    )
+    rowgap!(fig.layout, 5)
+    file = "$(plotdir)/dissipation-tgv.pdf"
+    @info "Saving Taylor-Green dissipation plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
     return fig

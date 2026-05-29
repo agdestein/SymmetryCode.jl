@@ -464,8 +464,17 @@ peak_profile(k; kpeak) = k^4 * exp(-2 * (k / kpeak)^2)
 linear_profile_2D(k) = (k > 0) * k^(-3)
 linear_profile_3D(k) = (k > 0) * k^(-5 / 3)
 
-"Taylor-Green vortex."
-function taylorgreen(g::Grid{2}, plan; doproject = true)
+"""
+Taylor-Green vortex with peak velocity `V0`. The canonical 3D form is
+
+    u = V0 [ sin x cos y cos z, -cos x sin y cos z, 0 ],
+
+so (with `l = 2π`, characteristic length `L = 1`) the Reynolds number is
+`Re = V0 L / ν = V0 / ν` and the initial kinetic energy is `⟨½ u·u⟩ = V0² / 8`.
+Choose `V0 = Re * ν` to land on a target Reynolds number (e.g. the canonical
+`Re = 1600` benchmark).
+"""
+function taylorgreen(g::Grid{2}, plan; V0 = 1, doproject = true)
     (; l, n, backend) = g
     h = l / n
     x = range(h / 2, l - h / 2, n) |> Array |> adapt(backend)
@@ -473,15 +482,15 @@ function taylorgreen(g::Grid{2}, plan; doproject = true)
     v = spacescalarfield(g)
     fac = get_fft_fac(g)
     #! format: off
-    @. v =  -sinpi(2x / l) * cospi(2y / l); ux = plan * v; ux ./= fac
-    @. v = cospi(2x / l) * sinpi(2y / l); uy = plan * v; uy ./= fac
+    @. v = -V0 * sinpi(2x / l) * cospi(2y / l); ux = plan * v; ux ./= fac
+    @. v =  V0 * cospi(2x / l) * sinpi(2y / l); uy = plan * v; uy ./= fac
     #! format: on
     v = nothing
     u = (; x = ux, y = uy)
     doproject && apply!(project!, g, (u, g))
     return u
 end
-function taylorgreen(g::Grid{3}, plan; doproject = true)
+function taylorgreen(g::Grid{3}, plan; V0 = 1, doproject = true)
     (; l, n, backend) = g
     h = l / n
     x = range(h / 2, l - h / 2, n) |> Array |> adapt(backend)
@@ -490,8 +499,8 @@ function taylorgreen(g::Grid{3}, plan; doproject = true)
     v = spacescalarfield(g)
     fac = get_fft_fac(g)
     #! format: off
-    @. v =  sinpi(2x / l) * cospi(2y / l) * sinpi(2z / l) / 2; ux = plan * v; ux ./= fac
-    @. v = -cospi(2x / l) * sinpi(2y / l) * sinpi(2z / l) / 2; uy = plan * v; uy ./= fac
+    @. v =  V0 * sinpi(2x / l) * cospi(2y / l) * cospi(2z / l); ux = plan * v; ux ./= fac
+    @. v = -V0 * cospi(2x / l) * sinpi(2y / l) * cospi(2z / l); uy = plan * v; uy ./= fac
     #! format: on
     v = nothing
     uz = zero(ux)

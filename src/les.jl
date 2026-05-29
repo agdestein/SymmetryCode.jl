@@ -52,7 +52,7 @@ from the first eval-window snapshot and integrating across `data.times[eval]`.
 Persists snapshots and timing to `u-post-<key>.jld2`; returns nothing.
 """
 function solve_les(setup, key, model; force = false)
-    (; D, l, n_les, backend, visc, cfl) = setup
+    (; D, l, n_les, backend, visc, cfl, forced) = setup
     grid = Grid{D}(; l, n = n_les, backend)
     file = get_upostfiles(setup)[key]
     skip_if_cached(file; force, label = "LES rollout for $(key)") && return
@@ -72,19 +72,19 @@ function solve_les(setup, key, model; force = false)
     # Do a short model warmup (so that compilation does not get included in timing)
     twarm = [0.0, 1.0e-6]
     foreach(copyto!, u_model, u_les)
-    solve_les!(u_model; times = twarm, grid, visc, model, cfl)
+    solve_les!(u_model; times = twarm, grid, visc, model, cfl, forced)
 
     # Solve LES
     foreach(copyto!, u_model, u_les)
     t = time()
-    snapshots = solve_les!(u_model; times, grid, visc, model, cfl)
+    snapshots = solve_les!(u_model; times, grid, visc, model, cfl, forced)
     t = time() - t
 
     save_object(file, (; times, u = snapshots, timing = t))
     return
 end
 
-function solve_les!(u; times, grid, visc, model, cfl)
+function solve_les!(u; times, grid, visc, model, cfl, forced = true)
     cache = getcache(grid)
     if !isnothing(model)
         # Allocate velocity gradient for closure
@@ -96,8 +96,9 @@ function solve_les!(u; times, grid, visc, model, cfl)
     end
 
     # Match DNS/data generation: low-shell energy is clamped instead of adding
-    # an explicit forcing term to the RHS.
-    shells = energy_shells(grid, [1, 2], u)
+    # an explicit forcing term to the RHS. Disabled for decaying flows
+    # (`forced = false`, e.g. the Taylor-Green vortex).
+    shells = forced ? energy_shells(grid, [1, 2], u) : nothing
 
     # Storage for states on CPU
     states = fill(map(Array, u), 0)
@@ -120,7 +121,7 @@ function solve_les!(u; times, grid, visc, model, cfl)
                 wray3!(les!, u, Δt, grid, cache; model, visc)
             end
 
-            maintain_shell_energy!(u, shells)
+            forced && maintain_shell_energy!(u, shells)
 
             if j % 1 == 0
                 e = energy(u)

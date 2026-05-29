@@ -55,6 +55,7 @@ getsetup(;
     conv_setup,
     train_setup = default_train_setup(),
     backend = default_backend(),
+    forced = true,
     outdir = joinpath(@__DIR__, "..", "output", "$(name)_visc=$(visc)_n=$(n_dns)") |> mkpath,
     plotdir = joinpath(outdir, "plots") |> mkpath,
 ) = (;
@@ -73,6 +74,7 @@ getsetup(;
     conv_setup,
     train_setup,
     backend,
+    forced,
     outdir,
     plotdir,
 )
@@ -171,6 +173,66 @@ function setup_snellius()
     outdir = "/projects/prjs1757/SymmetryOutput/visc=$(s.visc)_n=$(s.n_dns)" |> mkpath
     plotdir = joinpath(@__DIR__, "..", "output", "snellius") |> mkpath
     return getsetup(; s..., outdir, plotdir)
+end
+
+"""
+Derive a decaying Taylor-Green vortex *test* setup from a 3D training setup
+`train`. The closure-relevant parameters (`visc`, `n_les`, the filter width `Δ`,
+`l`, and the per-model `*_setup`) are copied verbatim so the trained models
+apply unchanged; only the flow changes — initially laminar, transitioning to
+turbulence, then decaying with no forcing (`forced = false`).
+
+The initial amplitude is `V0 = Re_target * visc` so the case sits at the
+canonical `Re_target` benchmark (default 1600, with `L = 1`, so
+`Re = V0 L / visc = Re_target`). The DNS runs for `tconv` convective times
+`t_c = L / V0 = 1 / V0` (the vortex peaks near `t* = 9` and has largely decayed
+by `t* = 20`). `datagen.n_train = 1` makes the eval window
+(`data_ranges` → `eval = 2:nstep`) cover essentially the whole transition.
+
+Models are built from `train` (which owns the `ps-*.jld2`); this setup only owns
+the Taylor-Green `data.jld2` and the post-hoc artifacts under its own `outdir`.
+The extra fields `V0`/`Re_target` are consumed by [`create_data_tgv`](@ref) and
+the dissipation-benchmark plot.
+"""
+function setup_taylorgreen(
+        train;
+        Re_target = 1600,
+        nstep = 100,
+        tconv = 20,
+        outdir = joinpath(
+            @__DIR__, "..", "output", "tgv_$(train.name)_Re=$(Re_target)_n=$(train.n_dns)",
+        ) |> mkpath,
+        plotdir = joinpath(outdir, "plots") |> mkpath,
+    )
+    (;
+        D, l, n_dns, n_les, visc, cfl, backend, warmup,
+        tbnn_setup, equi_setup, conv_setup, train_setup,
+    ) = train
+    @assert D == 3 "setup_taylorgreen expects a 3D training setup"
+    V0 = Re_target * visc
+    tstop = tconv / V0
+    Δ_factor = train.Δ / (l / n_les) # Recover the filter-width factor used in training
+    base = getsetup(;
+        name = "tgv_$(train.name)",
+        D,
+        l,
+        n_dns,
+        n_les,
+        Δ_factor,
+        visc,
+        cfl,
+        warmup,
+        datagen = (; nstep, tstop, n_train = 1),
+        tbnn_setup,
+        equi_setup,
+        conv_setup,
+        train_setup,
+        backend,
+        forced = false,
+        outdir,
+        plotdir,
+    )
+    return (; base..., V0, Re_target)
 end
 
 """
