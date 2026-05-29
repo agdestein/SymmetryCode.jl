@@ -162,38 +162,38 @@ function plot_densities(setup, mkeys; dolog)
         end
     end
 
-    if name == "laptop"
+    if contains(name, "laptop")
         xlims!(ax.xx, -0.1, 0.3)
         ylims!(ax.xx, 2.0e-2, 3.0e2)
-    elseif startswith(name, "turbulator")
+    elseif contains(name, "turbulator")
         xlims!(ax.xx, -0.2, 0.2)
         ylims!(ax.xx, 2.0e-4, 3.0e2)
-    elseif name == "snellius"
+    elseif contains(name, "snellius")
         xlims!(ax.xx, -0.1, 0.15)
         ylims!(ax.xx, 4.0e-4, 4.0e2)
     end
 
     # XY-component
-    if name == "laptop"
+    if contains(name, "laptop")
         xlims!(ax.xy, -0.1, 0.1)
         ylims!(ax.xy, 1.0e-1, 5.0e2)
-    elseif startswith(name, "turbulator")
+    elseif contains(name, "turbulator")
         xlims!(ax.xy, -0.15, 0.15)
         ylims!(ax.xy, 1.0e-3, 3.0e2)
-    elseif name == "snellius"
+    elseif contains(name, "snellius")
         xlims!(ax.xy, -0.12, 0.12)
         ylims!(ax.xy, 4.0e-4, 4.0e2)
     end
 
     # SFS dissipation rate ε_sfs = -τᵢⱼSᵢⱼ: positive = drain (the bulk of
     # the distribution for any sane closure); negative = local backscatter.
-    if name == "laptop"
+    if contains(name, "laptop")
         xlims!(ax.diss, -0.3, 0.3)
         ylims!(ax.diss, 1.0e-1, 1.0e2)
-    elseif startswith(name, "turbulator")
+    elseif contains(name, "turbulator")
         xlims!(ax.diss, -0.15, 0.5)
         ylims!(ax.diss, 1.0e-3, 1.0e2)
-    elseif name == "snellius"
+    elseif contains(name, "snellius")
         xlims!(ax.diss, -0.17, 0.6)
         ylims!(ax.diss, 4.0e-4, 4.0e2)
     end
@@ -636,10 +636,10 @@ function plot_qr(setup, modelkeys)
             ylabel = "q",
             title,
         )
-        if startswith(name, "turbulator")
+        if contains(name, "turbulator")
             ran = 1.0e-3, 1.0e1
             ncat = 6
-        elseif name == "snellius"
+        elseif contains(name, "snellius")
             # ran = 1.0e-4, 1.0e1
             # ncat = 7
             ran = 1.0e-3, 1.0e1
@@ -668,10 +668,10 @@ function plot_qr(setup, modelkeys)
         rtest2 = @. -2 / 3 / sqrt(3) * (-qtest)^(3 / 2)
         lines!(ax, rtest1, qtest; color = colors.line)
         lines!(ax, rtest2, qtest; color = colors.line)
-        if startswith(name, "turbulator")
+        if contains(name, "turbulator")
             xlims!(ax, -1.5, 1.5)
             ylims!(ax, -3, 3)
-        elseif name == "snellius"
+        elseif contains(name, "snellius")
             # xlims!(ax, -2.0, 2.0)
             # ylims!(ax, -3, 4)
             xlims!(ax, -1.2, 1.4)
