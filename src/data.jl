@@ -22,9 +22,13 @@ function forced_rhs!(du, u, grid, cache; forceval, visc)
     return nothing
 end
 
-function create_dns(setup)
+function create_dns(setup; force = false)
     (; outdir, l, visc, D, n_dns, cfl, backend, warmup) = setup
     (; totalenergy, tstop, seed) = warmup
+
+    filename = joinpath(outdir, "dns.jld2")
+    skip_if_cached(filename; force, label = "DNS warm-up") && return nothing
+
     rng = Xoshiro(seed)
 
     g = Grid{D}(; l, n = n_dns, backend)
@@ -101,11 +105,10 @@ function create_dns(setup)
     walltime = time() - walltime
 
     # Save results
-    file = joinpath(outdir, "dns.jld2")
-    @info "Saving final DNS snapshot to $(file)"
+    @info "Saving final DNS snapshot to $(filename)"
     flush(stderr)
     jldsave(
-        file;
+        filename;
         u = u |> cpu_device(),
         times,
         statistics,
@@ -115,9 +118,12 @@ function create_dns(setup)
     return nothing
 end
 
-function create_data(setup)
+function create_data(setup; force = false)
     (; l, visc, D, n_dns, n_les, cfl, backend, outdir, datagen, Δ) = setup
     (; nstep, tstop) = datagen
+
+    filename = joinpath(outdir, "data.jld2")
+    skip_if_cached(filename; force, label = "data") && return nothing
 
     @info "Creating data"
     flush(stderr)
@@ -222,7 +228,6 @@ function create_data(setup)
     timing = time() - timing
 
     # Save results
-    filename = joinpath(setup.outdir, "data.jld2")
     save_object(
         filename,
         (;

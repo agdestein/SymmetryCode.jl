@@ -12,90 +12,143 @@ import SymmetryCode as S
 # Warmup plot
 lines([1, 2, 3])
 
-# Choose setup
-setup = S.setup_laptop()
-setup = S.setup_turbulator_small()
-setup = S.setup_turbulator_medium()
-setup = S.setup_turbulator_large()
-setup = S.setup_snellius()
+# Stage 1 of the pipeline: DNS warm-up (`create_dns`) followed by (ubar, τ) data
+# generation (`create_data`), plus the diagnostic plots for both. Produces
+# `dns.jld2` and `data.jld2`, which `run-les.jl` consumes. The `config.experiments`
+# list below toggles which stages run, mirroring `run-les.jl` / `run-tgv.jl`.
+function main()
 
-S.reset_tables(setup)
-S.tabulate(setup, "Problem setup", setup)
+    #######################
+    # Setup + experiment config
+    #######################
 
-# Warmup simulation
-S.create_dns(setup)
+    # Pick one. Output paths are derived automatically.
+    # setup = S.setup_laptop()
+    setup = S.setup_turbulator_small()
+    # setup = S.setup_turbulator_medium()
+    # setup = S.setup_turbulator_large()
+    # setup = S.setup_snellius()
 
-# Show statistics after warm-up
-let
-    statistics = load("$(setup.outdir)/dns.jld2", "statistics")
-    s = statistics[end]
-    s |> pairs |> display
-    flush(stdout)
-end
+    S.reset_tables(setup)
+    S.tabulate(setup, "Problem setup", setup)
 
-# Plot DNS spectrum
-S.plot_spectrum_dns(setup)
+    config = (;
+        # Pipeline stages to execute, in order. `create_dns` (:dns) writes
+        # dns.jld2; `create_data` (:data) reads it and writes data.jld2; the
+        # plot stages read whichever artifact already exists on disk.
+        experiments = [
+            :dns,              # create_dns -> dns.jld2 (DNS warm-up) + print final stats
+            :spectrum_dns,     # plot_spectrum_dns -> DNS energy spectrum
+            :evolution_dns,    # plot_evolution_dns -> DNS time series
+            # :dissipation_fd, # plot_dissipation_finite_difference -> ε vs dE/dt check
+            :data,             # create_data -> data.jld2 ((ubar, τ) pairs)
+            :dnsfield,         # heatmap of a DNS component + its filtered counterpart
+            :evolution_data,   # plot_evolution_data -> (ubar, τ) data time series
+            :spectrum_data,    # plot_spectrum_data -> DNS vs filtered-DNS spectra
+        ],
 
-# Plot time series
-S.plot_evolution_dns(setup)
+        # Stage labels here force a re-compute regardless of cache. By default
+        # :dns/:data short-circuit when dns.jld2/data.jld2 already exist; uncomment
+        # a line below (or `push!(config.force, :data)` at the REPL) to invalidate.
+        # Only these two stages are cached; the plot stages always regenerate.
+        force = Set{Symbol}(
+            [
+                # :dns,
+                # :data,
+            ]
+        ),
+    )
 
-# # Plot dissipation vs finite difference of energy
-# S.plot_dissipation_finite_difference(setup)
+    #######################
+    # DNS warm-up
+    #######################
 
-S.create_data(setup);
+    if :dns in config.experiments
+        S.create_dns(setup; force = :dns in config.force)
 
-# data = joinpath(setup.outdir, "data.jld2") |> load_object;
-
-# Plot DNS component
-let
-    (; D) = setup
-    u = load("$(setup.outdir)/dns.jld2", "u") |> u -> map(copy, u) |> adapt(setup.backend)
-    g = S.Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-    v = S.spacescalarfield(g)
-    p = S.getplan(g)
-    if D == 2
-        S.to_phys!(v, u.x, p, g)
-        field = v |> Array
-    else
-        S.to_phys!(v, u.z, p, g)
-        field = v[:, :, end] |> Array
+        # Show statistics after warm-up
+        let
+            statistics = load("$(setup.outdir)/dns.jld2", "statistics")
+            s = statistics[end]
+            s |> pairs |> display
+            flush(stdout)
+        end
     end
-    fig, _ = heatmap(field; colormap = :RdBu)
-    save("$(setup.plotdir)/dnsfield.png", fig)
-    fig
-end
 
-# Plot filtered DNS component
-let
-    (; D) = setup
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    u = map(copy, data.inputs[1]) |> adapt(setup.backend)
-    g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    v = S.spacescalarfield(g)
-    p = S.getplan(g)
-    if D == 2
-        S.to_phys!(v, u.x, p, g)
-        field = v |> Array
-    else
-        S.to_phys!(v, u.z, p, g)
-        field = v[:, :, end] |> Array
+    if :spectrum_dns in config.experiments
+        S.plot_spectrum_dns(setup)
     end
-    fig, _ = heatmap(field; colormap = :RdBu)
-    save("$(setup.plotdir)/dnsfield_filtered.png", fig)
-    fig
+
+    if :evolution_dns in config.experiments
+        S.plot_evolution_dns(setup)
+    end
+
+    if :dissipation_fd in config.experiments
+        S.plot_dissipation_finite_difference(setup)
+    end
+
+    #######################
+    # (ubar, τ) data generation
+    #######################
+
+    if :data in config.experiments
+        S.create_data(setup; force = :data in config.force)
+        # data = joinpath(setup.outdir, "data.jld2") |> load_object;
+    end
+
+    if :dnsfield in config.experiments
+        # Plot DNS component
+        let
+            (; D) = setup
+            u = load("$(setup.outdir)/dns.jld2", "u") |> u -> map(copy, u) |> adapt(setup.backend)
+            g = S.Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
+            v = S.spacescalarfield(g)
+            p = S.getplan(g)
+            if D == 2
+                S.to_phys!(v, u.x, p, g)
+                field = v |> Array
+            else
+                S.to_phys!(v, u.z, p, g)
+                field = v[:, :, end] |> Array
+            end
+            fig, _ = heatmap(field; colormap = :RdBu)
+            save("$(setup.plotdir)/dnsfield.png", fig)
+            fig
+        end
+
+        # Plot filtered DNS component
+        let
+            (; D) = setup
+            data = joinpath(setup.outdir, "data.jld2") |> load_object
+            u = map(copy, data.inputs[1]) |> adapt(setup.backend)
+            g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+            v = S.spacescalarfield(g)
+            p = S.getplan(g)
+            if D == 2
+                S.to_phys!(v, u.x, p, g)
+                field = v |> Array
+            else
+                S.to_phys!(v, u.z, p, g)
+                field = v[:, :, end] |> Array
+            end
+            fig, _ = heatmap(field; colormap = :RdBu)
+            save("$(setup.plotdir)/dnsfield_filtered.png", fig)
+            fig
+        end
+    end
+
+    if :evolution_data in config.experiments
+        S.plot_evolution_data(setup)
+    end
+
+    if :spectrum_data in config.experiments
+        S.plot_spectrum_data(setup)
+    end
+
+    @info "Done."
+    flush(stderr)
+
+    return
 end
 
-# Base.summarysize(data) * 1.0e-9
-#
-# data |> pairs
-#
-# getindex.(data.statistics_dns, :diss)
-# getindex.(data.statistics_dns, :uavg) .^ 2 / 2 * 3
-# getindex.(data.statistics_dns, :Re_tay)
-# getindex.(data.statistics_dns, :t_int)
-# getindex.(data.statistics_dns, :l_int)
-# getindex.(data.statistics_dns, :l_kol)
-
-S.plot_evolution_data(setup)
-
-S.plot_spectrum_data(setup)
+main()
