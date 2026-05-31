@@ -45,27 +45,32 @@ function cached(compute, file; force = false, label = basename(file))
     return compute()
 end
 
+"Path of the text table artifact `\$(setup.plotdir)/<filename>` (default `tables.txt`).
+Each pipeline script passes its own `filename` so concurrent scripts sharing a
+`plotdir` (e.g. `create-data.jl` and `run-les.jl`) don't clobber each other."
+tables_path(setup, filename = "tables.txt") = joinpath(setup.plotdir, filename)
+
 """
 Pretty-print a NamedTuple of scalars under a heading, log it, and append it
-to `\$(setup.plotdir)/tables.txt` so every script-run leaves a single text
-artifact with all of its summary numbers. Call `reset_tables(setup)` once at
-the top of a pipeline script to truncate that file.
+to `tables_path(setup, filename)` so every script-run leaves a single text
+artifact with all of its summary numbers. Call `reset_tables(setup; filename)`
+once at the top of a pipeline script to truncate that file.
 
-Pass `digits=N` for fixed-point rounding (e.g. timings), or the default
-`sigdigits=4` for relative quantities. Non-numeric values pass through.
+Only `AbstractFloat` values are rounded (`sigdigits=4` by default, or fixed-point
+`digits=N` for e.g. timings); `Int`, `Bool`, and everything else pass through
+unchanged so they keep their type in both the log and the table file.
 """
-function tabulate(setup, label, nt; sigdigits = 4, digits = nothing)
-    rounder = isnothing(digits) ?
-        (x -> x isa Number ? round(x; sigdigits) : x) :
-        (x -> x isa Number ? round(x; digits) : x)
-    disps = map(rounder, nt)
+function tabulate(setup, label, nt; sigdigits = 4, digits = nothing, filename = "tables.txt")
+    round_value(x::AbstractFloat) = isnothing(digits) ? round(x; sigdigits) : round(x; digits)
+    round_value(x) = x
+    disps = map(round_value, nt)
     @info label disps...
     flush(stdout)
     flush(stderr)
 
-    # Append the same table to plotdir/tables.txt. Width-pad keys so the
+    # Append the same table to the text artifact. Width-pad keys so the
     # `=` column lines up; numbers print with their rounded form.
-    open(joinpath(setup.plotdir, "tables.txt"), "a") do io
+    open(tables_path(setup, filename), "a") do io
         println(io, "## ", label)
         ks = collect(keys(disps))
         w = isempty(ks) ? 0 : maximum(length ∘ string, ks)
@@ -77,9 +82,10 @@ function tabulate(setup, label, nt; sigdigits = 4, digits = nothing)
     return nothing
 end
 
-"Truncate `\$(setup.plotdir)/tables.txt`. Call once at the top of a pipeline
+"Truncate `tables_path(setup, filename)`. Call once at the top of a pipeline
 script so the file accumulates entries from this run only."
-reset_tables(setup) = (open(io -> nothing, joinpath(setup.plotdir, "tables.txt"), "w"); nothing)
+reset_tables(setup; filename = "tables.txt") =
+    (open(io -> nothing, tables_path(setup, filename), "w"); nothing)
 
 "Cartesian grid of a squared/cubic periodic domain."
 struct Grid{D, T, B}

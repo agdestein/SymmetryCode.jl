@@ -13,6 +13,14 @@ import SymmetryCode as S
 # Warmup plot
 lines([1, 2, 3])
 
+# Script-specific table file. create-data.jl and run-les.jl share a setup (hence
+# a plotdir), so each writes its summary tables to its own file to avoid one
+# script truncating the other's. These thin wrappers thread that filename through
+# `S.tabulate` / `S.reset_tables` so the call sites below stay uncluttered.
+const tablefile = "tables-les.txt"
+reset_tables(setup; kwargs...) = S.reset_tables(setup; filename = tablefile, kwargs...)
+tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile, kwargs...)
+
 function main()
 
     #######################
@@ -26,13 +34,13 @@ function main()
     # setup = S.setup_turbulator_large()
     # setup = S.setup_snellius()
 
-    S.reset_tables(setup)
-    S.tabulate(setup, "Problem setup", setup)
+    reset_tables(setup)
+    tabulate(setup, "Problem setup", setup)
 
     let
         r = S.data_ranges(setup)
         dg = setup.datagen
-        S.tabulate(
+        tabulate(
             setup,
             "Train/eval split (data.jld2 snapshot indices)",
             (;
@@ -171,21 +179,21 @@ function main()
                 k => isfile(file) ? load_object(file).timing : :missing
             end
         )
-        S.tabulate(setup, "Training wall-time (seconds) per learned model", timings; digits = 1)
+        tabulate(setup, "Training wall-time (seconds) per learned model", timings; digits = 1)
         S.plot_training(setup, config.models)
     end
 
     if :rollouts in config.experiments
         upostfiles = S.get_upostfiles(setup)
         timings = NamedTuple(k => load_object(upostfiles[k]).timing for k in config.models)
-        S.tabulate(setup, "LES rollout wall-time (seconds) per model", timings; digits = 1)
+        tabulate(setup, "LES rollout wall-time (seconds) per model", timings; digits = 1)
     end
 
     if :les_stats in config.experiments
         les_stat = S.get_les_statistics_cached(
             setup, Tuple(config.models); force = :les_stats in config.force,
         )
-        S.tabulate(
+        tabulate(
             setup,
             "Time-mean relative LES error vs filtered DNS, per model",
             map(s -> mean(s.e_post), les_stat),
@@ -206,27 +214,27 @@ function main()
         stats = NamedTuple(
             k => load_object("$(setup.outdir)/sfs_stats_$(k).jld2") for k in all_keys
         )
-        S.tabulate(
+        tabulate(
             setup,
             "A-priori relative SFS error per model",
             map(s -> s.apriori.relerr, stats),
         )
-        S.tabulate(
+        tabulate(
             setup,
             "A-priori SFS cross-correlation per model",
             map(s -> s.apriori.crosscor, stats),
         )
-        S.tabulate(
+        tabulate(
             setup,
             "Median pointwise SFS dissipation per model (incl :ref baseline)",
             map(s -> s.diss.median, stats),
         )
-        S.tabulate(
+        tabulate(
             setup,
             "Dissipation skewness per model (negative = backscatter tail)",
             map(s -> s.diss.skewness, stats),
         )
-        S.tabulate(
+        tabulate(
             setup,
             "Backscatter fraction per model (τ:S > 0; 0 for Smag by construction)",
             map(s -> s.diss.backscatter, stats),
@@ -251,7 +259,7 @@ function main()
     if :equi_prior in config.experiments
         equi_keys = filter(!=(:nomo), config.models)
         errs = S.load_equivariance_errors(setup, equi_keys, :prior)
-        S.tabulate(
+        tabulate(
             setup,
             "Mean a-priori equivariance error (over group elements) per model",
             map(mean, errs),
@@ -261,7 +269,7 @@ function main()
 
     if :equi_post in config.experiments
         errs = S.load_equivariance_errors(setup, config.models, :post)
-        S.tabulate(
+        tabulate(
             setup,
             "Mean a-posteriori equivariance error (over group elements) per model",
             map(mean, errs),

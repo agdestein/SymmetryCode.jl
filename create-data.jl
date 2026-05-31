@@ -5,12 +5,21 @@ using Adapt
 using CairoMakie
 using CUDA
 using JLD2
+using Statistics: mean
 using WGLMakie
 
 import SymmetryCode as S
 
 # Warmup plot
 lines([1, 2, 3])
+
+# Script-specific table file. create-data.jl and run-les.jl share a setup (hence
+# a plotdir), so each writes its summary tables to its own file to avoid one
+# script truncating the other's. These thin wrappers thread that filename through
+# `S.tabulate` / `S.reset_tables` so the call sites below stay uncluttered.
+const tablefile = "tables-data.txt"
+reset_tables(setup; kwargs...) = S.reset_tables(setup; filename = tablefile, kwargs...)
+tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile, kwargs...)
 
 # Stage 1 of the pipeline: DNS warm-up (`create_dns`) followed by (ubar, τ) data
 # generation (`create_data`), plus the diagnostic plots for both. Produces
@@ -29,19 +38,19 @@ function main()
     # setup = S.setup_turbulator_large()
     # setup = S.setup_snellius()
 
-    S.reset_tables(setup)
-    S.tabulate(setup, "Problem setup", setup)
+    reset_tables(setup)
+    tabulate(setup, "Problem setup", setup)
 
     config = (;
         # Pipeline stages to execute, in order. `create_dns` (:dns) writes
         # dns.jld2; `create_data` (:data) reads it and writes data.jld2; the
         # plot stages read whichever artifact already exists on disk.
         experiments = [
-            :dns,              # create_dns -> dns.jld2 (DNS warm-up) + print final stats
+            :dns,              # create_dns -> dns.jld2 (DNS warm-up) + tabulate warm-up stats
             :spectrum_dns,     # plot_spectrum_dns -> DNS energy spectrum
             :evolution_dns,    # plot_evolution_dns -> DNS time series
             # :dissipation_fd, # plot_dissipation_finite_difference -> ε vs dE/dt check
-            :data,             # create_data -> data.jld2 ((ubar, τ) pairs)
+            :data,             # create_data -> data.jld2 ((ubar, τ) pairs) + tabulate time-avg stats
             :dnsfield,         # heatmap of a DNS component + its filtered counterpart
             :evolution_data,   # plot_evolution_data -> (ubar, τ) data time series
             :spectrum_data,    # plot_spectrum_data -> DNS vs filtered-DNS spectra
@@ -66,12 +75,11 @@ function main()
     if :dns in config.experiments
         S.create_dns(setup; force = :dns in config.force)
 
-        # Show statistics after warm-up
+        # Tabulate statistics at the end of warm-up, to sanity-check the
+        # turbulent state (Reynolds numbers, resolution) before data generation.
         let
             statistics = load("$(setup.outdir)/dns.jld2", "statistics")
-            s = statistics[end]
-            s |> pairs |> display
-            flush(stdout)
+            tabulate(setup, "DNS statistics after warm-up", statistics[end])
         end
     end
 
@@ -93,7 +101,25 @@ function main()
 
     if :data in config.experiments
         S.create_data(setup; force = :data in config.force)
-        # data = joinpath(setup.outdir, "data.jld2") |> load_object;
+
+        # Tabulate the statistics averaged over the data-generation window, for
+        # reporting the characteristic Reynolds numbers, length/time scales and
+        # resolution of the (ubar, τ) dataset. Done for both the DNS and the
+        # filtered (LES-grid) fields.
+        let
+            data = joinpath(setup.outdir, "data.jld2") |> load_object
+            timemean(stats) = let ks = keys(first(stats))
+                NamedTuple{ks}(map(k -> mean(getindex.(stats, k)), ks))
+            end
+            tabulate(
+                setup, "Time-averaged DNS statistics (data window)",
+                timemean(data.statistics_dns),
+            )
+            tabulate(
+                setup, "Time-averaged filtered-DNS statistics (data window)",
+                timemean(data.statistics_les),
+            )
+        end
     end
 
     if :dnsfield in config.experiments
