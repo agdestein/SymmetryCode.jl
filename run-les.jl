@@ -15,11 +15,14 @@ lines([1, 2, 3])
 
 # Script-specific table file. create-data.jl and run-les.jl share a setup (hence
 # a plotdir), so each writes its summary tables to its own file to avoid one
-# script truncating the other's. These thin wrappers thread that filename through
+# script truncating the other's. Defined as a function (not a `const`) so both
+# scripts can be `include`d into the same REPL session — a `const` in one would
+# clash with the `const` of the same name in the other, whereas a function method
+# is freely redefinable. These thin wrappers thread that filename through
 # `S.tabulate` / `S.reset_tables` so the call sites below stay uncluttered.
-const tablefile = "tables-les.txt"
-reset_tables(setup; kwargs...) = S.reset_tables(setup; filename = tablefile, kwargs...)
-tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile, kwargs...)
+tablefile() = "tables-les.txt"
+reset_tables(setup; kwargs...) = S.reset_tables(setup; filename = tablefile(), kwargs...)
+tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile(), kwargs...)
 
 function main()
 
