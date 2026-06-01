@@ -39,10 +39,15 @@ function main()
     # Derive the Taylor-Green test setup at the canonical Re=1600 benchmark.
     # It mirrors train's ν, n_les, Δ exactly; only the flow differs.
     tgv = S.setup_taylorgreen(train; Re_target = 1600)
-    # For the snellius 810³ DNS, keep the large `data.jld2` on the cluster:
+
+    # # For the snellius 810³ DNS, keep the large `data.jld2` on the cluster:
+    # # Re_target = 1600
+    # Re_target = 4000
     # tgv = S.setup_taylorgreen(
     #     train;
+    #     Re_target
     #     outdir = "/projects/prjs1757/SymmetryOutput/tgv_visc=$(train.visc)_n=$(train.n_dns)" |> mkpath,
+    #     plotdir = joinpath(@__DIR__, "output/tgv_snellius_Re=$(Re_target)_n=$(train.n_dns)" |> mkpath,
     # )
 
     S.reset_tables(tgv)
