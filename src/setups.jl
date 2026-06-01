@@ -92,7 +92,7 @@ setup_laptop() = getsetup(;
     warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0, n_train = 35),
     tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
-    equi_setup = (; layers = [4, 4, 4, 8]),
+    equi_setup = (; layers = [4, 4, 8]),
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false),
 )
 
@@ -109,7 +109,7 @@ setup_turbulator_small() = getsetup(;
     warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
     datagen = (; nstep = 30, tstop = 5.0, n_train = 21),
     tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
-    equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
+    equi_setup = (; layers = [4, 4, 8]), # 3_200 actual params
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
 )
 
@@ -126,7 +126,7 @@ setup_turbulator_medium() = getsetup(;
     warmup = (; totalenergy = 0.2, tstop = 20.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0, n_train = 35),
     tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
-    equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
+    equi_setup = (; layers = [4, 4, 8]), # 3_200 actual params
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
 )
 
@@ -144,7 +144,7 @@ setup_turbulator_large() =
     warmup = (; totalenergy = 0.2, tstop = 30.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0, n_train = 35),
     tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
-    equi_setup = (; layers = [4, 4, 4, 8]), # 3_200 actual params
+    equi_setup = (; layers = [4, 4, 8]), # 3_200 actual params
     conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
 )
 
