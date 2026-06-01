@@ -8,6 +8,8 @@ Research code for the paper "Comparison of Data-Driven Symmetry-Preserving Closu
 
 CI only runs CompatHelper. The repository is driven from the REPL via two scripts run in order: `create-data.jl` then `run-les.jl`.
 
+**Companion paper & cross-repo sync.** The LaTeX source is at `../SymmetryPaper` (sibling under the `Symmetry/` umbrella). The G-conv weight synthesis in `nets.jl` / `symmetry.jl` and its description in `../SymmetryPaper/Draft/sections/groupconv.tex` §3.3 must stay in sync — change them together. Active refactor (replacing the Reynolds-projector + eigendecomposition with a closed-form gather/orbit synthesis): see `notes/equivariant-weight-synthesis.md`, which is the source-of-truth spec for both repos.
+
 ## Commands
 
 ```bash
