@@ -470,6 +470,89 @@ function plot_dissipation_tgv(
 end
 
 """
+Cross-Reynolds aggregation for the Taylor-Green generalization sweep.
+
+`setups` is a vector of per-Re Taylor-Green setups (each carrying `Re_target`
+and its own `outdir` with `sfs_stats_<k>.jld2` artifacts). For each model in
+`keys` (excluding `:ref`/`:nomo`) we plot two a-priori trends against the
+integral Reynolds number:
+- left: the **over-dissipation ratio** `median(τ:S) / median(τ:S)_ref`, the
+  diagnostic that exposes regime mis-calibration (ratio → 1 = correctly
+  dissipative; the learned closures, trained on forced HIT, drift above 1 as
+  the test flow becomes less turbulent);
+- right: the a-priori relative SFS tensor error, to show that the tensor
+  *structure* stays accurate even where the dissipation *magnitude* drifts.
+
+`train_anchor`, if given as `(; Re, outdir)`, overlays the forced training
+regime's ratios/errors (loaded from `outdir`'s `sfs_stats`) as star markers at
+`Re` — the point the trends should extrapolate toward. Missing artifacts are
+skipped with a warning so the plot still renders from whatever is present.
+"""
+function plot_dissipation_vs_re(
+        setups, keys;
+        train_anchor = nothing,
+        plotdir = last(setups).plotdir,
+    )
+    labels = getlabels()
+    plot_keys = filter(k -> k ∉ (:ref, :nomo), collect(keys))
+
+    # Per-setup loader: (ratio, relerr) for one model key, or `nothing` if its
+    # stats (or the :ref baseline) are missing in that setup's outdir.
+    load_metrics(outdir, k) = let
+        f, fref = "$(outdir)/sfs_stats_$(k).jld2", "$(outdir)/sfs_stats_ref.jld2"
+        if !isfile(f) || !isfile(fref)
+            @warn "Missing SFS stats for $(k) in $(outdir); skipping point"
+            nothing
+        else
+            s = load_object(f)
+            (; ratio = s.diss.median / load_object(fref).diss.median, relerr = s.apriori.relerr)
+        end
+    end
+
+    fig = Figure(; size = (820, 360))
+    ax_d = Axis(fig[1, 1]; xlabel = L"\mathrm{Re}", ylabel = "Median SFS dissipation / reference")
+    ax_e = Axis(fig[1, 2]; xlabel = L"\mathrm{Re}", ylabel = "A-priori relative SFS error")
+
+    order = sortperm([s.Re_target for s in setups])
+    sorted = setups[order]
+    res = [s.Re_target for s in sorted]
+    for k in plot_keys
+        m = [load_metrics(s.outdir, k) for s in sorted]
+        keep = .!isnothing.(m)
+        any(keep) || continue
+        scatterlines!(ax_d, res[keep], [x.ratio for x in m[keep]]; label = labels[k])
+        scatterlines!(ax_e, res[keep], [x.relerr for x in m[keep]]; label = labels[k])
+    end
+
+    # Forced-training anchor: the regime the learned closures were fit to, drawn
+    # as black stars (one legend entry) the per-model trends should extrapolate
+    # toward. One star per model, all at `train_anchor.Re`.
+    if !isnothing(train_anchor)
+        anchor = filter(!isnothing, [load_metrics(train_anchor.outdir, k) for k in plot_keys])
+        if !isempty(anchor)
+            re = fill(train_anchor.Re, length(anchor))
+            label = "Training (Re=$(round(Int, train_anchor.Re)))"
+            scatter!(ax_d, re, [x.ratio for x in anchor]; marker = :star5, markersize = 14, color = :black, label)
+            scatter!(ax_e, re, [x.relerr for x in anchor]; marker = :star5, markersize = 14, color = :black)
+        end
+    end
+
+    hlines!(ax_d, [1.0]; color = :red, linestyle = :dash, label = "Reference")
+    Legend(
+        fig[0, :], ax_d;
+        tellwidth = false, tellheight = true, framevisible = false,
+        horizontal = true, nbanks = 2,
+    )
+    rowgap!(fig.layout, 5)
+
+    file = "$(plotdir)/dissipation-vs-re.pdf"
+    @info "Saving Taylor-Green Reynolds-sweep plot to $(file)"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
+    return fig
+end
+
+"""
 Spectral SFS dissipation rate `ε_sfs(k)` (positive = drain at that shell;
 negative = local backscatter at that shell) averaged over the eval window.
 Compares the closure's spectral footprint against the filtered-DNS

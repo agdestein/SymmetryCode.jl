@@ -14,41 +14,23 @@ import SymmetryCode as S
 lines([1, 2, 3])
 
 # Second experiment: apply the closures trained on forced turbulence (by
-# `run-les.jl`) — *unchanged* — to a decaying Taylor-Green vortex. The TGV test
-# probes generalization to (1) laminar/transitional/turbulent regimes, (2) an
-# unforced decaying flow, and (3) the canonical Re=1600 dissipation benchmark.
+# `run-les.jl`) — *unchanged* — to a decaying Taylor-Green vortex, swept over a
+# range of integral Reynolds numbers. The TGV test probes generalization to
+# (1) laminar/transitional/turbulent regimes, (2) an unforced decaying flow, and
+# (3) the canonical dissipation benchmark; the Reynolds sweep additionally turns
+# the closures' regime mis-calibration into a *trend* vs Re (see `main`).
 #
 # The models are reused verbatim: the learned closures are amplitude- and
 # Reynolds-invariant by construction (they regress the normalized target
 # τ/(Δ²‖∇u‖²) from the normalized gradient ∇u/‖∇u‖), so only ν, n_les and Δ must
 # stay fixed. `setup_taylorgreen` copies those from the training setup and only
 # changes the flow (TGV initial condition, no forcing).
-function main()
 
-    #######################
-    # Setup + experiment config
-    #######################
-
-    # Pick the *training* setup whose trained closures (ps-*.jld2) we reuse.
-    # The paper uses setup_snellius; the others work identically.
-    train = S.setup_turbulator_small()
-    # train = S.setup_turbulator_medium()
-    # train = S.setup_turbulator_large()
-    # train = S.setup_snellius()
-
-    # Derive the Taylor-Green test setup at the canonical Re=1600 benchmark.
-    # It mirrors train's ν, n_les, Δ exactly; only the flow differs.
-    tgv = S.setup_taylorgreen(train; Re_target = 1600)
-
-    # # For the snellius 810³ DNS, keep the large `data.jld2` on the cluster:
-    # # Re_target = 1600
-    # Re_target = 4000
-    # tgv = S.setup_taylorgreen(
-    #     train;
-    #     Re_target
-    #     outdir = "/projects/prjs1757/SymmetryOutput/tgv_visc=$(train.visc)_n=$(train.n_dns)" |> mkpath,
-    #     plotdir = joinpath(@__DIR__, "output/tgv_snellius_Re=$(Re_target)_n=$(train.n_dns)" |> mkpath,
-    # )
+# Run the full per-Reynolds Taylor-Green test for one derived setup `tgv`:
+# generate the DNS + filtered (ubar, τ) data, run every per-model experiment,
+# and produce the per-Re plots/tables. `train` owns the trained closures and
+# `config` selects the model/experiment set (shared across the sweep).
+function run_tgv(train, tgv, config)
 
     S.reset_tables(tgv)
     S.tabulate(tgv, "Problem setup (Taylor-Green test)", tgv)
@@ -66,43 +48,6 @@ function main()
             V0 = tgv.V0,
             Re_TGV = tgv.V0 / tgv.visc,
             forced = tgv.forced,
-        ),
-    )
-
-    config = (;
-        # Closures included in every multi-model step. Order propagates to plots.
-        models = [
-            :nomo,
-            :dynsmag,
-            :clar,
-            :conv,
-            :equi,
-            :tbnn,
-        ],
-
-        # Focused stage set: the dissipation/transition benchmark plus a-priori
-        # generalization metrics. (Q-R, equivariance and field snapshots from
-        # run-les.jl are omitted here but would work the same way against `tgv`.)
-        experiments = [
-            :rollouts,           # solve_les -> u-post-<key>.jld2
-            :budget,             # compute_budget -> budget_<k>.jld2; dissipation(t) benchmark
-            :les_stats,          # get_les_statistics -> error-vs-t plot
-            :spectrum_les,       # LES energy-spectrum plot
-            :sfs,                # predict_sfs -> sfs_<key>.jld2
-            :stats,              # compute_sfs_stats -> KDE + bar plots + tables
-            :spectral_transfer,  # compute_spectral_transfer -> eps_sfs(k) plot
-        ],
-
-        # Stage labels here force a re-compute regardless of cache.
-        force = Set{Symbol}(
-            [
-                # :rollouts,
-                # :budget,
-                # :les_stats,
-                # :sfs,
-                # :stats,
-                # :spectral_transfer,
-            ]
         ),
     )
 
@@ -242,9 +187,100 @@ function main()
         S.plot_spectral_transfer(tgv, [:ref; config.models])
     end
 
-    @info "Done."
+    @info "Done with Taylor-Green test at Re = $(round(Int, tgv.Re_target))."
     flush(stderr)
 
+    return
+end
+
+function main()
+
+    #######################
+    # Setup + experiment config (shared across the Reynolds sweep)
+    #######################
+
+    # Pick the *training* setup whose trained closures (ps-*.jld2) we reuse.
+    # The paper uses setup_snellius; the others work identically.
+    train = S.setup_turbulator_small()
+    # train = S.setup_turbulator_medium()
+    # train = S.setup_turbulator_large()
+    # train = S.setup_snellius()
+
+    config = (;
+        # Closures included in every multi-model step. Order propagates to plots.
+        models = [
+            :nomo,
+            :dynsmag,
+            :clar,
+            :conv,
+            :equi,
+            :tbnn,
+        ],
+
+        # Focused stage set: the dissipation/transition benchmark plus a-priori
+        # generalization metrics. (Q-R, equivariance and field snapshots from
+        # run-les.jl are omitted here but would work the same way against `tgv`.)
+        experiments = [
+            :rollouts,           # solve_les -> u-post-<key>.jld2
+            :budget,             # compute_budget -> budget_<k>.jld2; dissipation(t) benchmark
+            :les_stats,          # get_les_statistics -> error-vs-t plot
+            :spectrum_les,       # LES energy-spectrum plot
+            :sfs,                # predict_sfs -> sfs_<key>.jld2
+            :stats,              # compute_sfs_stats -> KDE + bar plots + tables
+            :spectral_transfer,  # compute_spectral_transfer -> eps_sfs(k) plot
+        ],
+
+        # Stage labels here force a re-compute regardless of cache.
+        force = Set{Symbol}(
+            [
+                # :rollouts,
+                # :budget,
+                # :les_stats,
+                # :sfs,
+                # :stats,
+                # :spectral_transfer,
+            ]
+        ),
+    )
+
+    #######################
+    # Reynolds sweep
+    #######################
+    #
+    # Apply the *same* trained closures to a decaying Taylor-Green vortex at
+    # several integral Reynolds numbers (Re = V₀L/ν, set via V₀ = Re·ν with ν
+    # fixed to match training). This turns the over-dissipation of the learned
+    # closures — calibrated on the forced training regime — into a *trend* vs Re
+    # rather than a single anecdote. Each Re mirrors train's ν, n_les, Δ exactly;
+    # only the flow differs. setup_taylorgreen gives each Re its own outdir
+    # (`tgv_<train>_Re=<Re>_n=<n>`), so artifacts and per-Re plots never collide.
+    Re_targets = [1600, 4000, 8000]
+    tgvs = map(Re_targets) do Re_target
+        tgv = S.setup_taylorgreen(train; Re_target)
+        # # On Snellius, keep the large 810³ `data.jld2` on project storage
+        # # (per-Re path so the sweep points don't overwrite each other):
+        # tgv = S.setup_taylorgreen(
+        #     train; Re_target,
+        #     outdir = "/projects/prjs1757/SymmetryOutput/tgv_visc=$(train.visc)_Re=$(Re_target)_n=$(train.n_dns)" |> mkpath,
+        # )
+        run_tgv(train, tgv, config)
+        tgv
+    end
+
+    #######################
+    # Cross-Reynolds aggregation — the generalization trend
+    #######################
+    #
+    # Anchor the trend at the forced training regime (integral Re ≈ 7000); its
+    # sfs_stats live under train.outdir (best-effort — skipped if not present,
+    # e.g. when the forced sfs_stats are only on the cluster).
+    S.plot_dissipation_vs_re(
+        tgvs, [:ref; config.models];
+        train_anchor = (; Re = 7000, outdir = train.outdir),
+    )
+
+    @info "Done with Reynolds sweep."
+    flush(stderr)
     return
 end
 
