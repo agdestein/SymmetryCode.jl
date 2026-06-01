@@ -197,113 +197,147 @@ function test_equivariant_conv(D)
     return nothing
 end
 
+"""
+Cross-check the closed-form weight synthesis (`get_weight_synthesis`, used by
+`equivariant_net`) against the eigendecomposition fallback
+(`get_weight_projectors`). Confirms (1) the synthesis bases span the *same*
+subspace as `eigen(r_*).vectors`, (2) the synthesized weight blocks are
+*bit-exactly* group-equivariant (the mid block is group-circulant to the last
+bit), and (3) the resulting net's a-priori equivariance error is no larger than
+the eigen path's. The net-level error is not exactly zero — it is floored by
+floating-point reduction order in the matmul/gelu, *not* by the weights — so the
+"structural" exactness lives at the weight level, item (2).
+"""
 function test_equivariant_conv_sparse(D)
-    rng = Xoshiro(0)
-    T, f = Float64, f64
+    T = Float64
     nten = D^2
-    (; elements, mats) = group_stuff(D)
-    (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
+    (; elements, mats, cayley) = group_stuff(D)
     nreg = length(elements)
+
+    # Eigenbasis (general fallback) vs. closed-form synthesis. Both triples have
+    # identical shapes / row orderings, so they drop into the same `project_*`.
+    (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
     e_lift = eigen(r_lift / nreg; sortby = -).vectors[:, 1:nten]
     e_mid = eigen(r_mid / nreg; sortby = -).vectors[:, 1:nreg]
     e_sink = eigen(r_sink / nreg; sortby = -).vectors[:, 1:nten]
-    proj_lift = Dense(nten => nten * nreg; use_bias = false)
-    proj_sink = Dense(nten => nreg * nten; use_bias = false)
-    proj_mid = Dense(nreg => nreg^2; use_bias = false)
-    proj_lift_ps, _ = Lux.setup(rng, proj_lift) |> f
-    copyto!(proj_lift_ps.weight, e_lift)
-    proj_sink_ps, _ = Lux.setup(rng, proj_sink) |> f
-    copyto!(proj_sink_ps.weight, e_sink)
-    proj_mid_ps, _ = Lux.setup(rng, proj_mid) |> f
-    copyto!(proj_mid_ps.weight, e_mid)
-    function project_lift(ps)
-        w, b = ps.weight, ps.bias
-        _, c_out = size(w)
-        w = proj_lift(w, proj_lift_ps, (;)) |> first
-        w = reshape(w, nreg, nten, c_out)
-        w = permutedims(w, (2, 1, 3))
-        weight = reshape(w, 1, nten, nreg * c_out)
-        bias = reshape(repeat(reshape(b, 1, :), nreg), :)
-        return (; weight, bias)
-    end
-    function project_mid(ps)
-        w, b = ps.weight, ps.bias
-        _, c_out, c_in = size(w)
-        w = reshape(w, nreg, :)
-        w = proj_mid(w, proj_mid_ps, (;)) |> first
-        w = reshape(w, nreg, nreg, c_out, c_in)
-        w = permutedims(w, (2, 4, 1, 3))
-        weight = reshape(w, 1, nreg * c_in, nreg * c_out)
-        bias = reshape(repeat(reshape(b, 1, :), nreg), :)
-        return (; weight, bias)
-    end
-    function project_sink(ps)
-        w = ps.weight
-        _, c_in = size(w)
-        w = proj_sink(w, proj_sink_ps, (;)) |> first
-        w = reshape(w, nten, nreg, c_in)
-        w = permutedims(w, (2, 3, 1))
-        weight = reshape(w, 1, nreg * c_in, nten)
-        return (; weight)
-    end
-    nchan = [10, 10, 20, 20]
-    project(ps) = (;
-        lift = project_lift(ps.lift),
-        mid_1 = project_mid(ps.mid_1),
-        mid_2 = project_mid(ps.mid_2),
-        mid_3 = project_mid(ps.mid_3),
-        sink = project_sink(ps.sink),
+    (; s_lift, s_mid, s_sink) = get_weight_synthesis(D)
+
+    # (1) Same subspace: the orthogonal projectors onto the column spaces agree.
+    subspace = (;
+        lift = norm(s_lift * s_lift' - e_lift * e_lift'),
+        mid = norm(s_mid * s_mid' - e_mid * e_mid'),
+        sink = norm(s_sink * s_sink' - e_sink * e_sink'),
     )
+
+    nchan = [10, 10, 20, 20]
+    kern = ntuple(Returns(1), D)
+    function make_project((b_lift, b_mid, b_sink))
+        function project_lift(ps)
+            w, b = ps.weight, ps.bias
+            _, c_out = size(w)
+            w = b_lift * w
+            w = reshape(w, nreg, nten, c_out)
+            w = permutedims(w, (2, 1, 3))
+            weight = reshape(w, kern..., nten, nreg * c_out)
+            bias = reshape(repeat(reshape(b, 1, :), nreg), :)
+            return (; weight, bias)
+        end
+        function project_mid(ps)
+            w, b = ps.weight, ps.bias
+            _, c_out, c_in = size(w)
+            w = reshape(w, nreg, :)
+            w = b_mid * w
+            w = reshape(w, nreg, nreg, c_out, c_in)
+            w = permutedims(w, (2, 4, 1, 3))
+            weight = reshape(w, kern..., nreg * c_in, nreg * c_out)
+            bias = reshape(repeat(reshape(b, 1, :), nreg), :)
+            return (; weight, bias)
+        end
+        function project_sink(ps)
+            w = ps.weight
+            _, c_in = size(w)
+            w = b_sink * w
+            w = reshape(w, nten, nreg, c_in)
+            w = permutedims(w, (2, 3, 1))
+            weight = reshape(w, kern..., nreg * c_in, nten)
+            return (; weight)
+        end
+        return ps -> (;
+            lift = project_lift(ps.lift),
+            mid_1 = project_mid(ps.mid_1),
+            mid_2 = project_mid(ps.mid_2),
+            mid_3 = project_mid(ps.mid_3),
+            sink = project_sink(ps.sink),
+        )
+    end
+
     net = Chain(;
-        lift = Conv((1,), nten => nreg * nchan[1], gelu),
+        lift = Conv(kern, nten => nreg * nchan[1], gelu),
         map(
             i ->
             Symbol(:mid_, i) =>
-                Conv((1,), nreg * nchan[i] => nreg * nchan[i + 1], gelu),
+                Conv(kern, nreg * nchan[i] => nreg * nchan[i + 1], gelu),
             1:(length(nchan) - 1),
         )...,
-        sink = Conv((1,), nreg * nchan[end] => nten),
+        sink = Conv(kern, nreg * nchan[end] => nten),
     )
-    net |> display
-    ps = (;
-        lift = (; weight = randn(T, nten, nchan[1]), bias = randn(T, nchan[1])),
+
+    # Shared random learnables (so synthesis and eigen are compared fairly).
+    ps0 = (;
+        lift = (;
+            weight = randn(Xoshiro(0), T, nten, nchan[1]),
+            bias = randn(Xoshiro(1), T, nchan[1]),
+        ),
         map(
             i ->
             Symbol(:mid_, i) => (;
-                weight = randn(T, nreg, nchan[i + 1], nchan[i]),
-                bias = randn(T, nchan[i + 1]),
+                weight = randn(Xoshiro(10i), T, nreg, nchan[i + 1], nchan[i]),
+                bias = randn(Xoshiro(20i), T, nchan[i + 1]),
             ),
             1:(length(nchan) - 1),
         )...,
-        sink = (; weight = randn(T, nten, nchan[end])),
+        sink = (; weight = randn(Xoshiro(2), T, nten, nchan[end])),
     )
-    st = map(Returns((;)), ps)
-    ps = project(ps)
-    i = 6
-    mat = mats[i]
+    st = map(Returns((;)), ps0)
 
-    # Input
-    x = @SMatrix(randn(D, D)) |> f
+    # (2) Weight-level bit-exactness: the synthesized mid block is exactly
+    # group-circulant (w[g·m, g·n] == w[m,n]) and the lift block is exactly the
+    # Q-orbit — both to the last bit, the property the eigenbasis lacks.
+    c_out, c_in = size(ps0.mid_1.weight, 2), size(ps0.mid_1.weight, 3)
+    wmid = reshape(s_mid * reshape(ps0.mid_1.weight, nreg, :), nreg, nreg, c_out, c_in)
+    circulant_err = maximum(eachindex(elements)) do g
+        maximum(
+            abs,
+            wmid[cayley[g, :], cayley[g, :], :, :] .- wmid,
+        )
+    end
 
-    # Rotated input
-    rx = mat * x * mat'
+    # (3) A-priori equivariance error of the assembled net (no `symm` tail here,
+    # so the output is a full D×D tensor) for each group element.
+    function equiv_err(basistriple)
+        project = make_project(basistriple)
+        ps = project(ps0)
+        rng = Xoshiro(123)
+        return maximum(eachindex(mats)) do i
+            mat = mats[i]
+            x = SMatrix{D, D, T}(randn(rng, D, D))
+            rx = mat * x * mat'
+            nx =
+                reshape(net(reshape(Array(x), kern..., nten, 1), ps, st)[1], D, D) |>
+                SMatrix{D, D, T, nten}
+            nrx =
+                reshape(net(reshape(Array(rx), kern..., nten, 1), ps, st)[1], D, D) |>
+                SMatrix{D, D, T, nten}
+            rnx = mat * nx * mat'
+            norm(nrx - rnx)
+        end
+    end
+    err_synthesis = equiv_err((s_lift, s_mid, s_sink))
+    err_eigen = equiv_err((e_lift, e_mid, e_sink))
 
-    # Net on input
-    nx = reshape(Array(x), 1, nten, 1)
-    nx = net(nx, ps, st)[1]
-    nx = reshape(nx, D, D) |> SMatrix{D, D, T, nten}
-
-    # Net on rotated input
-    nrx = reshape(Array(rx), 1, nten, 1)
-    nrx = net(nrx, ps, st) |> first
-    nrx = reshape(nrx, D, D) |> SMatrix{D, D, T, nten}
-
-    # Rotated net'ed input
-    rnx = mat * nx * mat'
-
-    # Error in output tensor
-    nrx - rnx |> display
-    return nothing
+    result = (; subspace, circulant_err, err_synthesis, err_eigen)
+    @info "Equivariant weight synthesis cross-check (D = $D)" result...
+    return result
 end
 
 "Verification with DNS-aided LES."

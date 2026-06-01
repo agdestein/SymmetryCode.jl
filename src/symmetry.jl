@@ -125,6 +125,77 @@ function get_weight_projectors(D)
     return (; r_lift, r_mid, r_sink)
 end
 
+
+"""
+Closed-form equivariant weight bases — the direct synthesis that replaces the
+eigendecomposition of [`get_weight_projectors`](@ref) (spec:
+`notes/equivariant-weight-synthesis.md`).
+
+For regular-representation hidden channels and a tensor representation at the
+lift/sink boundaries, the equivariant subspace has a closed form, so the three
+returned bases play exactly the role of `eigen(r_*).vectors[:, 1:k]` — same
+shape, same row ordering — but with entries in `{0, ±1/√|G|}`:
+
+  - `s_mid`  (`|G|² × |G|`): a **group-circulant gather**. `s_mid * vec(k)`
+    tiles the learnable `k(n⁻¹m)` over the regular representation. `relidx` is
+    the Cayley-derived gather index (`relidx[m,n]` = flat index of `n⁻¹·m`,
+    i.e. the paper's `h⁻¹g`).
+  - `s_lift` (`|G|·D² × D²`) and `s_sink` (`D²·|G| × D²`): the **orbit** of the
+    tensor representation `Qmat[h]` (= `R_h ⊗ R_h`), the intertwiner between the
+    `D²`-dimensional tensor rep and the regular rep at the boundaries.
+
+`Qmat[h]` is built directly from the same index expression as `r_lift`'s tensor
+block, `Qmat[h][(x,y),(i,j)] = s[x] s[y] (p[x]==i)(p[y]==j)`, flattened with `x`
+(then `y`) fastest. Each basis column lies in the eigenvalue-one subspace of the
+matching Reynolds projector and the columns are orthonormal, so the synthesis
+spans the same space as the eigenbasis while making the weights *bit-exactly*
+equivariant (every `Qmat[h]` is a signed permutation; the `1/√|G|` is a single
+global scale). Cross-checked against the eigen path in `verify.jl` /
+`test/test_symmetry.jl`.
+"""
+function get_weight_synthesis(D)
+    (; permutations, signs, elements, cayley, inverse_indices) = group_stuff(D)
+    nreg = length(elements)
+    nten = D^2
+    α = 1 / sqrt(nreg)
+
+    # Tensor-rep matrices, built from r_lift's index expression (not assumed to
+    # be a kron), with (x,y) ↔ μ flattened x-fastest to match the Conv weight.
+    Qmat = map(elements) do (gp, gs)
+        p, s = permutations[gp], signs[gs]
+        Q = zeros(Int, nten, nten)
+        for j in 1:D, i in 1:D, y in 1:D, x in 1:D
+            μ, ν = x + (y - 1) * D, i + (j - 1) * D
+            Q[μ, ν] = s[x] * s[y] * (p[x] == i) * (p[y] == j)
+        end
+        Q
+    end
+
+    # Mid (regular → regular): group-circulant gather. Row index (m,n), m
+    # fastest, matching `r_mid`'s reshape.
+    relidx = [cayley[inverse_indices[n], m] for m in 1:nreg, n in 1:nreg]
+    s_mid = zeros(nreg^2, nreg)
+    for n in 1:nreg, m in 1:nreg
+        s_mid[m + (n - 1) * nreg, relidx[m, n]] = α
+    end
+
+    # Lift (tensor → regular): w_lift[h,:,cout] = Qmat[h]·c. Row (h,μ), h
+    # fastest, matching `r_lift`'s reshape.
+    s_lift = zeros(nreg * nten, nten)
+    for ν in 1:nten, μ in 1:nten, h in 1:nreg
+        s_lift[h + (μ - 1) * nreg, ν] = α * Qmat[h][μ, ν]
+    end
+
+    # Sink (regular → tensor): w_sink[:,h,cin] = Qmat[h]·d. Row (μ,h), μ
+    # fastest, matching `r_sink`'s reshape.
+    s_sink = zeros(nten * nreg, nten)
+    for ν in 1:nten, h in 1:nreg, μ in 1:nten
+        s_sink[μ + (h - 1) * nten, ν] = α * Qmat[h][μ, ν]
+    end
+
+    return (; relidx, Qmat, s_lift, s_mid, s_sink)
+end
+
 function vectorfield_to_svector(u)
     D = ndims(u[1])
     T = eltype(u[1])

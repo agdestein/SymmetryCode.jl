@@ -22,34 +22,42 @@ dihedral group D₄ in 2D, the octahedral group O_h in 3D (both of order
 
 A group convolution is realized here as a pointwise MLP whose channel
 count is a multiple of |G|: each layer holds |G| copies of unconstrained
-weights, and `project_*` ties them via the group projectors from
-`symmetry.jl` so the layer commutes with every group element. The
-returned `ps` are the unconstrained basis; Lux sees the projected weights
-only after they pass through `project`.
+weights, and `project_*` ties them via the closed-form weight bases from
+`symmetry.jl` (`get_weight_synthesis`) so the layer commutes with every
+group element. The returned `ps` are the unconstrained basis; Lux sees the
+projected weights only after they pass through `project`.
+
+The synthesis (group-circulant gather for the mid layers, tensor-rep orbit
+for lift/sink) replaces the older eigendecomposition of the Reynolds
+projectors: it spans the same equivariant subspace but, with the projector
+matrices having entries in `{0, ±1/√|G|}`, makes the weights *bit-exactly*
+equivariant. Pass `synthesis = false` to fall back to the
+representation-agnostic eigendecomposition.
 """
-function equivariant_net(setup, nchan)
+function equivariant_net(setup, nchan; synthesis = true)
     (; D, backend, train_setup) = setup
     dev = adapt(backend)
     # dev = identity
     rng = Xoshiro(train_setup.seed)
     T = train_setup.precision
-    f = T === Float32 ? f32 : f64
     nten = D^2
     (; elements) = group_stuff(D)
-    (; r_lift, r_sink, r_mid) = get_weight_projectors(D)
     nreg = length(elements)
-    e_lift = eigen(r_lift / nreg; sortby = -).vectors[:, 1:nten]
-    e_mid = eigen(r_mid / nreg; sortby = -).vectors[:, 1:nreg]
-    e_sink = eigen(r_sink / nreg; sortby = -).vectors[:, 1:nten]
-    proj_lift = Dense(nten => nten * nreg; use_bias = false)
-    proj_sink = Dense(nten => nreg * nten; use_bias = false)
-    proj_mid = Dense(nreg => nreg^2; use_bias = false)
-    proj_lift_ps, _ = Lux.setup(rng, proj_lift) |> f |> dev
-    copyto!(proj_lift_ps.weight, e_lift)
-    proj_sink_ps, _ = Lux.setup(rng, proj_sink) |> f |> dev
-    copyto!(proj_sink_ps.weight, e_sink)
-    proj_mid_ps, _ = Lux.setup(rng, proj_mid) |> f |> dev
-    copyto!(proj_mid_ps.weight, e_mid)
+    # Bases mapping the compact learnables to a full weight block. The closed
+    # form (default) is bit-exactly equivariant; the eigenbasis is the general
+    # fallback. Both have identical shapes/orderings, so `project_*` is shared.
+    s_lift, s_mid, s_sink = if synthesis
+        (; s_lift, s_mid, s_sink) = get_weight_synthesis(D)
+        s_lift, s_mid, s_sink
+    else
+        (; r_lift, r_mid, r_sink) = get_weight_projectors(D)
+        eigen(r_lift / nreg; sortby = -).vectors[:, 1:nten],
+            eigen(r_mid / nreg; sortby = -).vectors[:, 1:nreg],
+            eigen(r_sink / nreg; sortby = -).vectors[:, 1:nten]
+    end
+    s_lift = dev(T.(s_lift))
+    s_mid = dev(T.(s_mid))
+    s_sink = dev(T.(s_sink))
     # Pointwise: kernel = 1 in every spatial dim. The Conv primitive is used
     # for the weight layout that the group projection needs; the spatial
     # mixing happens upstream (the input is the velocity gradient).
@@ -57,7 +65,7 @@ function equivariant_net(setup, nchan)
     function project_lift(ps)
         w, b = ps.weight, ps.bias
         _, c_out = size(w)
-        w = proj_lift(w, proj_lift_ps, (;)) |> first
+        w = s_lift * w
         w = reshape(w, nreg, nten, c_out)
         w = permutedims(w, (2, 1, 3))
         weight = reshape(w, kern..., nten, nreg * c_out)
@@ -68,7 +76,7 @@ function equivariant_net(setup, nchan)
         w, b = ps.weight, ps.bias
         _, c_out, c_in = size(w)
         w = reshape(w, nreg, :)
-        w = proj_mid(w, proj_mid_ps, (;)) |> first
+        w = s_mid * w
         w = reshape(w, nreg, nreg, c_out, c_in)
         w = permutedims(w, (2, 4, 1, 3))
         weight = reshape(w, kern..., nreg * c_in, nreg * c_out)
@@ -78,7 +86,7 @@ function equivariant_net(setup, nchan)
     function project_sink(ps)
         w = ps.weight
         _, c_in = size(w)
-        w = proj_sink(w, proj_sink_ps, (;)) |> first
+        w = s_sink * w
         w = reshape(w, nten, nreg, c_in)
         w = permutedims(w, (2, 3, 1))
         weight = reshape(w, kern..., nreg * c_in, nten)
