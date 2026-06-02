@@ -91,9 +91,9 @@ setup_laptop() = getsetup(;
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0, n_train = 35),
-    tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
-    equi_setup = (; layers = [4, 4, 8]),
-    conv_setup = (; layers = [16, 32, 64], same_as_equi = false),
+    conv_setup = (; layers = [8, 16, 32], same_as_equi = false), # 824 params
+    equi_setup = (; layers = [4, 8, 8]),                         # 836 params (pre-synthesis)
+    tbnn_setup = (; layers = [10, 16, 32]),                      # 814 params
 )
 
 "3D forced HIT, small (n_dns=256). ~10 min on an RTX 4090; quick prototyping."
@@ -108,9 +108,9 @@ setup_turbulator_small() = getsetup(;
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
     datagen = (; nstep = 30, tstop = 5.0, n_train = 21),
-    tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
-    equi_setup = (; layers = [4, 4, 8]), # 3_200 actual params
-    conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
+    conv_setup = (; layers = [12, 24, 64], same_as_equi = false), # 2_416 params
+    equi_setup = (; layers = [4, 4, 8]),                          # 2_428 params (pre-synthesis)
+    tbnn_setup = (; layers = [12, 24, 64]),                       # 2_432 params
 )
 
 "3D forced HIT, medium (n_dns=384). Recommended default on a 24 GB GPU (RTX 4090)."
@@ -125,9 +125,9 @@ setup_turbulator_medium() = getsetup(;
     cfl = 0.35,
     warmup = (; totalenergy = 0.2, tstop = 20.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0, n_train = 35),
-    tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
-    equi_setup = (; layers = [4, 4, 8]), # 3_200 actual params
-    conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
+    conv_setup = (; layers = [12, 24, 64], same_as_equi = false), # 2_416 params
+    equi_setup = (; layers = [4, 4, 8]),                          # 2_428 params (pre-synthesis)
+    tbnn_setup = (; layers = [12, 24, 64]),                       # 2_432 params
 )
 
 "3D forced HIT, large (n_dns=512). Tight on a 24 GB GPU; closest to paper-quality."
@@ -141,11 +141,11 @@ setup_turbulator_large() =
     Δ_factor = 3,
     visc = 3.0e-4,
     cfl = 0.35,
-    warmup = (; totalenergy = 0.2, tstop = 30.0, seed = 0),
+    warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
     datagen = (; nstep = 50, tstop = 10.0, n_train = 35),
-    tbnn_setup = (; layers = [16, 32, 64]), # 3_200 params (3D)
-    equi_setup = (; layers = [4, 4, 8]), # 3_200 actual params
-    conv_setup = (; layers = [16, 32, 64], same_as_equi = false), # 3_200 parameters
+    conv_setup = (; layers = [12, 24, 64], same_as_equi = false), # 2_416 params
+    equi_setup = (; layers = [4, 4, 8]),                          # 2_428 params (pre-synthesis)
+    tbnn_setup = (; layers = [12, 24, 64]),                       # 2_432 params
 )
 
 "3D forced HIT, large (n_dns=810). Fits in a 90 GB datacenter GPU (H100 on Snellius)."
@@ -166,9 +166,9 @@ function setup_snellius()
         # pool; the held-out tail (t ∈ (14, 20] ≈ 0.86 t_int) drives all
         # post-hoc analysis (LES rollout, a-priori metrics, densities, Q-R).
         datagen = (; nstep = 100, tstop = 20.0, n_train = 70), # 25685 seconds
-        tbnn_setup = (; layers = [64, 64, 128]), # 13_760 params
-        equi_setup = (; layers = [8, 8, 8, 16]), # 12_544 actual params
-        conv_setup = (; layers = [48, 64, 64, 64], same_as_equi = false), # 12_320 parameters
+        conv_setup = (; layers = [44, 64, 64], same_as_equi = false), # 7_864 params
+        equi_setup = (; layers = [4, 8, 16]),                         # 7_888 params (pre-synthesis)
+        tbnn_setup = (; layers = [46, 64, 64]),                       # 7_892 params
     )
     outdir = "/projects/prjs1757/SymmetryOutput/visc=$(s.visc)_n=$(s.n_dns)" |> mkpath
     plotdir = joinpath(@__DIR__, "..", "output", "snellius") |> mkpath

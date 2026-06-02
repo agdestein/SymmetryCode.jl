@@ -7,5 +7,6 @@ using Test
     include("test_solver_kernels.jl")
     include("test_tensor_helpers.jl")
     include("test_symmetry.jl")
+    include("test_paramcount.jl")
     include("test_closures.jl")
 end

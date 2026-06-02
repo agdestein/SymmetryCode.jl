@@ -92,6 +92,23 @@ tablefile() = "tables-les.txt"
 reset_tables(setup; kwargs...) = S.reset_tables(setup; filename = tablefile(), kwargs...)
 tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile(), kwargs...)
 
+"Just a little helper for designing architectures."
+function printnetsizes()
+    setup = get_setup()
+    config = get_config()
+    reset_tables(setup)
+    learned = filter(in([:tbnn, :equi, :conv]), config.models)
+    tabulate(
+        setup,
+        "Trainable parameters per learned model (equi counted pre-synthesis)",
+        NamedTuple(k => S.paramcount(setup, k) for k in learned),
+    )
+    error()
+end
+
+# # Print sizes and raise error
+# printnetsizes()
+
 function main()
     # Load setup/config from top of file
     setup = get_setup()
@@ -190,7 +207,7 @@ function main()
         tabulate(
             setup,
             "Trainable parameters per learned model (equi counted pre-synthesis)",
-            S.learned_paramcounts(setup, config.models),
+            NamedTuple(k => S.paramcount(setup, k) for k in learned),
         )
         S.plot_training(setup, config.models)
     end

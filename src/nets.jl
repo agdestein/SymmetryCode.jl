@@ -429,3 +429,54 @@ tbnn(net, ps, st, Δ, g) = function model(u, A)
     @. m = m * Δ^2 * a2
     return m
 end
+
+# --- Parameter counting ---
+
+"""
+Closed-form trainable-parameter count for a learned closure, derived directly
+from the setup's layer widths — *no* network is built, so this returns
+instantly. Use it to sweep architectures (e.g. trying
+`equi_setup = (; layers = [8, 8, 8, 16])` → `12_544`) without waiting for Lux
+to instantiate the chain.
+
+`key` is `:tbnn`, `:equi`, or `:conv`. The result equals
+`Lux.parameterlength` of the as-built `ps` (`SymmetryCode.learned_paramcounts`);
+the test suite asserts the two agree, so this formula must be kept in lockstep
+with the architectures above.
+
+All three nets are stacks of *pointwise* (1×1) `Conv` layers, and a
+`c_in => c_out` layer holds `c_in*c_out` weights plus `c_out` biases (none on
+the bias-free sink). For `:conv` the hidden widths are scaled by the group
+order `|G|` when `same_as_equi`. For `:equi` the count is the *compact,
+pre-synthesis* basis the optimiser updates — each mid layer stores a single
+`|G|`-tied `c_i×c_{i+1}` weight block (not the `|G|²`-sized projected weight)
+plus an un-tied `c_{i+1}` bias, and the synthesis operator (`project`) is what
+expands these into the full equivariant weights Lux reports.
+"""
+function paramcount(setup, key)
+    D = setup.D
+    g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
+    # Parameters of a single pointwise Conv(c_in => c_out).
+    convparams(c_in, c_out; bias = true) = c_in * c_out + (bias ? c_out : 0)
+    if key === :tbnn
+        c = setup.tbnn_setup.layers
+        widths = [ninvariant(g); c]                # invariants in, then hidden widths
+        return sum(convparams(widths[i], widths[i + 1]) for i in eachindex(c)) +
+            convparams(c[end], nbasis(g); bias = false)
+    elseif key === :conv
+        c = setup.conv_setup.layers
+        nreg = setup.conv_setup.same_as_equi ? length(group_stuff(D).elements) : 1
+        widths = [D^2; nreg .* c]                  # gradient tensor in, then |G|·widths
+        return sum(convparams(widths[i], widths[i + 1]) for i in eachindex(c)) +
+            convparams(nreg * c[end], tensordim(g); bias = false)
+    elseif key === :equi
+        c = setup.equi_setup.layers
+        nreg, nten = length(group_stuff(D).elements), D^2  # |G| = 8 (2D) / 48 (3D)
+        lift = convparams(nten, c[1])
+        mids = sum(nreg * c[i] * c[i + 1] + c[i + 1] for i in 1:(length(c) - 1); init = 0)
+        sink = nten * c[end]                       # bias-free
+        return lift + mids + sink
+    else
+        error("not a learned closure: $(key)")
+    end
+end
