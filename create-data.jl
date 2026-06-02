@@ -1,3 +1,7 @@
+# Generate forced DNS data for training and evaluating closures.
+# Adjust the parameters in `get_setup` and `get_config`.
+# Results are written to `plotdir` and arrays are cached in `outdir`.
+
 @info "Loading packages"
 flush(stderr)
 
@@ -8,6 +12,45 @@ using JLD2
 using Statistics: mean
 
 import SymmetryCode as S
+
+#######################
+# Setup + experiment config
+#######################
+
+# Pick one. Output paths are derived automatically.
+
+# get_setup() = S.setup_laptop()
+get_setup() = S.setup_turbulator_small()
+# get_setup() = S.setup_turbulator_medium()
+# get_setup() = S.setup_turbulator_large()
+# get_setup() = S.setup_snellius()
+
+get_config() = (;
+    # Pipeline stages to execute, in order. `create_dns` (:dns) writes
+    # dns.jld2; `create_data` (:data) reads it and writes data.jld2; the
+    # plot stages read whichever artifact already exists on disk.
+    experiments = [
+        :dns,              # create_dns -> dns.jld2 (DNS warm-up) + tabulate warm-up stats
+        :spectrum_dns,     # plot_spectrum_dns -> DNS energy spectrum
+        :evolution_dns,    # plot_evolution_dns -> DNS time series
+        # :dissipation_fd, # plot_dissipation_finite_difference -> ε vs dE/dt check
+        :data,             # create_data -> data.jld2 ((ubar, τ) pairs) + tabulate time-avg stats
+        :dnsfield,         # heatmap of a DNS component + its filtered counterpart
+        :evolution_data,   # plot_evolution_data -> (ubar, τ) data time series
+        :spectrum_data,    # plot_spectrum_data -> DNS vs filtered-DNS spectra
+    ],
+
+    # Stage labels here force a re-compute regardless of cache. By default
+    # :dns/:data short-circuit when dns.jld2/data.jld2 already exist; uncomment
+    # a line below (or `push!(config.force, :data)` at the REPL) to invalidate.
+    # Only these two stages are cached; the plot stages always regenerate.
+    force = Set{Symbol}(
+        [
+            # :dns,
+            # :data,
+        ]
+    ),
+)
 
 # Script-specific table file. create-data.jl and run-les.jl share a setup (hence
 # a plotdir), so each writes its summary tables to its own file to avoid one
@@ -25,47 +68,11 @@ tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile(), kwarg
 # `dns.jld2` and `data.jld2`, which `run-les.jl` consumes. The `config.experiments`
 # list below toggles which stages run, mirroring `run-les.jl` / `run-tgv.jl`.
 function main()
-
-    #######################
-    # Setup + experiment config
-    #######################
-
-    # Pick one. Output paths are derived automatically.
-    # setup = S.setup_laptop()
-    setup = S.setup_turbulator_small()
-    # setup = S.setup_turbulator_medium()
-    # setup = S.setup_turbulator_large()
-    # setup = S.setup_snellius()
-
+    # Load setup/config from top of file
+    setup = get_setup()
+    config = get_config()
     reset_tables(setup)
     tabulate(setup, "Problem setup", setup)
-
-    config = (;
-        # Pipeline stages to execute, in order. `create_dns` (:dns) writes
-        # dns.jld2; `create_data` (:data) reads it and writes data.jld2; the
-        # plot stages read whichever artifact already exists on disk.
-        experiments = [
-            :dns,              # create_dns -> dns.jld2 (DNS warm-up) + tabulate warm-up stats
-            :spectrum_dns,     # plot_spectrum_dns -> DNS energy spectrum
-            :evolution_dns,    # plot_evolution_dns -> DNS time series
-            # :dissipation_fd, # plot_dissipation_finite_difference -> ε vs dE/dt check
-            :data,             # create_data -> data.jld2 ((ubar, τ) pairs) + tabulate time-avg stats
-            :dnsfield,         # heatmap of a DNS component + its filtered counterpart
-            :evolution_data,   # plot_evolution_data -> (ubar, τ) data time series
-            :spectrum_data,    # plot_spectrum_data -> DNS vs filtered-DNS spectra
-        ],
-
-        # Stage labels here force a re-compute regardless of cache. By default
-        # :dns/:data short-circuit when dns.jld2/data.jld2 already exist; uncomment
-        # a line below (or `push!(config.force, :data)` at the REPL) to invalidate.
-        # Only these two stages are cached; the plot stages always regenerate.
-        force = Set{Symbol}(
-            [
-                # :dns,
-                # :data,
-            ]
-        ),
-    )
 
     #######################
     # DNS warm-up

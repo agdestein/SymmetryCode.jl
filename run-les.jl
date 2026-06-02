@@ -1,3 +1,7 @@
+# Train LES closures and evaluate them a-priori and a-posteriori.
+# Adjust the parameters in `get_setup` and `get_config`.
+# Results are written to `plotdir` and arrays are cached in `outdir`.
+
 @info "Loading packages"
 flush(stderr)
 
@@ -8,6 +12,74 @@ using JLD2
 using Statistics: mean
 
 import SymmetryCode as S
+
+#######################
+# Setup + experiment config
+#######################
+
+# Pick one. `getsetup` derives output paths automatically.
+
+# get_setup() = S.setup_laptop()
+get_setup() = S.setup_turbulator_small()
+# get_setup() = S.setup_turbulator_medium()
+# get_setup() = S.setup_turbulator_large()
+# get_setup() = S.setup_snellius()
+
+get_config() = (;
+    # Closures included in every multi-model step. Order propagates to plots.
+    # Available: :nomo, :dynsmag, :clar, :smag, :vers, :bard, :tbnn, :equi, :conv.
+    models = [
+        :nomo,
+        # :smag,
+        # :vers,
+        # :bard,
+        :dynsmag,
+        :clar,
+        :conv,
+        :equi,
+        :tbnn,
+    ],
+
+    # How to load trainable closures (:skip loads ps-<key>.jld2 without
+    # retraining; :resume continues from a checkpoint; :scratch retrains).
+    train_mode = :skip,
+
+    # Pipeline stages to execute. Cached stages skip per-key when their
+    # artifact already exists under setup.outdir — see :force for invalidation.
+    experiments = [
+        :training_summary,   # print training wall-time per learned model
+        :rollouts,           # solve_les -> u-post-<key>.jld2
+        :les_stats,          # get_les_statistics -> les_stat.jld2 + error-vs-t plot
+        :spectrum_les,       # LES energy-spectrum plot
+        :sfs,                # predict_sfs -> sfs_<key>.jld2
+        :stats,              # compute_sfs_stats -> sfs_stats_<k>.jld2; KDE + bar plots + tables
+        :budget,             # compute_budget -> budget_<k>.jld2; KE(t) + eps_sfs(t) plot
+        :spectral_transfer,  # compute_spectral_transfer -> transfer_<k>.jld2; eps_sfs(k) plot
+        :equi_prior,         # apriori_equivariance_error + plot
+        :equi_post,          # apost_equivariance_error + plot
+        :velocities,         # plot_velocities slice grid
+        :sfs_plot,           # plot_sfs tensor-field snapshots
+        :qr,                 # compute_qr + plot_qr
+    ],
+
+    # Stage labels here force a re-compute regardless of cache. Uncomment
+    # a line below (or `push!(config.force, :qr)` at the REPL) to invalidate.
+    # Only the cached stages are listed; the others have nothing to invalidate.
+    force = Set{Symbol}(
+        [
+            # :rollouts,
+            # :les_stats,
+            # :sfs,
+            # :stats,
+            # :budget,
+            # :spectral_transfer,
+            # :equi_prior,
+            # :equi_post,
+            # :qr,
+        ]
+    ),
+)
+
 
 # Script-specific table file. create-data.jl and run-les.jl share a setup (hence
 # a plotdir), so each writes its summary tables to its own file to avoid one
@@ -21,18 +93,9 @@ reset_tables(setup; kwargs...) = S.reset_tables(setup; filename = tablefile(), k
 tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile(), kwargs...)
 
 function main()
-
-    #######################
-    # Setup + experiment config
-    #######################
-
-    # Pick one. `getsetup` derives output paths automatically.
-    # setup = S.setup_laptop()
-    setup = S.setup_turbulator_small()
-    # setup = S.setup_turbulator_medium()
-    # setup = S.setup_turbulator_large()
-    # setup = S.setup_snellius()
-
+    # Load setup/config from top of file
+    setup = get_setup()
+    config = get_config()
     reset_tables(setup)
     tabulate(setup, "Problem setup", setup)
 
@@ -53,61 +116,6 @@ function main()
             ),
         )
     end
-
-    config = (;
-        # Closures included in every multi-model step. Order propagates to plots.
-        # Available: :nomo, :dynsmag, :clar, :smag, :vers, :bard, :tbnn, :equi, :conv.
-        models = [
-            :nomo,
-            # :smag,
-            # :vers,
-            # :bard,
-            :dynsmag,
-            :clar,
-            :conv,
-            :equi,
-            :tbnn,
-        ],
-
-        # How to load trainable closures (:skip loads ps-<key>.jld2 without
-        # retraining; :resume continues from a checkpoint; :scratch retrains).
-        train_mode = :skip,
-
-        # Pipeline stages to execute. Cached stages skip per-key when their
-        # artifact already exists under setup.outdir — see :force for invalidation.
-        experiments = [
-            :training_summary,   # print training wall-time per learned model
-            :rollouts,           # solve_les -> u-post-<key>.jld2
-            :les_stats,          # get_les_statistics -> les_stat.jld2 + error-vs-t plot
-            :spectrum_les,       # LES energy-spectrum plot
-            :sfs,                # predict_sfs -> sfs_<key>.jld2
-            :stats,              # compute_sfs_stats -> sfs_stats_<k>.jld2; KDE + bar plots + tables
-            :budget,             # compute_budget -> budget_<k>.jld2; KE(t) + eps_sfs(t) plot
-            :spectral_transfer,  # compute_spectral_transfer -> transfer_<k>.jld2; eps_sfs(k) plot
-            :equi_prior,         # apriori_equivariance_error + plot
-            :equi_post,          # apost_equivariance_error + plot
-            :velocities,         # plot_velocities slice grid
-            :sfs_plot,           # plot_sfs tensor-field snapshots
-            :qr,                 # compute_qr + plot_qr
-        ],
-
-        # Stage labels here force a re-compute regardless of cache. Uncomment
-        # a line below (or `push!(config.force, :qr)` at the REPL) to invalidate.
-        # Only the cached stages are listed; the others have nothing to invalidate.
-        force = Set{Symbol}(
-            [
-                # :rollouts,
-                # :les_stats,
-                # :sfs,
-                # :stats,
-                # :budget,
-                # :spectral_transfer,
-                # :equi_prior,
-                # :equi_post,
-                # :qr,
-            ]
-        ),
-    )
 
     #######################
     # Train learned closures

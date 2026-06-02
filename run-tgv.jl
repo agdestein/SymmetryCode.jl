@@ -1,14 +1,3 @@
-@info "Loading packages"
-flush(stderr)
-
-using Adapt
-using CairoMakie
-using CUDA, cuDNN
-using JLD2
-using Statistics: mean
-
-import SymmetryCode as S
-
 # Second experiment: apply the closures trained on forced turbulence (by
 # `run-les.jl`) — *unchanged* — to a decaying Taylor-Green vortex, swept over a
 # range of integral Reynolds numbers. The TGV test probes generalization to
@@ -22,10 +11,75 @@ import SymmetryCode as S
 # stay fixed. `setup_taylorgreen` copies those from the training setup and only
 # changes the flow (TGV initial condition, no forcing).
 
-# Run the full per-Reynolds Taylor-Green test for one derived setup `tgv`:
-# generate the DNS + filtered (ubar, τ) data, run every per-model experiment,
-# and produce the per-Re plots/tables. `train` owns the trained closures and
-# `config` selects the model/experiment set (shared across the sweep).
+@info "Loading packages"
+flush(stderr)
+
+using Adapt
+using CairoMakie
+using CUDA, cuDNN
+using JLD2
+using Statistics: mean
+
+import SymmetryCode as S
+
+#######################
+# Setup + experiment config (shared across the Reynolds sweep)
+#######################
+
+# Pick the *training* setup whose trained closures (ps-*.jld2) we reuse.
+# The paper uses setup_snellius; the others work identically.
+
+get_setup() = S.setup_turbulator_small()
+# get_setup() = S.setup_turbulator_medium()
+# get_setup() = S.setup_turbulator_large()
+# get_setup() = S.setup_snellius()
+
+get_config() = (;
+    # Closures included in every multi-model step. Order propagates to plots.
+    models = [
+        :nomo,
+        :dynsmag,
+        :clar,
+        :conv,
+        :equi,
+        :tbnn,
+    ],
+
+    Re_ref = 7000,                   # Reference integral Reynolds number from training dataset
+    Re_targets = [1600, 4000, 8000], # TGV integral Reynolds numbers to test
+
+    # Focused stage set: the dissipation/transition benchmark plus a-priori
+    # generalization metrics. (Q-R, equivariance and field snapshots from
+    # run-les.jl are omitted here but would work the same way against `tgv`.)
+    experiments = [
+        :rollouts,           # solve_les -> u-post-<key>.jld2
+        :budget,             # compute_budget -> budget_<k>.jld2; dissipation(t) benchmark
+        :les_stats,          # get_les_statistics -> error-vs-t plot
+        :spectrum_les,       # LES energy-spectrum plot
+        :sfs,                # predict_sfs -> sfs_<key>.jld2
+        :stats,              # compute_sfs_stats -> KDE + bar plots + tables
+        :spectral_transfer,  # compute_spectral_transfer -> eps_sfs(k) plot
+    ],
+
+    # Stage labels here force a re-compute regardless of cache.
+    force = Set{Symbol}(
+        [
+            # :rollouts,
+            # :budget,
+            # :les_stats,
+            # :sfs,
+            # :stats,
+            # :spectral_transfer,
+        ]
+    ),
+)
+
+"""
+Run the full per-Reynolds Taylor-Green test for one derived setup `tgv`:
+generate the DNS + filtered (ubar, τ) data, run every per-model experiment,
+and produce the per-Re plots/tables. `train` owns the trained closures and
+`config` selects the model/experiment set (shared across the sweep).
+"""
 function run_tgv(train, tgv, config)
 
     S.reset_tables(tgv)
@@ -190,54 +244,9 @@ function run_tgv(train, tgv, config)
 end
 
 function main()
-
-    #######################
-    # Setup + experiment config (shared across the Reynolds sweep)
-    #######################
-
-    # Pick the *training* setup whose trained closures (ps-*.jld2) we reuse.
-    # The paper uses setup_snellius; the others work identically.
-    train = S.setup_turbulator_small()
-    # train = S.setup_turbulator_medium()
-    # train = S.setup_turbulator_large()
-    # train = S.setup_snellius()
-
-    config = (;
-        # Closures included in every multi-model step. Order propagates to plots.
-        models = [
-            :nomo,
-            :dynsmag,
-            :clar,
-            :conv,
-            :equi,
-            :tbnn,
-        ],
-
-        # Focused stage set: the dissipation/transition benchmark plus a-priori
-        # generalization metrics. (Q-R, equivariance and field snapshots from
-        # run-les.jl are omitted here but would work the same way against `tgv`.)
-        experiments = [
-            :rollouts,           # solve_les -> u-post-<key>.jld2
-            :budget,             # compute_budget -> budget_<k>.jld2; dissipation(t) benchmark
-            :les_stats,          # get_les_statistics -> error-vs-t plot
-            :spectrum_les,       # LES energy-spectrum plot
-            :sfs,                # predict_sfs -> sfs_<key>.jld2
-            :stats,              # compute_sfs_stats -> KDE + bar plots + tables
-            :spectral_transfer,  # compute_spectral_transfer -> eps_sfs(k) plot
-        ],
-
-        # Stage labels here force a re-compute regardless of cache.
-        force = Set{Symbol}(
-            [
-                # :rollouts,
-                # :budget,
-                # :les_stats,
-                # :sfs,
-                # :stats,
-                # :spectral_transfer,
-            ]
-        ),
-    )
+    # Setup and config (from top of file)
+    train = get_setup()
+    config = get_config()
 
     #######################
     # Reynolds sweep
@@ -250,8 +259,7 @@ function main()
     # rather than a single anecdote. Each Re mirrors train's ν, n_les, Δ exactly;
     # only the flow differs. setup_taylorgreen gives each Re its own outdir
     # (`tgv_<train>_Re=<Re>_n=<n>`), so artifacts and per-Re plots never collide.
-    Re_targets = [1600, 4000, 8000]
-    tgvs = map(Re_targets) do Re_target
+    tgvs = map(config.Re_targets) do Re_target
         # For local setups plotdir lives inside outdir; for Snellius outdir is on
         # the cluster so we root plotdir under train.plotdir's parent instead.
         tgv_name = "tgv_$(train.name)_Re=$(Re_target)_n=$(train.n_dns)"
@@ -277,7 +285,7 @@ function main()
     # e.g. when the forced sfs_stats are only on the cluster).
     S.plot_dissipation_vs_re(
         tgvs, [:ref; config.models];
-        train_anchor = (; Re = 7000, outdir = train.outdir),
+        train_anchor = (; Re = config.Re_ref, outdir = train.outdir),
     )
 
     @info "Done with Reynolds sweep."
