@@ -45,8 +45,10 @@ get_config() = (;
         :tbnn,
     ],
 
-    Re_ref = 7000,                   # Reference integral Reynolds number from training dataset
-    Re_targets = [1600, 4000, 8000], # TGV integral Reynolds numbers to test
+    # Nominal (V₀L/ν) integral Reynolds numbers to sweep. The forced-training
+    # anchor's *measured* Re_int is computed from its data, not hard-coded; the
+    # plot likewise uses each TGV's measured Re_int at peak dissipation.
+    Re_targets = [1600, 2300, 4000],
 
     # Focused stage set: the dissipation/transition benchmark plus a-priori
     # generalization metrics. (Q-R, equivariance and field snapshots from
@@ -115,13 +117,11 @@ function run_tgv(train, tgv, config)
         stat = data.statistics_dns[ipk]
         S.tabulate(
             tgv,
-            "DNS resolution at peak dissipation",
+            "DNS statistics at peak dissipation",
             (;
                 t_peak = data.times[ipk],
                 t_star_peak = data.times[ipk] * tgv.V0,
-                eps_peak = diss[ipk],
-                kmax_eta = stat.kmax_eta,
-                Re_tay = stat.Re_tay,
+                stat...,
             ),
         )
     end
@@ -269,8 +269,8 @@ function main()
         outdir = joinpath(dirname(train.outdir), tgv_name) |> mkpath
         tgv = S.setup_taylorgreen(train; Re_target, outdir, plotdir)
 
-        # Run TGV for current Re_target
-        run_tgv(train, tgv, config)
+        # # Run TGV for current Re_target
+        # run_tgv(train, tgv, config)
 
         # Return setup (we need the paths for each Re_target)
         return tgv
@@ -280,12 +280,13 @@ function main()
     # Cross-Reynolds aggregation — the generalization trend
     #######################
     #
-    # Anchor the trend at the forced training regime (integral Re ≈ 7000); its
-    # sfs_stats live under train.outdir (best-effort — skipped if not present,
-    # e.g. when the forced sfs_stats are only on the cluster).
+    # Anchor the trend at the forced training regime: pass the training setup
+    # itself, so the plot reads its measured eval-window-mean Re_int (and its
+    # sfs_stats under train.outdir) directly — best-effort, skipped if those
+    # artifacts are not present (e.g. when the forced data is only on the cluster).
     S.plot_dissipation_vs_re(
         tgvs, [:ref; config.models];
-        train_anchor = (; Re = config.Re_ref, outdir = train.outdir),
+        train_anchor = train,
     )
 
     @info "Done with Reynolds sweep."

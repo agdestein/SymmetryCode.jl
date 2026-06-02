@@ -483,9 +483,18 @@ integral Reynolds number:
 - right: the a-priori relative SFS tensor error, to show that the tensor
   *structure* stays accurate even where the dissipation *magnitude* drifts.
 
-`train_anchor`, if given as `(; Re, outdir)`, overlays the forced training
-regime's ratios/errors (loaded from `outdir`'s `sfs_stats`) as star markers at
-`Re` — the point the trends should extrapolate toward. Missing artifacts are
+The Reynolds number on the axis is the *measured* integral-scale `Re_int` from
+[`turbulence_statistics`](@ref), computed identically for the test flows and
+the anchor so they share one axis. Each non-stationary TGV setup is summarized
+by its **peak-dissipation** instant (the most turbulent state, where ε is
+well-defined — `Re_int = u'⁴/(εν)` diverges in the laminar/decay phases — and
+which dominates the SFS dissipation the ratio measures), read from that
+setup's `data.jld2`.
+
+`train_anchor`, if given, is the forced *training setup*; its **eval-window
+mean** `Re_int` (the stationary value) positions the star markers overlaying
+the training regime's ratios/errors (from `train_anchor.outdir`'s `sfs_stats`)
+— the point the trends should extrapolate toward. Missing artifacts are
 skipped with a warning so the plot still renders from whatever is present.
 """
 function plot_dissipation_vs_re(
@@ -509,13 +518,26 @@ function plot_dissipation_vs_re(
         end
     end
 
-    fig = Figure(; size = (820, 360))
-    ax_d = Axis(fig[1, 1]; xlabel = L"\mathrm{Re}", ylabel = "Median SFS dissipation / reference")
-    ax_e = Axis(fig[1, 2]; xlabel = L"\mathrm{Re}", ylabel = "A-priori relative SFS error")
+    # Measured integral Reynolds number per flow (one definition for both the
+    # axis points and the anchor). The TGV is non-stationary, so each setup is
+    # summarized by its peak-dissipation instant; loading the (large) data.jld2
+    # is acceptable since the sweep plot is produced once.
+    peak_re_int(outdir) = let
+        d = load_object("$(outdir)/data.jld2")
+        re = argmax(s -> s.diss, d.statistics_dns).Re_int
+        d = nothing
+        GC.gc()
+        re
+    end
 
-    order = sortperm([s.Re_target for s in setups])
+    fig = Figure(; size = (820, 360))
+    ax_d = Axis(fig[1, 1]; xlabel = "Integral Reynolds number", ylabel = "Median SFS dissipation / reference")
+    ax_e = Axis(fig[1, 2]; xlabel = "Integral Reynolds number", ylabel = "A-priori relative SFS error")
+
+    re_all = [peak_re_int(s.outdir) for s in setups]
+    order = sortperm(re_all)
     sorted = setups[order]
-    res = [s.Re_target for s in sorted]
+    res = re_all[order]
     for k in plot_keys
         m = [load_metrics(s.outdir, k) for s in sorted]
         keep = .!isnothing.(m)
@@ -525,15 +547,22 @@ function plot_dissipation_vs_re(
     end
 
     # Forced-training anchor: the regime the learned closures were fit to, drawn
-    # as black stars (one legend entry) the per-model trends should extrapolate
-    # toward. One star per model, all at `train_anchor.Re`.
+    # as star markers (one shared legend entry) colored to match each model — the
+    # point the per-model trends should extrapolate toward. All stars sit at the
+    # forced case's eval-window mean Re_int (its stationary integral Reynolds
+    # number), the like-for-like counterpart of the TGV peak Re_int.
     if !isnothing(train_anchor)
         anchor = filter(!isnothing, [load_metrics(train_anchor.outdir, k) for k in plot_keys])
         if !isempty(anchor)
-            re = fill(train_anchor.Re, length(anchor))
-            label = "Training (Re=$(round(Int, train_anchor.Re)))"
-            scatter!(ax_d, re, [x.ratio for x in anchor]; marker = :star5, markersize = 14, color = :black, label)
-            scatter!(ax_e, re, [x.relerr for x in anchor]; marker = :star5, markersize = 14, color = :black)
+            d = load_object("$(train_anchor.outdir)/data.jld2")
+            anchor_re = mean(s -> s.Re_int, d.statistics_dns[data_ranges(train_anchor).eval])
+            d = nothing
+            GC.gc()
+            re = fill(anchor_re, length(anchor))
+            label = "Training (Re=$(round(Int, anchor_re)))"
+            color = Makie.wong_colors()[1:length(anchor)]
+            scatter!(ax_d, re, [x.ratio for x in anchor]; marker = :star5, markersize = 14, color, label)
+            scatter!(ax_e, re, [x.relerr for x in anchor]; marker = :star5, markersize = 14, color)
         end
     end
 
