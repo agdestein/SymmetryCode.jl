@@ -6,12 +6,8 @@ using CairoMakie
 using CUDA, cuDNN
 using JLD2
 using Statistics: mean
-using WGLMakie
 
 import SymmetryCode as S
-
-# Warmup plot
-lines([1, 2, 3])
 
 # Second experiment: apply the closures trained on forced turbulence (by
 # `run-les.jl`) — *unchanged* — to a decaying Taylor-Green vortex, swept over a

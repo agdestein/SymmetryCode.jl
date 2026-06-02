@@ -6,12 +6,8 @@ using CairoMakie
 using CUDA, cuDNN
 using JLD2
 using Statistics: mean
-using WGLMakie
 
 import SymmetryCode as S
-
-# Warmup plot
-lines([1, 2, 3])
 
 # Script-specific table file. create-data.jl and run-les.jl share a setup (hence
 # a plotdir), so each writes its summary tables to its own file to avoid one
