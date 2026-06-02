@@ -884,14 +884,16 @@ function convectiondiffusion!(du, u, grid, cache; visc)
 end
 
 "Pre-allocate temporary arrays and RFFT plan for time stepping."
-getcache(grid) = (;
-    ustart = vectorfield(grid),
-    du = vectorfield(grid),
-    σ = tensorfield(grid),
-    vi_vj = spacescalarfield(grid),
-    v = spacevectorfield(grid),
-    plan = getplan(grid),
-)
+function getcache(grid)
+    ustart = vectorfield(grid)
+    du = vectorfield(grid)
+    σ = tensorfield(grid)
+    v = spacevectorfield(grid)
+    vi_vj = spacescalarfield(grid)
+    # plan = getplan(grid) # This allocates one unnecessary scalar field
+    plan = plan_rfft(vi_vj)
+    return (; ustart, du, σ, vi_vj, v, plan)
+end
 
 "Perform time step using Wray's third-order scheme."
 function wray3!(f!, u, Δt, grid, cache; args...)
