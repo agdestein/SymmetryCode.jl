@@ -46,18 +46,22 @@ function equivariant_net(setup, nchan; synthesis = true)
     # Bases mapping the compact learnables to a full weight block. The closed
     # form (default) is bit-exactly equivariant; the eigenbasis is the general
     # fallback. Both have identical shapes/orderings, so `project_*` is shared.
-    s_lift, s_mid, s_sink = if synthesis
-        (; s_lift, s_mid, s_sink) = get_weight_synthesis(D)
-        s_lift, s_mid, s_sink
+    raw_lift, raw_mid, raw_sink = if synthesis
+        syn = get_weight_synthesis(D)
+        syn.s_lift, syn.s_mid, syn.s_sink
     else
         (; r_lift, r_mid, r_sink) = get_weight_projectors(D)
         eigen(r_lift / nreg; sortby = -).vectors[:, 1:nten],
             eigen(r_mid / nreg; sortby = -).vectors[:, 1:nreg],
             eigen(r_sink / nreg; sortby = -).vectors[:, 1:nten]
     end
-    s_lift = dev(T.(s_lift))
-    s_mid = dev(T.(s_mid))
-    s_sink = dev(T.(s_sink))
+    # Assign each captured name exactly once. `project_*` below capture
+    # s_lift/s_mid/s_sink; any second assignment of those names (the raw → dev
+    # step, or a `(; s_lift, …) =` destructure inside the branch — an `if` opens
+    # no scope) would box them as Core.Box and make the closures type-unstable.
+    s_lift = dev(T.(raw_lift))
+    s_mid = dev(T.(raw_mid))
+    s_sink = dev(T.(raw_sink))
     # Pointwise: kernel = 1 in every spatial dim. The Conv primitive is used
     # for the weight layout that the group projection needs; the spatial
     # mixing happens upstream (the input is the velocity gradient).
