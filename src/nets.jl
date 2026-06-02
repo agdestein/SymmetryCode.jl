@@ -67,6 +67,12 @@ function pointwise_apply(x, weight, bias, σ, D)
     w = reshape(weight, :, c_out)                       # (c_in, c_out); kernel dims are 1
     c_in = size(w, 1)
     X = reshape(x, prod(sp), c_in, batch)               # (S, c_in, batch)
+    # `batched_mul` needs a contiguous (strided-gemm-able) array. A non-dense
+    # input — e.g. the TBNN loss feeds a `selectdim` view of the invariants —
+    # reshapes to a lazy wrapper that falls back to scalar GPU indexing, so
+    # densify it. Contiguous inputs (equi/conv batches) reshape to a dense
+    # array and skip the copy.
+    X isa DenseArray || (X = copy(X))
     # batch-broadcast the (c_in, c_out) matrix over the sample axis
     Y = Lux.NNlib.batched_mul(X, reshape(w, c_in, c_out, 1))   # (S, c_out, batch)
     bias === nothing || (Y = Y .+ reshape(bias, 1, c_out, 1))
