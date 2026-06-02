@@ -256,15 +256,20 @@ function main()
     # (`tgv_<train>_Re=<Re>_n=<n>`), so artifacts and per-Re plots never collide.
     Re_targets = [1600, 4000, 8000]
     tgvs = map(Re_targets) do Re_target
-        tgv = S.setup_taylorgreen(train; Re_target)
-        # # On Snellius, keep the large 810³ `data.jld2` on project storage
-        # # (per-Re path so the sweep points don't overwrite each other):
-        # tgv = S.setup_taylorgreen(
-        #     train; Re_target,
-        #     outdir = "/projects/prjs1757/SymmetryOutput/tgv_visc=$(train.visc)_Re=$(Re_target)_n=$(train.n_dns)" |> mkpath,
-        # )
+        # For local setups plotdir lives inside outdir; for Snellius outdir is on
+        # the cluster so we root plotdir under train.plotdir's parent instead.
+        tgv_name = "tgv_$(train.name)_Re=$(Re_target)_n=$(train.n_dns)"
+        plotroot = dirname(train.plotdir) == train.outdir ?
+            dirname(train.outdir) : dirname(train.plotdir)
+        plotdir = joinpath(plotroot, tgv_name, "plots") |> mkpath
+        outdir = joinpath(dirname(train.outdir), tgv_name) |> mkpath
+        tgv = S.setup_taylorgreen(train; Re_target, outdir, plotdir)
+
+        # Run TGV for current Re_target
         run_tgv(train, tgv, config)
-        tgv
+
+        # Return setup (we need the paths for each Re_target)
+        return tgv
     end
 
     #######################
