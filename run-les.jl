@@ -187,6 +187,11 @@ function main()
             end
         )
         tabulate(setup, "Training wall-time (seconds) per learned model", timings; digits = 1)
+        tabulate(
+            setup,
+            "Trainable parameters per learned model (equi counted pre-synthesis)",
+            S.learned_paramcounts(setup, config.models),
+        )
         S.plot_training(setup, config.models)
     end
 

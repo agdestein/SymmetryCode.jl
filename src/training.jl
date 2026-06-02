@@ -224,21 +224,60 @@ function create_model(setup, mode; key, buildnet, makeloss, makeloaders, wrap)
     return chain, (; d.losses_train, d.losses_valid, d.timing)
 end
 
+"""
+Construct the untrained Lux network and initial parameters/states for a
+learned closure `key` (`:tbnn`, `:equi`, or `:conv`) — the `net_stuff` that
+`create_model` trains and then `wrap`s. Factored out of the `create_*`
+wrappers so the parameter-count report ([`learned_paramcounts`](@ref)) can
+build the same net without training it.
+
+For `:equi` the returned `ps` is the *compact, pre-synthesis* basis;
+`ns.project` is the synthesis operator that expands it into the full (tied)
+weights Lux actually operates on. For `:tbnn`/`:conv` there is no synthesis,
+so `ps` is the full Lux chain and `ns.project = identity`.
+"""
+function build_net_stuff(setup, key)
+    if key === :tbnn
+        net = tbnn_net(setup, setup.tbnn_setup.layers)
+        net |> display
+        flush(stdout)
+        f = setup.train_setup.precision === Float32 ? f32 : f64
+        ps, st =
+            Lux.setup(Xoshiro(setup.train_setup.seed), net) |> f |>
+            adapt(setup.backend)
+        return (; net, ps, st, project = identity)
+    elseif key === :equi
+        return equivariant_net(setup, setup.equi_setup.layers)
+    elseif key === :conv
+        return mlp(setup, setup.conv_setup.layers; setup.conv_setup.same_as_equi)
+    else
+        error("not a learned closure: $(key)")
+    end
+end
+
+"""
+Number of trainable parameters per learned closure named in `keys`
+(non-learned keys are ignored, original order preserved), as a NamedTuple
+suitable for [`tabulate`](@ref).
+
+For `:conv`/`:tbnn` this is the parameter count of the Lux chain. For `:equi`
+it is the count of the *compact, pre-synthesis* basis — the `ps` the optimiser
+actually updates — which is smaller than the full tied weights Lux reports,
+because the synthesis operator (`project`) expands those learnables into the
+equivariant weight block.
+"""
+function learned_paramcounts(setup, keys)
+    learned = filter(in((:tbnn, :equi, :conv)), keys)
+    return NamedTuple(
+        k => Lux.parameterlength(build_net_stuff(setup, k).ps) for k in learned
+    )
+end
+
 function create_tbnn(setup, mode = :resume)
-    precision = setup.train_setup.precision
     return create_model(
         setup, mode;
         key = :tbnn,
-        buildnet = function ()
-            net = tbnn_net(setup, setup.tbnn_setup.layers)
-            net |> display
-            flush(stdout)
-            f = precision === Float32 ? f32 : f64
-            ps, st =
-                Lux.setup(Xoshiro(setup.train_setup.seed), net) |> f |>
-                adapt(setup.backend)
-            return (; net, ps, st, project = identity)
-        end,
+        buildnet = () -> build_net_stuff(setup, :tbnn),
         makeloss = (ns, g) -> create_loss_tbnn(g),
         makeloaders = data -> create_dataloader_tbnn(
             setup, data;
@@ -254,7 +293,7 @@ function create_equi(setup, mode = :resume)
     return create_model(
         setup, mode;
         key = :equi,
-        buildnet = () -> equivariant_net(setup, setup.equi_setup.layers),
+        buildnet = () -> build_net_stuff(setup, :equi),
         makeloss = (ns, g) -> create_loss(ns.project),
         makeloaders = data -> create_dataloader(
             setup, data;
@@ -270,8 +309,7 @@ function create_conv(setup, mode = :resume)
     return create_model(
         setup, mode;
         key = :conv,
-        buildnet = () ->
-        mlp(setup, setup.conv_setup.layers; setup.conv_setup.same_as_equi),
+        buildnet = () -> build_net_stuff(setup, :conv),
         makeloss = (ns, g) -> create_loss(ns.project),
         makeloaders = data -> create_dataloader(
             setup, data;
