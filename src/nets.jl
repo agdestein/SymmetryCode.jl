@@ -2,10 +2,18 @@
 #
 # All three nets (`equivariant_net`, `mlp`, `tbnn_net`) are *pointwise* MLPs
 # in physical space: they predict τ at each grid point from local features,
-# with no spatial mixing. They are built via Lux's `Conv` primitive with a
-# 1×1 (2D) or 1×1×1 (3D) kernel — not for spatial convolution, but so all
-# three share the same layer-shape convention and `equivariant_net` can use
-# the Conv weight layout that its group-weight-tying requires.
+# with no spatial mixing. They are built from [`PointwiseConv`](@ref), a layer
+# that keeps Lux's 1×1(×1) `Conv` weight layout — `(1,…,1, c_in, c_out)` — so
+# `equivariant_net`'s group-weight-tying (`project_*`) is unchanged, but applies
+# it as a batched channel matmul instead of a spatial convolution.
+#
+# Why not `Lux.Conv`: a 1×1 conv on the GPU routes through cuDNN, whose
+# algorithm-discovery ("Find") path provisionally grabs ~`free_memory()/10`
+# of scratch *per conv op* (`cuDNN.cudnnFindConvolutionAlgorithmWorkspaceSize`).
+# On a near-empty large GPU (e.g. a 93 GiB H100, ~9 GiB/op) those reservations
+# pile up and OOM, even though a pointwise conv needs ~zero workspace. A plain
+# `batched_mul` is mathematically identical (verified bit-for-bit) and never
+# touches cuDNN, so memory no longer scales with the device size.
 #
 # - `equivariant_net` is a *group* convolution over the symmetry group of
 #   the cube (dihedral D₄ in 2D, octahedral O_h in 3D); each layer holds
@@ -14,6 +22,57 @@
 #   weight projection.
 # - `tbnn_net` predicts coefficients of the trace-free tensor basis from
 #   the gradient invariants (Pope-style TBNN).
+
+"""
+Pointwise (1×1×…) channel mixing — a drop-in replacement for
+`Conv(ntuple(Returns(1), D), c_in => c_out, σ; use_bias)` that holds the same
+parameters (`weight` of shape `(1,…,1, c_in, c_out)`, `bias` of shape
+`(c_out,)`) but applies them with [`NNlib.batched_mul`](@ref) over the channel
+axis rather than a cuDNN spatial convolution. See the file header for why.
+
+Input/output are the usual `(spatial…, channel, batch)` layout. The
+all-ones kernel dims are carried only so `equivariant_net`'s `project_*` can
+build weights in the familiar Conv shape without change.
+"""
+struct PointwiseConv{F} <: Lux.AbstractLuxLayer
+    c_in::Int
+    c_out::Int
+    D::Int
+    σ::F
+    use_bias::Bool
+end
+PointwiseConv(D, ch::Pair, σ = identity; use_bias = true) =
+    PointwiseConv(first(ch), last(ch), D, σ, use_bias)
+
+function Lux.initialparameters(rng::AbstractRNG, l::PointwiseConv)
+    # Same shapes/initialisers as Lux.Conv, so `Lux.setup` (used by `mlp` /
+    # `tbnn_net`) reproduces the previous init bit-for-bit under a fixed seed.
+    kern = ntuple(Returns(1), l.D)
+    weight = glorot_uniform(rng, kern..., l.c_in, l.c_out)
+    return l.use_bias ? (; weight, bias = zeros(Float32, l.c_out)) : (; weight)
+end
+Lux.initialstates(::AbstractRNG, ::PointwiseConv) = (;)
+Lux.parameterlength(l::PointwiseConv) = l.c_in * l.c_out + (l.use_bias ? l.c_out : 0)
+
+function (l::PointwiseConv)(x, ps, st)
+    bias = l.use_bias ? ps.bias : nothing
+    return pointwise_apply(x, ps.weight, bias, l.σ, l.D), st
+end
+
+"Apply a `(1,…,1, c_in, c_out)` pointwise weight to `(spatial…, c_in, batch)`."
+function pointwise_apply(x, weight, bias, σ, D)
+    sp = size(x)[1:D]
+    batch = size(x)[end]
+    c_out = size(weight)[end]
+    w = reshape(weight, :, c_out)                       # (c_in, c_out); kernel dims are 1
+    c_in = size(w, 1)
+    X = reshape(x, prod(sp), c_in, batch)               # (S, c_in, batch)
+    # batch-broadcast the (c_in, c_out) matrix over the sample axis
+    Y = Lux.NNlib.batched_mul(X, reshape(w, c_in, c_out, 1))   # (S, c_out, batch)
+    bias === nothing || (Y = Y .+ reshape(bias, 1, c_out, 1))
+    Y = σ.(Y)
+    return reshape(Y, sp..., c_out, batch)
+end
 
 """
 Build a group convolution over the symmetry group of the cube — the
@@ -62,9 +121,10 @@ function equivariant_net(setup, nchan; synthesis = true)
     s_lift = dev(T.(raw_lift))
     s_mid = dev(T.(raw_mid))
     s_sink = dev(T.(raw_sink))
-    # Pointwise: kernel = 1 in every spatial dim. The Conv primitive is used
-    # for the weight layout that the group projection needs; the spatial
-    # mixing happens upstream (the input is the velocity gradient).
+    # Pointwise: kernel = 1 in every spatial dim. The 1×1 weight layout is what
+    # the group projection needs; the spatial mixing happens upstream (the
+    # input is the velocity gradient). `kern` shapes the projected weights;
+    # `PointwiseConv` applies them as a matmul (see file header).
     kern = ntuple(Returns(1), D)
     function project_lift(ps)
         w, b = ps.weight, ps.bias
@@ -106,14 +166,14 @@ function equivariant_net(setup, nchan; synthesis = true)
         )
     end
     net = Chain(;
-        lift = Conv(kern, nten => nreg * nchan[1], gelu),
+        lift = PointwiseConv(D, nten => nreg * nchan[1], gelu),
         map(
             i ->
             Symbol(:mid_, i) =>
-                Conv(kern, nreg * nchan[i] => nreg * nchan[i + 1], gelu),
+                PointwiseConv(D, nreg * nchan[i] => nreg * nchan[i + 1], gelu),
             1:(length(nchan) - 1),
         )...,
-        sink = Conv(kern, nreg * nchan[end] => nten; use_bias = false),
+        sink = PointwiseConv(D, nreg * nchan[end] => nten; use_bias = false),
         symm = WrappedFunction() do σ
             # Symmetrize *and* remove the trace, so the prediction lives in
             # the same deviatoric space as the (trace-free) DNS target.
@@ -178,19 +238,18 @@ function mlp(setup, nchan; same_as_equi)
     else
         1
     end
-    # Pointwise MLP via Lux's Conv primitive (1×1 kernel) so the layer
+    # Pointwise MLP via `PointwiseConv` (1×1 channel matmul) so the layer
     # shape matches equivariant_net exactly — only the weight projection
     # is missing here.
-    kern = ntuple(Returns(1), D)
     net = Chain(;
-        lift = Conv(kern, nt_nonsym => nreg * nchan[1], gelu),
+        lift = PointwiseConv(D, nt_nonsym => nreg * nchan[1], gelu),
         map(
             i ->
             Symbol(:mid_, i) =>
-                Conv(kern, nreg * nchan[i] => nreg * nchan[i + 1], gelu),
+                PointwiseConv(D, nreg * nchan[i] => nreg * nchan[i + 1], gelu),
             1:(length(nchan) - 1),
         )...,
-        sink = Conv(kern, nreg * nchan[end] => nt; use_bias = false),
+        sink = PointwiseConv(D, nreg * nchan[end] => nt; use_bias = false),
         symm = WrappedFunction() do σ
             # Remove the trace so the prediction lives in the same
             # deviatoric space as the (trace-free) DNS target.
@@ -398,15 +457,15 @@ the (bias-free) output layer maps `nchan[end]` to the basis coefficients.
 """
 function tbnn_net(setup, nchan)
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-    # Pointwise MLP via 1×1 Conv, same convention as `equivariant_net` / `mlp`.
-    kern = ntuple(Returns(1), setup.D)
+    # Pointwise MLP via `PointwiseConv`, same convention as `equivariant_net` / `mlp`.
+    D = setup.D
     return Chain(
-        Conv(kern, ninvariant(g) => nchan[1], gelu),
+        PointwiseConv(D, ninvariant(g) => nchan[1], gelu),
         map(
-            i -> Conv(kern, nchan[i] => nchan[i + 1], gelu),
+            i -> PointwiseConv(D, nchan[i] => nchan[i + 1], gelu),
             1:(length(nchan) - 1),
         )...,
-        Conv(kern, nchan[end] => nbasis(g); use_bias = false),
+        PointwiseConv(D, nchan[end] => nbasis(g); use_bias = false),
     )
 end
 
