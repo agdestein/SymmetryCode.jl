@@ -501,9 +501,15 @@ function plot_dissipation_vs_re(
         setups, keys;
         train_anchor = nothing,
         plotdir = last(setups).plotdir,
+        Re_key = :Re_int,
     )
     labels = getlabels()
     plot_keys = filter(k -> k ∉ (:ref, :nomo), collect(keys))
+
+    Re_labels = (;
+        Re_int = "Integral Reynolds number",
+        Re_tay = "Taylor Reynolds number",
+    )
 
     # Per-setup loader: (ratio, relerr) for one model key, or `nothing` if its
     # stats (or the :ref baseline) are missing in that setup's outdir.
@@ -524,15 +530,15 @@ function plot_dissipation_vs_re(
     # is acceptable since the sweep plot is produced once.
     peak_re_int(outdir) = let
         d = load_object("$(outdir)/data.jld2")
-        re = argmax(s -> s.diss, d.statistics_dns).Re_int
+        re = argmax(s -> s.diss, d.statistics_dns)[Re_key]
         d = nothing
         GC.gc()
         re
     end
 
     fig = Figure(; size = (820, 360))
-    ax_d = Axis(fig[1, 1]; xlabel = "Integral Reynolds number", ylabel = "Median SFS dissipation / reference")
-    ax_e = Axis(fig[1, 2]; xlabel = "Integral Reynolds number", ylabel = "A-priori relative SFS error")
+    ax_d = Axis(fig[1, 1]; xlabel = Re_labels[Re_key], ylabel = "Median SFS dissipation / reference")
+    ax_e = Axis(fig[1, 2]; xlabel = Re_labels[Re_key], ylabel = "A-priori relative SFS error")
 
     re_all = [peak_re_int(s.outdir) for s in setups]
     order = sortperm(re_all)
@@ -555,7 +561,7 @@ function plot_dissipation_vs_re(
         anchor = filter(!isnothing, [load_metrics(train_anchor.outdir, k) for k in plot_keys])
         if !isempty(anchor)
             d = load_object("$(train_anchor.outdir)/data.jld2")
-            anchor_re = mean(s -> s.Re_int, d.statistics_dns[data_ranges(train_anchor).eval])
+            anchor_re = mean(s -> s[Re_key], d.statistics_dns[data_ranges(train_anchor).eval])
             d = nothing
             GC.gc()
             re = fill(anchor_re, length(anchor))
@@ -570,11 +576,12 @@ function plot_dissipation_vs_re(
     Legend(
         fig[0, :], ax_d;
         tellwidth = false, tellheight = true, framevisible = false,
-        horizontal = true, nbanks = 2,
+        horizontal = true,
+        nbanks = 7,
     )
     rowgap!(fig.layout, 5)
 
-    file = "$(plotdir)/dissipation-vs-re.pdf"
+    file = "$(plotdir)/dissipation-vs-$(Re_key).pdf"
     @info "Saving Taylor-Green Reynolds-sweep plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)

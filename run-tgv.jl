@@ -287,6 +287,12 @@ function main()
     S.plot_dissipation_vs_re(
         tgvs, [:ref; config.models];
         train_anchor = train,
+        Re_key = :Re_int,
+    )
+    S.plot_dissipation_vs_re(
+        tgvs, [:ref; config.models];
+        train_anchor = train,
+        Re_key = :Re_tay,
     )
 
     @info "Done with Reynolds sweep."
