@@ -705,7 +705,45 @@ function plot_velocities(setup, comp, modelkeys)
     return fig
 end
 
-function plot_qr(setup, modelkeys)
+"""
+    gaussian_blur(A, σ)
+
+Separable Gaussian blur of matrix `A` with standard deviation `σ` measured in
+**grid cells**, using clamped (replicate) boundaries so the decaying tails of a
+density are not pulled toward zero at the grid edge. Returns `A` unchanged when
+`σ` is `nothing` or non-positive.
+
+Blurring a precomputed kernel density estimate is equivalent to having used a
+wider KDE bandwidth (Gaussian ∗ Gaussian = Gaussian), and is used here only to
+calm the noisy outer isocontours in `plot_qr`. Keep `σ` small so the sharp
+near-origin / Vieillefosse-tail structure is not washed out.
+"""
+function gaussian_blur(A::AbstractMatrix, σ)
+    (σ === nothing || σ <= 0) && return A
+    rad = ceil(Int, 3σ)
+    k = [exp(-(t^2) / (2σ^2)) for t in (-rad):rad]
+    k ./= sum(k)
+    n1, n2 = size(A)
+    B = similar(A) # blur along dim 1
+    for j in 1:n2, i in 1:n1
+        acc = zero(eltype(A))
+        for (t, w) in zip((-rad):rad, k)
+            acc += w * A[clamp(i + t, 1, n1), j]
+        end
+        B[i, j] = acc
+    end
+    C = similar(A) # blur along dim 2
+    for j in 1:n2, i in 1:n1
+        acc = zero(eltype(A))
+        for (t, w) in zip((-rad):rad, k)
+            acc += w * B[i, clamp(j + t, 1, n2)]
+        end
+        C[i, j] = acc
+    end
+    return C
+end
+
+function plot_qr(setup, modelkeys; smooth_σ = nothing)
     (; name) = setup
     qr = map(key -> key => load_object("$(setup.outdir)/qr_$(key).jld2"), modelkeys)
     qr = NamedTuple(qr)
@@ -730,6 +768,9 @@ function plot_qr(setup, modelkeys)
     )
 
     plotkeys = filter(!=(:ref), modelkeys)
+
+    # Reference density is the same in every panel — blur it once.
+    refdens = max.(gaussian_blur(qr.ref.density, smooth_σ), 1.0e-20)
 
     for (k, key) in plotkeys |> enumerate
         title = labels[key]
@@ -763,7 +804,7 @@ function plot_qr(setup, modelkeys)
             ax,
             qr.ref.x,
             qr.ref.y,
-            max.(qr.ref.density, 1.0e-20);
+            refdens;
             levels = logrange(ran..., ncat),
             color = colors.ref,
         )
@@ -771,7 +812,7 @@ function plot_qr(setup, modelkeys)
             ax,
             qr[key].x,
             qr[key].y,
-            max.(qr[key].density, 1.0e-20);
+            max.(gaussian_blur(qr[key].density, smooth_σ), 1.0e-20);
             levels = logrange(ran..., ncat),
             color = colors[key],
         )

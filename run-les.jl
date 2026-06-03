@@ -44,6 +44,10 @@ get_config() = (;
     # retraining; :resume continues from a checkpoint; :scratch retrains).
     train_mode = :skip,
 
+    # Smoothing parameter for q-r plot
+    # smooth_σ = nothing,
+    smooth_σ = 2,
+
     # Pipeline stages to execute. Cached stages skip per-key when their
     # artifact already exists under setup.outdir — see :force for invalidation.
     experiments = [
@@ -318,7 +322,7 @@ function main()
     if :qr in config.experiments
         qr_keys = [:ref; config.models]
         S.compute_qr(setup, qr_keys; force = :qr in config.force)
-        S.plot_qr(setup, qr_keys)
+        S.plot_qr(setup, qr_keys; config.smooth_σ)
     end
 
     @info "Done."
