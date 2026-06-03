@@ -123,8 +123,8 @@ setup_turbulator_medium() = getsetup(;
     Δ_factor = 3,
     visc = 5.0e-4,
     cfl = 0.35,
-    warmup = (; totalenergy = 0.2, tstop = 20.0, seed = 0),
-    datagen = (; nstep = 50, tstop = 10.0, n_train = 35),
+    warmup = (; totalenergy = 0.2, tstop = 10.0, seed = 0),
+    datagen = (; nstep = 100, tstop = 15.0, n_train = 50),
     conv_setup = (; layers = [12, 24, 64], same_as_equi = false), # 2_416 params
     equi_setup = (; layers = [4, 4, 8]),                          # 2_428 params (pre-synthesis)
     tbnn_setup = (; layers = [12, 24, 64]),                       # 2_432 params

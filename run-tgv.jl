@@ -269,8 +269,8 @@ function main()
         outdir = joinpath(dirname(train.outdir), tgv_name) |> mkpath
         tgv = S.setup_taylorgreen(train; Re_target, outdir, plotdir)
 
-        # # Run TGV for current Re_target
-        # run_tgv(train, tgv, config)
+        # Run TGV for current Re_target
+        run_tgv(train, tgv, config)
 
         # Return setup (we need the paths for each Re_target)
         return tgv
