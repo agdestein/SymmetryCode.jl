@@ -48,7 +48,8 @@ get_config() = (;
     # Nominal (V₀L/ν) integral Reynolds numbers to sweep. The forced-training
     # anchor's *measured* Re_int is computed from its data, not hard-coded; the
     # plot likewise uses each TGV's measured Re_int at peak dissipation.
-    Re_targets = [1600, 2300, 4000],
+    # Re_targets = [1600, 2300, 4000],
+    Re_targets = [3000, 6000, 9000],
 
     # Focused stage set: the dissipation/transition benchmark plus a-priori
     # generalization metrics. (Q-R, equivariance and field snapshots from
