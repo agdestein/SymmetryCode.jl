@@ -713,6 +713,87 @@ function plot_velocities(setup, comp, modelkeys)
 end
 
 """
+    plot_field_evolution_tgv(setup; field = :vortz, ntime = 5, zslice = 1)
+
+Time-evolution montage of the **filtered DNS** field for the decaying Taylor-Green
+test: a row of 2D sections sampled from the initial condition, through transition
+into turbulence (anchored on the peak-dissipation snapshot), and into the decay.
+Only the filtered velocity is stored (`data.inputs`, spectral `ubar`), so that is
+what is shown — either a velocity component (`field ∈ (:x, :y, :z)`) or the
+out-of-plane vorticity `ω_z = ∂_x u_y - ∂_y u_x` (`field = :vortz`, the default;
+it sharply marks the roll-up into turbulence). In 3D a `z = zslice` section is
+taken. A single shared, zero-centered color range across panels makes the decay
+of the field amplitude legible. Mirrors `plot_velocities` in conventions.
+"""
+function plot_field_evolution_tgv(setup; field = :vortz, ntime = 5, zslice = 1)
+    (; D, l, n_les, backend, V0) = setup
+
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    # Dimensionless convective time t* = t·V₀/L (L = 1), matching the rest of the
+    # TGV pipeline (e.g. `plot_dissipation_tgv`) and comparable across the Re sweep.
+    times = (data.times .- data.times[1]) .* V0
+    nt = length(times)
+
+    # Sample the IC, the peak-dissipation snapshot (transition into turbulence),
+    # and evenly spaced snapshots through the post-peak decay.
+    diss = [s.diss for s in data.statistics_dns]
+    ipk = argmax(diss)
+    inds = round.(Int, [1; ipk; range(ipk, nt; length = ntime - 1)[2:end]])
+    inds = sort(unique(clamp.(inds, 1, nt)))
+
+    g = Grid{D}(; l, n = n_les, backend)
+    ubar = vectorfield(g)
+    ω = scalarfield(g)
+    f_space = spacescalarfield(g)
+    plan = plan_rfft(f_space)
+
+    # First pass: build the physical-space sections and a shared symmetric range.
+    slices = map(inds) do t
+        for c in keys(ubar)
+            copyto!(ubar[c], data.inputs[t][c])
+        end
+        spec = if field === :vortz
+            apply!(vorticity_z!, g, (ω, ubar, g))
+            ω
+        else
+            ubar[field]
+        end
+        apply!(twothirds!, g, (spec, g))
+        to_phys!(f_space, spec, plan, g)
+        sl = D == 2 ? f_space[:, :] : f_space[:, :, clamp(zslice, 1, n_les)]
+        return Array(sl)
+    end
+    amp = maximum(s -> maximum(abs, s), slices)
+    colorrange = (-amp, amp)
+
+    fig = Figure(; size = (180 * length(inds) + 80, 230))
+    local hm
+    for (i, t) in enumerate(inds)
+        ax = Axis(
+            fig[1, i];
+            # title = L"t^* = %$(round(times[t]; sigdigits = 2))",
+            title = "t = $(round(times[t]; sigdigits = 2))",
+            xticksvisible = false,
+            xticklabelsvisible = false,
+            yticksvisible = false,
+            yticklabelsvisible = false,
+            aspect = DataAspect(),
+        )
+        hm = image!(ax, slices[i]; colormap = :RdBu, colorrange, interpolate = false)
+    end
+    # label = field === :vortz ? L"\bar{\omega}_z" : "ubar_$(field)"
+    label = field === :vortz ? "Vorticity" : "Velocity"
+    Colorbar(fig[1, length(inds) + 1], hm; label)
+
+    rowgap!(fig.layout, 10)
+    colgap!(fig.layout, 10)
+
+    save("$(setup.plotdir)/field-evolution-$(field).png", fig; backend = CairoMakie)
+
+    return fig
+end
+
+"""
     gaussian_blur(A, σ)
 
 Separable Gaussian blur of matrix `A` with standard deviation `σ` measured in

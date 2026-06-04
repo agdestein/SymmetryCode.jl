@@ -452,6 +452,20 @@ end
     div[I] = im * kx * u.x[I] + im * ky * u.y[I] + im * kz * u.z[I]
 end
 
+# Out-of-plane vorticity ω_z = ∂_x u_y - ∂_y u_x, in spectral space. Useful for
+# visualizing a z-slice of a 3D field (the in-plane swirl), where it sharply
+# marks the roll-up into turbulence; in 2D it is the full (scalar) vorticity.
+@kernel function vorticity_z!(ω, u, g::Grid{2})
+    I = @index(Global, Cartesian)
+    kx, ky = wavenumber_full(g, I)
+    ω[I] = im * kx * u.y[I] - im * ky * u.x[I]
+end
+@kernel function vorticity_z!(ω, u, g::Grid{3})
+    I = @index(Global, Cartesian)
+    kx, ky, kz = wavenumber_full(g, I)
+    ω[I] = im * kx * u.y[I] - im * ky * u.x[I]
+end
+
 @kernel function tensordivergence!(div, σ, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = wavenumber_full(g, I)

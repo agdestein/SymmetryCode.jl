@@ -168,6 +168,12 @@ function run_tgv(train, tgv, config)
     # Phase B — aggregation and plotting (reads on-disk artifacts only)
     #######################
 
+    # Time evolution of the (only-stored) filtered DNS field: a 2D-section
+    # montage from IC through transition (peak dissipation) into the decay.
+    if :field_evolution in config.experiments
+        S.plot_field_evolution_tgv(tgv; field = :vortz)
+    end
+
     if :rollouts in config.experiments
         upostfiles = S.get_upostfiles(tgv)
         timings = NamedTuple(k => load_object(upostfiles[k]).timing for k in config.models)
