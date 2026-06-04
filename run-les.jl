@@ -150,48 +150,51 @@ function main()
     # Phase A — per-model compute loop
     #######################
     #
-    # Build exactly one closure per iteration, run every per-model
-    # artifact-producing experiment for it, then discard so the GPU
-    # footprint at any moment is bounded by a single closure's working set.
-    # Cached stages short-circuit per-key without instantiating the model.
+    # Each closure is built lazily, at most once per key via the memoized
+    # `getmodel` thunk: a stage only invokes it on a cache miss, so cached or
+    # plot-only runs never instantiate the model (no ps-*.jld2 / GPU needed).
+    # The closure goes out of scope at the per-key `clean()`, bounding the GPU
+    # footprint to a single closure's working set.
 
     for key in config.models
         @info "===== compute phase: $(key) ====="
         flush(stderr)
         S.clean()
-        model = S.build_models(setup, [key])[key]
+
+        local built = nothing
+        getmodel() = (built === nothing && (built = S.build_models(setup, [key])[key]); built)
 
         if :rollouts in config.experiments
-            S.solve_les(setup, key, model; force = :rollouts in config.force)
+            S.solve_les(setup, key, getmodel; force = :rollouts in config.force)
         end
         if key != :nomo
             if :sfs in config.experiments
-                S.predict_sfs(setup, key, model; force = :sfs in config.force)
+                S.predict_sfs(setup, key, getmodel; force = :sfs in config.force)
             end
             if :equi_prior in config.experiments
                 S.apriori_equivariance_error(
-                    setup, key, model;
+                    setup, key, getmodel;
                     force = :equi_prior in config.force,
                 )
             end
         end
         if :equi_post in config.experiments
             S.apost_equivariance_error(
-                setup, key, model;
+                setup, key, getmodel;
                 force = :equi_post in config.force,
             )
         end
         if :budget in config.experiments
-            S.compute_budget(setup, key, model; force = :budget in config.force)
+            S.compute_budget(setup, key, getmodel; force = :budget in config.force)
         end
         if :spectral_transfer in config.experiments
             S.compute_spectral_transfer(
-                setup, key, model;
+                setup, key, getmodel;
                 force = :spectral_transfer in config.force,
             )
         end
 
-        model = nothing
+        built = nothing
         S.clean()
     end
 

@@ -55,6 +55,7 @@ get_config() = (;
     # generalization metrics. (Q-R, equivariance and field snapshots from
     # run-les.jl are omitted here but would work the same way against `tgv`.)
     experiments = [
+        :field_evolution,    # plot_field_evolution_tgv -> filtered-DNS ω_z(t) montage
         :rollouts,           # solve_les -> u-post-<key>.jld2
         :budget,             # compute_budget -> budget_<k>.jld2; dissipation(t) benchmark
         :les_stats,          # get_les_statistics -> error-vs-t plot
@@ -131,37 +132,41 @@ function run_tgv(train, tgv, config)
     # Phase A — per-model compute loop
     #######################
     #
-    # Build exactly one closure per iteration from the *training* setup (so the
-    # learned ones load train's ps-*.jld2), run every per-model artifact-
-    # producing experiment for it against the TGV setup, then discard so the GPU
-    # footprint at any moment is bounded by a single closure's working set.
+    # Each closure is built lazily from the *training* setup (so the learned ones
+    # load train's ps-*.jld2), at most once per key via the memoized `getmodel`
+    # thunk: a stage only invokes it on a cache miss, so a plot-only or fully
+    # cached run never builds a model (no ps-*.jld2 / GPU needed). The closure
+    # goes out of scope at the per-key `clean()`, bounding the GPU footprint to a
+    # single closure's working set.
 
     for key in config.models
         @info "===== compute phase: $(key) ====="
         flush(stderr)
-        S.clean()
-        model = S.build_models(train, [key])[key]
+        # S.clean()
+
+        local built = nothing
+        getmodel() = (built === nothing && (built = S.build_models(train, [key])[key]); built)
 
         if :rollouts in config.experiments
-            S.solve_les(tgv, key, model; force = :rollouts in config.force)
+            S.solve_les(tgv, key, getmodel; force = :rollouts in config.force)
         end
         if key != :nomo
             if :sfs in config.experiments
-                S.predict_sfs(tgv, key, model; force = :sfs in config.force)
+                S.predict_sfs(tgv, key, getmodel; force = :sfs in config.force)
             end
         end
         if :budget in config.experiments
-            S.compute_budget(tgv, key, model; force = :budget in config.force)
+            S.compute_budget(tgv, key, getmodel; force = :budget in config.force)
         end
         if :spectral_transfer in config.experiments
             S.compute_spectral_transfer(
-                tgv, key, model;
+                tgv, key, getmodel;
                 force = :spectral_transfer in config.force,
             )
         end
 
-        model = nothing
-        S.clean()
+        built = nothing
+        # S.clean()
     end
 
     #######################

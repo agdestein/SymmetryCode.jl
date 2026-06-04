@@ -47,15 +47,18 @@ get_upostfiles(setup) = map(
 )
 
 """
-Run the LES rollout for a single closure `model` keyed under `key`, starting
-from the first eval-window snapshot and integrating across `data.times[eval]`.
-Persists snapshots and timing to `u-post-<key>.jld2`; returns nothing.
+Run the LES rollout for a single closure keyed under `key`, starting from the
+first eval-window snapshot and integrating across `data.times[eval]`. `getmodel`
+is a zero-arg thunk that builds the closure; it is only invoked on a cache miss,
+so a cached run never instantiates the model. Persists snapshots and timing to
+`u-post-<key>.jld2`; returns nothing.
 """
-function solve_les(setup, key, model; force = false)
+function solve_les(setup, key, getmodel; force = false)
     (; D, l, n_les, backend, visc, cfl, forced) = setup
     grid = Grid{D}(; l, n = n_les, backend)
     file = get_upostfiles(setup)[key]
     skip_if_cached(file; force, label = "LES rollout for $(key)") && return
+    model = getmodel()
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
 

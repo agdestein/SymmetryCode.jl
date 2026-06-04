@@ -3,14 +3,16 @@
 # and Q-R invariant joint distributions.
 
 """
-Predict the SFS stress series for a single closure `model` keyed under `key`
-by applying it to every eval-window filtered-DNS snapshot. Persists the
+Predict the SFS stress series for a single closure keyed under `key` by applying
+it to every eval-window filtered-DNS snapshot. `getmodel` is a zero-arg thunk
+that builds the closure; it is only invoked on a cache miss. Persists the
 resulting `Vector{NamedTuple}` to `sfs_<key>.jld2`; returns nothing.
 """
-function predict_sfs(setup, key, model; force = false)
+function predict_sfs(setup, key, getmodel; force = false)
     (; outdir, D, l, n_les, backend) = setup
     file = "$(outdir)/sfs_$(key).jld2"
     skip_if_cached(file; force, label = "SFS for $(key)") && return
+    model = getmodel()
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
     inputs_eval = data.inputs[data_ranges(setup).eval]
@@ -222,9 +224,10 @@ with `model(R(G))` for every octahedral group element. Persists to
 `equi-errors-prior-<key>.jld2`; load all keys back with
 [`load_equivariance_errors`](@ref) for plotting.
 """
-function apriori_equivariance_error(setup, key, model; force = false)
+function apriori_equivariance_error(setup, key, getmodel; force = false)
     file = "$(setup.outdir)/equi-errors-prior-$(key).jld2"
     return cached(file; force, label = "a-priori equi errors ($(key))") do
+        model = getmodel()
         (; D, l, n_les, backend) = setup
         (; elements, permutations, signs) = group_stuff(D)
         g = Grid{D}(; l, n = n_les, backend)
@@ -344,9 +347,10 @@ and compares against the inverse-rotated reference trajectory. Persists to
 `equi-errors-post-<key>.jld2`; load all keys back with
 [`load_equivariance_errors`](@ref) for plotting.
 """
-function apost_equivariance_error(setup, key, model; force = false, tstop = 1.0e-1)
+function apost_equivariance_error(setup, key, getmodel; force = false, tstop = 1.0e-1)
     file = "$(setup.outdir)/equi-errors-post-$(key).jld2"
     return cached(file; force, label = "a-posteriori equi errors ($(key))") do
+        model = getmodel()
         data = joinpath(setup.outdir, "data.jld2") |> load_object
         ustart = data.inputs[end] |> adapt(setup.backend)
         (; indices) = group_stuff(setup.D)
@@ -390,14 +394,16 @@ For each snapshot, records:
 
 For `key == :ref`, the budget is computed from filtered-DNS state
 (`data.inputs[eval]`) and reference SFS stress (`data.outputs[eval]`);
-no `model` is needed (pass `model = nothing`). For other keys, the
-state comes from `u-post-<key>.jld2` and τ is re-evaluated by `model`
-on that rolled-out state — so the result reflects the *closure during
-integration*, not the a-priori prediction on filtered DNS.
+no closure is needed (the default `getmodel = () -> nothing` is left as is).
+For other keys, the state comes from `u-post-<key>.jld2` and τ is re-evaluated
+by the closure that `getmodel` builds on that rolled-out state — so the result
+reflects the *closure during integration*, not the a-priori prediction on
+filtered DNS. `getmodel` is a zero-arg thunk invoked only on a cache miss (and
+not at all for `:ref`/`:nomo`).
 
 Persists `budget_<key>.jld2 :: (; t, ke, eps_visc, eps_sfs)`.
 """
-function compute_budget(setup, key, model = nothing; force = false)
+function compute_budget(setup, key, getmodel = () -> nothing; force = false)
     file = "$(setup.outdir)/budget_$(key).jld2"
     skip_if_cached(file; force, label = "budget for $(key)") && return
 
@@ -408,7 +414,6 @@ function compute_budget(setup, key, model = nothing; force = false)
     times = data.times[eval_range]
 
     if key == :ref
-        @assert isnothing(model) ":ref budget takes no model; pass model = nothing"
         u_series = data.inputs[eval_range]
         τ_ref_series = data.outputs[eval_range]
     else
@@ -416,6 +421,10 @@ function compute_budget(setup, key, model = nothing; force = false)
         u_series = rollout.u
         τ_ref_series = nothing
     end
+
+    # The closure is only needed for the learned/classical branch; :ref reads the
+    # reference τ and :nomo contributes zero SFS, so neither builds a model.
+    model = key in (:ref, :nomo) ? nothing : getmodel()
 
     u = vectorfield(g)
     A = tensorfield_nonsym(g)
@@ -485,12 +494,14 @@ and [`compute_sfs_stats`](@ref). Averaged over the eval window.
 
 `key == :ref` reads spectral τ from `data.outputs[eval]` directly (no
 model call). `key == :nomo` writes a zero curve. For other keys, τ is
-obtained by re-evaluating `model` on the LES rollout state — same
-a-posteriori convention as [`compute_budget`](@ref).
+obtained by re-evaluating the closure on the LES rollout state — same
+a-posteriori convention as [`compute_budget`](@ref). `getmodel` is a zero-arg
+thunk that builds the closure, invoked only on a cache miss (and not for
+`:ref`/`:nomo`).
 
 Persists `transfer_<key>.jld2 :: (; k, eps_sfs)`.
 """
-function compute_spectral_transfer(setup, key, model = nothing; force = false)
+function compute_spectral_transfer(setup, key, getmodel = () -> nothing; force = false)
     file = "$(setup.outdir)/transfer_$(key).jld2"
     skip_if_cached(file; force, label = "spectral transfer for $(key)") && return
 
@@ -500,7 +511,6 @@ function compute_spectral_transfer(setup, key, model = nothing; force = false)
     eval_range = data_ranges(setup).eval
 
     if key == :ref
-        @assert isnothing(model) ":ref transfer takes no model; pass model = nothing"
         u_series = data.inputs[eval_range]
         τ_ref_series = data.outputs[eval_range]
     else
@@ -530,6 +540,10 @@ function compute_spectral_transfer(setup, key, model = nothing; force = false)
         save_object(file, (; k = collect(stuff.k), eps_sfs = T_accum))
         return
     end
+
+    # Only the learned/classical branch needs the closure; :ref reads its τ from
+    # the reference series, so it never builds a model.
+    model = key === :ref ? nothing : getmodel()
 
     for i in eachindex(u_series)
         foreach(copyto!, u, u_series[i])
