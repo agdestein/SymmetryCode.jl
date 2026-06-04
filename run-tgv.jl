@@ -196,7 +196,7 @@ function run_tgv(train, tgv, config)
             "Time-mean relative LES error vs filtered DNS, per model",
             map(s -> mean(s.e_post), les_stat),
         )
-        S.plot_error_post(tgv, les_stat)
+        S.plot_error_post(tgv, les_stat; normalize_time = true)
     end
 
     if :spectrum_les in config.experiments

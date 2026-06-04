@@ -86,17 +86,22 @@ function plot_training(setup, mkeys)
     return fig
 end
 
-function plot_error_post(setup, les_stat)
+# `normalize_time` plots against the dimensionless convective time t* = t·V₀/L
+# (L = 1), matching `plot_dissipation_tgv`; used for the decaying TGV test, where
+# t* is comparable across the Reynolds sweep. The forced case keeps raw time.
+function plot_error_post(setup, les_stat; normalize_time = false)
     data = joinpath(setup.outdir, "data.jld2") |> load_object
     fig = Figure(; size = (400, 360))
     ax = Axis(
         fig[1, 1];
+        # xlabel = normalize_time ? L"t^* = t V_0 / L" : "Time",
         xlabel = "Time",
         ylabel = "Relative error",
     )
     # e_post is eval-window-aligned; pull the matching times.
     t = data.times[data_ranges(setup).eval]
     t .-= t[1] # Mark start time as zero
+    normalize_time && (t .*= setup.V0)
     labels = getlabels()
     for k in keys(les_stat)
         e = les_stat[k].e_post
@@ -431,8 +436,20 @@ function plot_dissipation_tgv(
     data = joinpath(outdir, "data.jld2") |> load_object
 
     fig = Figure(; size = (820, 360))
-    ax_e = Axis(fig[1, 1]; xlabel = L"t^* = t V_0 / L", ylabel = L"E_k / V_0^2")
-    ax_eps = Axis(fig[1, 2]; xlabel = L"t^* = t V_0 / L", ylabel = L"\varepsilon\, L / V_0^3")
+    ax_e = Axis(
+        fig[1, 1];
+        # xlabel = L"t^* = t V_0 / L",
+        # ylabel = L"E_k / V_0^2",
+        xlabel = "Time",
+        ylabel = "Kinetic energy",
+    )
+    ax_eps = Axis(
+        fig[1, 2];
+        # xlabel = L"t^* = t V_0 / L",
+        # ylabel = L"\varepsilon\, L / V_0^3",
+        xlabel = "Time",
+        ylabel = "Dissipation rate",
+    )
 
     # Full-grid DNS over the whole trajectory (gold reference).
     tdns = data.times .* V0
