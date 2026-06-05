@@ -84,7 +84,8 @@ function main()
         # Tabulate statistics at the end of warm-up, to sanity-check the
         # turbulent state (Reynolds numbers, resolution) before data generation.
         let
-            statistics = load("$(setup.outdir)/dns.jld2", "statistics")
+            walltime, statistics = load("$(setup.outdir)/dns.jld2", "walltime", "statistics")
+            tabulate(setup, "DNS warmup wall time", (; walltime))
             tabulate(setup, "DNS statistics after warm-up", statistics[end])
         end
     end
@@ -117,6 +118,9 @@ function main()
             timemean(stats) = let ks = keys(first(stats))
                 NamedTuple{ks}(map(k -> mean(getindex.(stats, k)), ks))
             end
+            (; n_train, nstep) = setup.datagen
+            inference = data.timing * (nstep - n_train) / nstep # Timing for inference window
+            tabulate(setup, "Data generation timing", (; full = data.timing, inference))
             tabulate(
                 setup, "Time-averaged DNS statistics (data window)",
                 timemean(data.statistics_dns),
