@@ -316,6 +316,7 @@ function main()
     if :velocities in config.experiments
         S.plot_velocities(setup, :x, [:ref; config.models])
         S.plot_velocities(setup, :z, [:ref; config.models])
+        S.plot_velocities(setup, :vortz, [:ref; config.models])
     end
 
     if :sfs_plot in config.experiments

@@ -667,6 +667,10 @@ function plot_velocities(setup, comp, modelkeys)
 
     fig = Figure(; size = (800, 470))
     g = Grid{D}(; l, n = n_les, backend)
+    # `comp = :vortz` plots the out-of-plane vorticity ω_z = ∂_x u_y - ∂_y u_x
+    # (the in-plane swirl on the shown z-slice) instead of a velocity component.
+    vortz = comp === :vortz
+    ubar = vortz ? vectorfield(g) : nothing
     ui = scalarfield(g)
     ui_space = spacescalarfield(g)
     plan = plan_rfft(ui_space)
@@ -706,9 +710,18 @@ function plot_velocities(setup, comp, modelkeys)
                 titlevisible = i == 1,
             )
 
-            ui = useries[t][comp] |> adapt(backend)
-            apply!(twothirds!, g, (ui, g))
-            to_phys!(ui_space, ui, plan, g)
+            spec = if vortz
+                # ω_z needs the full velocity field; copy onto the grid/backend.
+                for c in keys(ubar)
+                    copyto!(ubar[c], useries[t][c])
+                end
+                apply!(vorticity_z!, g, (ui, ubar, g))
+                ui
+            else
+                useries[t][comp] |> adapt(backend)
+            end
+            apply!(twothirds!, g, (spec, g))
+            to_phys!(ui_space, spec, plan, g)
             range = (:, :)
             # range = (40:60, 40:60)
             slice = if D == 2
