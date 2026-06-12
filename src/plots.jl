@@ -13,7 +13,37 @@ getlabels() = (;
     tbnn = "TBNN",
     equi = "G-Conv",
     conv = "MLP",
+    convsym = "MLP (sym)",
 )
+
+"""
+Canonical per-model plot style — the single source of truth, so a model keeps
+the same color/linestyle/marker in *every* figure. References are black: the
+DNS solid, the filtered-DNS target dashed, so "dashed black" reads as "the
+curve to match" throughout the paper. Each entry is
+`(; color, linestyle, marker)`.
+"""
+function getstyles()
+    c = Makie.wong_colors()
+    # Wong's yellow is too light for thin lines on white; darken it for the
+    # symmetrized MLP (the only model beyond the 6 well-separated Wong hues).
+    convsym_color = Makie.RGBf(0.72, 0.6, 0.1)
+    entry(color, linestyle, marker) = (; color, linestyle, marker)
+    return (;
+        dns = entry(:black, :solid, :star5),
+        ref = entry(:black, :dash, :circle),
+        nomo = entry(c[1], :solid, :utriangle),
+        smag = entry(c[2], :dot, :pentagon),
+        dynsmag = entry(c[2], :solid, :circle),
+        vers = entry(c[3], :dot, :hexagon),
+        bard = entry(c[3], :dashdot, :star4),
+        clar = entry(c[3], :solid, :rect),
+        conv = entry(c[4], :solid, :xcross),
+        equi = entry(c[5], :solid, :rtriangle),
+        tbnn = entry(c[6], :solid, :diamond),
+        convsym = entry(convsym_color, :solid, :cross),
+    )
+end
 
 """
 Inertial-range reference spectrum and the normalization that collapses the
@@ -65,10 +95,11 @@ function plot_training(setup, mkeys)
     )
     isempty(curves) && return nothing
 
+    styles = getstyles()
     fig = Figure(; size = (400, 340))
     ax = Axis(fig[1, 1]; xlabel = "Iteration", ylabel = "Loss")
     for k in keys(curves)
-        lines!(ax, curves[k]; label = labels[k])
+        lines!(ax, curves[k]; label = labels[k], color = styles[k].color)
     end
     Legend(
         fig[0, 1],
@@ -89,7 +120,13 @@ end
 # `normalize_time` plots against the dimensionless convective time t* = t·V₀/L
 # (L = 1), matching `plot_dissipation_tgv`; used for the decaying TGV test, where
 # t* is comparable across the Reynolds sweep. The forced case keeps raw time.
-function plot_error_post(setup, les_stat; normalize_time = false)
+#
+# `seed_stat` (from `get_seed_statistics_cached`) draws a min-max band over
+# training seeds behind each learned model's curve. When `:tbnn` is among the
+# plotted keys, an inset shows e_model(t) − e_TBNN(t) for the other learned
+# models: their curves are indistinguishable at full scale, and the inset
+# *bounds* the difference instead of hiding it.
+function plot_error_post(setup, les_stat; normalize_time = false, seed_stat = nothing)
     data = joinpath(setup.outdir, "data.jld2") |> load_object
     fig = Figure(; size = (400, 360))
     ax = Axis(
@@ -103,10 +140,44 @@ function plot_error_post(setup, les_stat; normalize_time = false)
     t .-= t[1] # Mark start time as zero
     normalize_time && (t .*= setup.V0)
     labels = getlabels()
+    styles = getstyles()
     for k in keys(les_stat)
+        # Seed spread first, so the canonical-seed line draws on top of it.
+        if !isnothing(seed_stat) && haskey(seed_stat, k)
+            series = collect(skipmissing(seed_stat[k].e_post_series))
+            if length(series) > 1
+                n = minimum(length, series)
+                lo = [minimum(s[i] for s in series) for i in 1:n]
+                hi = [maximum(s[i] for s in series) for i in 1:n]
+                band!(ax, t[1:n], lo, hi; color = (styles[k].color, 0.25))
+            end
+        end
         e = les_stat[k].e_post
         ntime = length(e)
-        lines!(ax, t[1:ntime], e; label = labels[k])
+        lines!(
+            ax, t[1:ntime], e;
+            label = labels[k], color = styles[k].color, linestyle = styles[k].linestyle,
+        )
+    end
+    # Difference inset, in the empty lower-right corner under the rising curves.
+    learned = [k for k in keys(les_stat) if k in (:conv, :convsym, :equi, :tbnn)]
+    if :tbnn in learned && length(learned) > 1
+        axin = Axis(
+            fig[1, 1];
+            width = Relative(0.45), height = Relative(0.3),
+            halign = 0.95, valign = 0.08,
+            xticklabelsize = 8, yticklabelsize = 8,
+            title = "Difference to TBNN", titlesize = 9, titlegap = 2,
+            backgroundcolor = (:white, 0.85),
+        )
+        e_tbnn = les_stat.tbnn.e_post
+        for k in learned
+            k == :tbnn && continue
+            e = les_stat[k].e_post
+            n = min(length(e), length(e_tbnn))
+            lines!(axin, t[1:n], e[1:n] .- e_tbnn[1:n]; color = styles[k].color)
+        end
+        hlines!(axin, [0.0]; color = (:black, 0.5), linestyle = :dash, linewidth = 0.7)
     end
     Legend(
         fig[0, 1],
@@ -158,12 +229,17 @@ function plot_densities(setup, mkeys; dolog)
         ),
     )
 
+    styles = getstyles()
     for mkey in mkeys
         stats = load_object("$(outdir)/sfs_stats_$(mkey).jld2")
         for fkey in [:xx, :xy, :diss]
             dens = stats.kde[fkey]
             isempty(dens.x) && continue   # :nomo has degenerate (all-zero) samples
-            lines!(ax[fkey], dens.x, max.(dens.density, 1.0e-16); label = labels[mkey])
+            lines!(
+                ax[fkey], dens.x, max.(dens.density, 1.0e-16);
+                label = labels[mkey],
+                color = styles[mkey].color, linestyle = styles[mkey].linestyle,
+            )
         end
     end
 
@@ -229,10 +305,14 @@ over-dissipative (smag/dynsmag); bars below 1.0 are under-dissipative
 
 Drain convention (positive = drain); same as [`compute_sfs_stats`](@ref).
 `keys` must include `:ref` (used as the normalization baseline).
+
+With `seed_stat` (median only), the bar height becomes the mean over training
+seeds and a whisker shows ± one standard deviation.
 """
-function plot_dissipation_bar(setup, keys)
+function plot_dissipation_bar(setup, keys; seed_stat = nothing)
     (; outdir, plotdir) = setup
     labels = getlabels()
+    styles = getstyles()
     for (momkey, momlabel) in [(:median, "Median"), (:mean, "Mean")]
         moments = NamedTuple(
             k => load_object("$(outdir)/sfs_stats_$(k).jld2").diss[momkey] for k in keys
@@ -240,7 +320,15 @@ function plot_dissipation_bar(setup, keys)
         @assert haskey(moments, :ref) "plot_dissipation_bar requires :ref in keys"
         ref_med = moments.ref
         plot_keys = filter(!=(:ref), collect(keys))
-        normalized = [moments[k] / ref_med for k in plot_keys]
+        vals = map(plot_keys) do k
+            if momkey == :median && !isnothing(seed_stat) && haskey(seed_stat, k)
+                v = collect(skipmissing(seed_stat[k].diss_median))
+                isempty(v) || return (mean(v), length(v) > 1 ? std(v) : 0.0)
+            end
+            (moments[k] / ref_med, 0.0)
+        end
+        normalized = first.(vals)
+        spread = last.(vals)
 
         fig = Figure(; size = (450, 340))
         ax = Axis(
@@ -250,8 +338,16 @@ function plot_dissipation_bar(setup, keys)
             ylabel = "$(momlabel) dissipation",
             xticklabelrotation = π / 6,
         )
-        barplot!(ax, 1:length(plot_keys), normalized; bar_labels = :y)
-        hlines!(ax, [1.0]; color = :red, linestyle = :dash, label = "Reference")
+        barplot!(
+            ax, 1:length(plot_keys), normalized;
+            bar_labels = :y, color = [styles[k].color for k in plot_keys],
+        )
+        ispread = findall(>(0), spread)
+        isempty(ispread) || errorbars!(
+            ax, ispread, normalized[ispread], spread[ispread];
+            whiskerwidth = 8, color = :black,
+        )
+        hlines!(ax, [1.0]; color = :black, linestyle = :dash, label = "Reference")
 
         # Reference
         # axislegend(ax; position = :rt, framevisible = false)
@@ -262,7 +358,7 @@ function plot_dissipation_bar(setup, keys)
         )
 
         # Adjust upper limit to make space for bar label
-        ylims!(ax, 0, maximum(normalized) + 0.15)
+        ylims!(ax, 0, maximum(normalized .+ spread) + 0.15)
         rowgap!(fig.layout, 5)
 
         file = "$(plotdir)/dissipation-$(momkey)-bar.pdf"
@@ -280,18 +376,28 @@ form `τ = -2νₜS` with `νₜ ≥ 0` are mathematically pinned to zero; the
 filtered-DNS reference is shown as a horizontal dashed line at its
 absolute fraction.
 
-`keys` must include `:ref`.
+`keys` must include `:ref`. With `seed_stat`, the bar height becomes the mean
+over training seeds and a whisker shows ± one standard deviation.
 """
-function plot_backscatter_bar(setup, keys)
+function plot_backscatter_bar(setup, keys; seed_stat = nothing)
     (; outdir, plotdir) = setup
     labels = getlabels()
+    styles = getstyles()
     backscatter = NamedTuple(
         k => load_object("$(outdir)/sfs_stats_$(k).jld2").diss.backscatter for k in keys
     )
     @assert haskey(backscatter, :ref) "plot_backscatter_bar requires :ref in keys"
     ref_bs = backscatter.ref
     plot_keys = filter(!=(:ref), collect(keys))
-    bars = [backscatter[k] for k in plot_keys]
+    vals = map(plot_keys) do k
+        if !isnothing(seed_stat) && haskey(seed_stat, k)
+            v = collect(skipmissing(seed_stat[k].backscatter))
+            isempty(v) || return (mean(v), length(v) > 1 ? std(v) : 0.0)
+        end
+        (backscatter[k], 0.0)
+    end
+    bars = first.(vals)
+    spread = last.(vals)
 
     fig = Figure(; size = (520, 340))
     ax = Axis(
@@ -301,13 +407,21 @@ function plot_backscatter_bar(setup, keys)
         ylabel = "Backscatter fraction",
         xticklabelrotation = π / 6,
     )
-    barplot!(ax, 1:length(plot_keys), bars; bar_labels = :y)
+    barplot!(
+        ax, 1:length(plot_keys), bars;
+        bar_labels = :y, color = [styles[k].color for k in plot_keys],
+    )
+    ispread = findall(>(0), spread)
+    isempty(ispread) || errorbars!(
+        ax, ispread, bars[ispread], spread[ispread];
+        whiskerwidth = 8, color = :black,
+    )
     hlines!(
         ax, [ref_bs];
-        color = :red, linestyle = :dash,
+        color = :black, linestyle = :dash,
         label = "Reference ($(round(ref_bs * 100; digits = 1))%)",
     )
-    ylims!(ax, 0, max(maximum(bars; init = 0.0), ref_bs) * 1.15)
+    ylims!(ax, 0, max(maximum(bars .+ spread; init = 0.0), ref_bs) * 1.15)
     axislegend(ax; position = :rt, framevisible = false)
 
     file = "$(plotdir)/backscatter-bar.pdf"
@@ -321,17 +435,27 @@ Two-panel bar plot of a-priori predictive metrics per model:
 relative L² error of the predicted SFS tensor (left, lower is better) and
 cross-correlation with the filtered-DNS reference (right, higher is better).
 
-`keys` should not include `:ref` (self-comparison is trivial).
+`keys` should not include `:ref` (self-comparison is trivial). With
+`seed_stat`, bar heights become means over training seeds with ± std whiskers.
 """
-function plot_apriori_bar(setup, keys)
+function plot_apriori_bar(setup, keys; seed_stat = nothing)
     (; outdir, plotdir) = setup
     labels = getlabels()
+    styles = getstyles()
     stats = NamedTuple(
         k => load_object("$(outdir)/sfs_stats_$(k).jld2").apriori for k in keys
     )
     plot_keys = collect(keys)
-    relerrs = [stats[k].relerr for k in plot_keys]
-    crosscors = [stats[k].crosscor for k in plot_keys]
+    seeded(k, metric, fallback) =
+    if !isnothing(seed_stat) && haskey(seed_stat, k)
+        v = collect(skipmissing(seed_stat[k][metric]))
+        isempty(v) ? (fallback, 0.0) : (mean(v), length(v) > 1 ? std(v) : 0.0)
+    else
+        (fallback, 0.0)
+    end
+    re = [seeded(k, :relerr, stats[k].relerr) for k in plot_keys]
+    cc = [seeded(k, :crosscor, stats[k].crosscor) for k in plot_keys]
+    barcolors = [styles[k].color for k in plot_keys]
 
     fig = Figure(; size = (820, 340))
     xtks = (1:length(plot_keys), [labels[k] for k in plot_keys])
@@ -342,14 +466,21 @@ function plot_apriori_bar(setup, keys)
         ylabel = "Relative error",
         xticklabelrotation = π / 6,
     )
-    barplot!(ax_re, 1:length(plot_keys), relerrs; bar_labels = :y)
+    barplot!(ax_re, 1:length(plot_keys), first.(re); bar_labels = :y, color = barcolors)
     ax_cc = Axis(
         fig[1, 2];
         xticks = xtks,
         ylabel = "Cross-correlation",
         xticklabelrotation = π / 6,
     )
-    barplot!(ax_cc, 1:length(plot_keys), crosscors; bar_labels = :y)
+    barplot!(ax_cc, 1:length(plot_keys), first.(cc); bar_labels = :y, color = barcolors)
+    for (ax, vals) in ((ax_re, re), (ax_cc, cc))
+        ispread = findall(>(0), last.(vals))
+        isempty(ispread) || errorbars!(
+            ax, ispread, first.(vals)[ispread], last.(vals)[ispread];
+            whiskerwidth = 8, color = :black,
+        )
+    end
 
     # Adjust upper limit to make space for bar label
     ylims!(ax_re, 0.0, 1.1)
@@ -373,13 +504,15 @@ backscatter). Same drain convention as [`plot_densities`](@ref),
 function plot_budget(setup, keys)
     (; outdir, plotdir) = setup
     labels = getlabels()
+    styles = getstyles()
     fig = Figure(; size = (820, 360))
     ax_ke = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Kinetic energy")
     ax_eps = Axis(fig[1, 2]; xlabel = "Time", ylabel = "SFS dissipation rate")
     for k in keys
         b = load_object("$(outdir)/budget_$(k).jld2")
-        lines!(ax_ke, b.t .- b.t[1], b.ke; label = labels[k])
-        lines!(ax_eps, b.t .- b.t[1], b.eps_sfs; label = labels[k])
+        kw = (; label = labels[k], color = styles[k].color, linestyle = styles[k].linestyle)
+        lines!(ax_ke, b.t .- b.t[1], b.ke; kw...)
+        lines!(ax_eps, b.t .- b.t[1], b.eps_sfs; kw...)
     end
     Legend(
         fig[0, :], ax_ke;
@@ -433,6 +566,7 @@ function plot_dissipation_tgv(
     )
     (; outdir, plotdir, V0) = setup
     labels = getlabels()
+    styles = getstyles()
     data = joinpath(outdir, "data.jld2") |> load_object
 
     fig = Figure(; size = (820, 360))
@@ -457,20 +591,22 @@ function plot_dissipation_tgv(
     lines!(ax_eps, tdns, [s.diss for s in data.statistics_dns] ./ V0^3; color = :black, label = labels.dns)
 
     # Published Re=1600 reference (already nondimensional), if available.
+    # Gray dotted, so it cannot be confused with the black dashed filtered-DNS.
     ref = read_tgv_reference(reffile)
     if isnothing(ref)
         @warn "Taylor-Green reference not found at $(reffile); skipping published overlay"
     else
-        lines!(ax_e, ref.t, ref.E; color = :gray, linestyle = :dash, label = "Ref. Re=1600")
-        lines!(ax_eps, ref.t, ref.eps; color = :gray, linestyle = :dash, label = "Ref. Re=1600")
+        lines!(ax_e, ref.t, ref.E; color = :gray, linestyle = :dot, label = "Ref. Re=1600")
+        lines!(ax_eps, ref.t, ref.eps; color = :gray, linestyle = :dot, label = "Ref. Re=1600")
     end
 
     # LES closures: effective dissipation ε_visc + ε_sfs on each rollout.
     for k in keys
         b = load_object("$(outdir)/budget_$(k).jld2")
         t = b.t .* V0
-        lines!(ax_e, t, b.ke ./ V0^2; label = labels[k])
-        lines!(ax_eps, t, (b.eps_visc .+ b.eps_sfs) ./ V0^3; label = labels[k])
+        kw = (; label = labels[k], color = styles[k].color, linestyle = styles[k].linestyle)
+        lines!(ax_e, t, b.ke ./ V0^2; kw...)
+        lines!(ax_eps, t, (b.eps_visc .+ b.eps_sfs) ./ V0^3; kw...)
     end
 
     Legend(
@@ -513,14 +649,21 @@ mean** `Re_int` (the stationary value) positions the star markers overlaying
 the training regime's ratios/errors (from `train_anchor.outdir`'s `sfs_stats`)
 — the point the trends should extrapolate toward. Missing artifacts are
 skipped with a warning so the plot still renders from whatever is present.
+
+The dissipation ratio is drawn on a log axis so over- (2×) and
+under-dissipation (0.5×) sit symmetrically about the reference line. With
+`seeds`, per-point whiskers show ± one std over the training seeds whose
+`sfs_stats_<seed_key>.jld2` are present in each setup's outdir.
 """
 function plot_dissipation_vs_re(
         setups, keys;
         train_anchor = nothing,
         plotdir = last(setups).plotdir,
         Re_key = :Re_int,
+        seeds = nothing,
     )
     labels = getlabels()
+    styles = getstyles()
     plot_keys = filter(k -> k ∉ (:ref, :nomo), collect(keys))
 
     Re_labels = (;
@@ -541,6 +684,18 @@ function plot_dissipation_vs_re(
         end
     end
 
+    # Per-setup seed spread (std over seeds) of the same two metrics, or
+    # `nothing` when fewer than two seed artifacts are present.
+    seed_spread(s, k) = let
+        isnothing(seeds) && return nothing
+        m = filter(
+            !isnothing,
+            [load_metrics(s.outdir, seed_key(s, k, sd)) for sd in seeds],
+        )
+        length(m) < 2 ? nothing :
+            (; ratio = std(x.ratio for x in m), relerr = std(x.relerr for x in m))
+    end
+
     # Measured integral Reynolds number per flow (one definition for both the
     # axis points and the anchor). The TGV is non-stationary, so each setup is
     # summarized by its peak-dissipation instant; loading the (large) data.jld2
@@ -554,7 +709,13 @@ function plot_dissipation_vs_re(
     end
 
     fig = Figure(; size = (820, 360))
-    ax_d = Axis(fig[1, 1]; xlabel = Re_labels[Re_key], ylabel = "Median SFS dissipation / reference")
+    ax_d = Axis(
+        fig[1, 1];
+        xlabel = Re_labels[Re_key],
+        ylabel = "Median SFS dissipation / reference",
+        yscale = log10,
+        yticks = ([0.5, 1.0, 1.5, 2.0, 2.5], ["0.5", "1", "1.5", "2", "2.5"]),
+    )
     ax_e = Axis(fig[1, 2]; xlabel = Re_labels[Re_key], ylabel = "A-priori relative SFS error")
 
     re_all = [peak_re_int(s.outdir) for s in setups]
@@ -565,8 +726,23 @@ function plot_dissipation_vs_re(
         m = [load_metrics(s.outdir, k) for s in sorted]
         keep = .!isnothing.(m)
         any(keep) || continue
-        scatterlines!(ax_d, res[keep], [x.ratio for x in m[keep]]; label = labels[k])
-        scatterlines!(ax_e, res[keep], [x.relerr for x in m[keep]]; label = labels[k])
+        kw = (; label = labels[k], color = styles[k].color, marker = styles[k].marker)
+        scatterlines!(ax_d, res[keep], [x.ratio for x in m[keep]]; kw...)
+        scatterlines!(ax_e, res[keep], [x.relerr for x in m[keep]]; kw...)
+        sp = [seed_spread(s, k) for s in sorted]
+        keepsp = keep .& .!isnothing.(sp)
+        if any(keepsp)
+            errorbars!(
+                ax_d, res[keepsp], [x.ratio for x in m[keepsp]],
+                [x.ratio for x in sp[keepsp]];
+                whiskerwidth = 6, color = styles[k].color,
+            )
+            errorbars!(
+                ax_e, res[keepsp], [x.relerr for x in m[keepsp]],
+                [x.relerr for x in sp[keepsp]];
+                whiskerwidth = 6, color = styles[k].color,
+            )
+        end
     end
 
     # Forced-training anchor: the regime the learned closures were fit to, drawn
@@ -575,7 +751,11 @@ function plot_dissipation_vs_re(
     # forced case's eval-window mean Re_int (its stationary integral Reynolds
     # number), the like-for-like counterpart of the TGV peak Re_int.
     if !isnothing(train_anchor)
-        anchor = filter(!isnothing, [load_metrics(train_anchor.outdir, k) for k in plot_keys])
+        anchor = [
+            (k, m) for (k, m) in
+                ((k, load_metrics(train_anchor.outdir, k)) for k in plot_keys)
+                if !isnothing(m)
+        ]
         if !isempty(anchor)
             d = load_object("$(train_anchor.outdir)/data.jld2")
             anchor_re = mean(s -> s[Re_key], d.statistics_dns[data_ranges(train_anchor).eval])
@@ -583,13 +763,13 @@ function plot_dissipation_vs_re(
             GC.gc()
             re = fill(anchor_re, length(anchor))
             label = "Training (Re=$(round(Int, anchor_re)))"
-            color = Makie.wong_colors()[1:length(anchor)]
-            scatter!(ax_d, re, [x.ratio for x in anchor]; marker = :star5, markersize = 14, color, label)
-            scatter!(ax_e, re, [x.relerr for x in anchor]; marker = :star5, markersize = 14, color)
+            color = [styles[k].color for (k, _) in anchor]
+            scatter!(ax_d, re, [m.ratio for (_, m) in anchor]; marker = :star5, markersize = 14, color, label)
+            scatter!(ax_e, re, [m.relerr for (_, m) in anchor]; marker = :star5, markersize = 14, color)
         end
     end
 
-    hlines!(ax_d, [1.0]; color = :red, linestyle = :dash, label = "Reference")
+    hlines!(ax_d, [1.0]; color = :black, linestyle = :dash, label = "Reference")
     Legend(
         fig[0, :], ax_d;
         tellwidth = false, tellheight = true, framevisible = false,
@@ -622,6 +802,7 @@ rescaled by the eval-window-mean total energy dissipation rate `ε`, so
 function plot_spectral_transfer(setup, keys)
     (; outdir, plotdir) = setup
     labels = getlabels()
+    styles = getstyles()
     data = joinpath(outdir, "data.jld2") |> load_object
     eval_range = data_ranges(setup).eval
     stats = mean_of_named_tuple_series(data.statistics_dns[eval_range])
@@ -638,9 +819,12 @@ function plot_spectral_transfer(setup, keys)
     for k in keys
         k == :nomo && continue
         t = load_object("$(outdir)/transfer_$(k).jld2")
-        lines!(ax, r.kscale * t.k, t.eps_sfs ./ ε; label = labels[k])
+        lines!(
+            ax, r.kscale * t.k, t.eps_sfs ./ ε;
+            label = labels[k], color = styles[k].color, linestyle = styles[k].linestyle,
+        )
     end
-    hlines!(ax, [0.0]; color = :gray, linestyle = :dash)
+    hlines!(ax, [0.0]; color = :gray, linestyle = :dot)
     Legend(
         fig[0, 1], ax;
         tellwidth = false, tellheight = true, framevisible = false,
@@ -657,7 +841,6 @@ end
 function plot_velocities(setup, comp, modelkeys)
     (; D, l, n_les, backend) = setup
 
-    upostfiles = get_upostfiles(setup)
     data = joinpath(setup.outdir, "data.jld2") |> load_object
 
     # Both reference (filtered DNS) and model rollouts live on the eval window.
@@ -665,7 +848,8 @@ function plot_velocities(setup, comp, modelkeys)
     times_eval = data.times[eval_range]
     inputs_eval = data.inputs[eval_range]
 
-    fig = Figure(; size = (800, 470))
+    # Width scales with the number of model columns (ref + closures).
+    fig = Figure(; size = (115 * length(modelkeys), 470))
     g = Grid{D}(; l, n = n_les, backend)
     # `comp = :vortz` plots the out-of-plane vorticity ω_z = ∂_x u_y - ∂_y u_x
     # (the in-plane swirl on the shown z-slice) instead of a velocity component.
@@ -688,7 +872,7 @@ function plot_velocities(setup, comp, modelkeys)
         useries = if key == :ref
             inputs_eval
         else
-            upost = load_object(upostfiles[key])
+            upost = load_object(upostfile(setup, key))
             upost.u
         end
 
@@ -866,7 +1050,6 @@ function plot_qr(setup, modelkeys; smooth_σ = nothing)
     qr = map(key -> key => load_object("$(setup.outdir)/qr_$(key).jld2"), modelkeys)
     qr = NamedTuple(qr)
 
-    fig = Figure(; size = (650, 440))
     labels = getlabels()
     colorvec = Makie.wong_colors()
     lescolor = 2
@@ -882,22 +1065,31 @@ function plot_qr(setup, modelkeys; smooth_σ = nothing)
         bard = colorvec[lescolor],
         tbnn = colorvec[lescolor],
         conv = colorvec[lescolor],
+        convsym = colorvec[lescolor],
         equi = colorvec[lescolor],
     )
 
     plotkeys = filter(!=(:ref), modelkeys)
+
+    # Panel grid grows with the model count (2 rows, as many columns as needed).
+    npanel = length(plotkeys)
+    nrow = npanel <= 3 ? 1 : 2
+    ncol = ceil(Int, npanel / nrow)
+    fig = Figure(; size = (217 * ncol, 220 * nrow))
 
     # Reference density is the same in every panel — blur it once.
     refdens = max.(gaussian_blur(qr.ref.density, smooth_σ), 1.0e-20)
 
     for (k, key) in plotkeys |> enumerate
         title = labels[key]
-        j, i = CartesianIndices((3, 2))[k].I
+        j, i = CartesianIndices((ncol, nrow))[k].I
+        # Bottom of a column = last row, or the panel with nothing below it.
+        bottom = i == nrow || k + ncol > npanel
         ax = Axis(
             fig[i, j];
-            xlabelvisible = i == 2,
-            xticksvisible = i == 2,
-            xticklabelsvisible = i == 2,
+            xlabelvisible = bottom,
+            xticksvisible = bottom,
+            xticklabelsvisible = bottom,
             ylabelvisible = j == 1,
             yticksvisible = j == 1,
             yticklabelsvisible = j == 1,
@@ -964,27 +1156,8 @@ function plot_equivariance_errors(setup, errs; tag::Symbol)
     )
     ylims!(ax, 1.0e-17, 1)
     i = 1:48
-    colors = (;
-        nomo = Cycled(1),
-        smag = Cycled(2),
-        dynsmag = Cycled(2),
-        clar = Cycled(3),
-        bard = Cycled(3),
-        tbnn = Cycled(4),
-        equi = Cycled(5),
-        conv = Cycled(6),
-    )
     labels = getlabels()
-    markers = (;
-        nomo = :utriangle,
-        smag = :circle,
-        dynsmag = :circle,
-        clar = :rect,
-        bard = :star5,
-        tbnn = :diamond,
-        equi = :rtriangle,
-        conv = :x,
-    )
+    styles = getstyles()
     for key in keys(errs)
         e = errs[key]
         e = max.(e, 1.0e-30) # Encode true zeros as 1e-30
@@ -993,8 +1166,8 @@ function plot_equivariance_errors(setup, errs; tag::Symbol)
             i,
             e;
             label = labels[key],
-            marker = markers[key],
-            color = colors[key],
+            marker = styles[key].marker,
+            color = styles[key].color,
         )
     end
     Legend(
@@ -1362,6 +1535,16 @@ function plot_spectrum_dns(setup)
     return fig
 end
 
+"""
+Two-panel LES energy-spectrum comparison. Left: the time-averaged spectra on
+the usual log-log axes (the models are nearly indistinguishable there). Right:
+the same spectra *divided by the reference spectrum*, on a linear ordinate —
+this is where the per-model deviations (Smagorinsky's intermediate-wavenumber
+excess, the learned models' high-wavenumber deficit) actually become visible.
+The under-dissipative models (No-model, Clark) leave the right panel's frame
+through their high-wavenumber pile-up; the axis is clamped so the ±10%
+deviations of the well-behaved closures stay readable.
+"""
 function plot_spectrum_les(setup, les_stat)
     (; D) = setup
 
@@ -1375,23 +1558,35 @@ function plot_spectrum_les(setup, les_stat)
     r = spectrum_reference(setup, mean_of_named_tuple_series(data.statistics_dns[eval_range]))
     k = 2π / setup.l * eachindex(s_ref)
     labels = getlabels()
+    styles = getstyles()
 
-    fig = Figure(; size = (400, 360))
+    fig = Figure(; size = (820, 360))
     ax = Axis(
         fig[1, 1];
         xscale = log10,
         yscale = log10,
         # xlabel = r.xlabel,
         # ylabel = r.ylabel,
-        # xlabelsize = 20,
-        # ylabelsize = 20,
         xlabel = "Wavenumber",
         ylabel = "Energy",
     )
-    lines!(ax, r.kscale * k, r.escale * s_ref; label = "Reference")
+    ax_ratio = Axis(
+        fig[1, 2];
+        xscale = log10,
+        xlabel = "Wavenumber",
+        ylabel = "Energy relative to reference",
+    )
+    lines!(
+        ax, r.kscale * k, r.escale * s_ref;
+        label = "Reference", color = styles.ref.color, linestyle = styles.ref.linestyle,
+    )
     for key in keys(s_les)
-        lines!(ax, r.kscale * k, r.escale * s_les[key]; label = labels[key])
+        kw = (; label = labels[key], color = styles[key].color, linestyle = styles[key].linestyle)
+        lines!(ax, r.kscale * k, r.escale * s_les[key]; kw...)
+        lines!(ax_ratio, r.kscale * k, s_les[key] ./ s_ref; kw...)
     end
+    hlines!(ax_ratio, [1.0]; color = styles.ref.color, linestyle = styles.ref.linestyle)
+    ylims!(ax_ratio, 0, 2)
     # lines!(ax, r.k_ref, r.E_ref; label = r.label)
     # vlines!(ax, r.kdiss; color = (:gray, 0.5), linestyle = :dash)
     Legend(
@@ -1401,7 +1596,7 @@ function plot_spectrum_les(setup, les_stat)
         tellheight = true,
         framevisible = false,
         horizontal = true,
-        nbanks = 3,
+        nbanks = 2,
     )
     rowgap!(fig.layout, 5)
 
@@ -1411,4 +1606,150 @@ function plot_spectrum_les(setup, les_stat)
     flush(stderr)
     save(file, fig; backend = CairoMakie)
     return fig
+end
+
+# --- Paper-ready LaTeX tables ---
+
+"Fixed-point decimal string with exactly `digits` decimals (no Printf dep)."
+function fixeddecimals(x, digits)
+    s = string(round(x; digits))
+    i = findfirst('.', s)
+    isnothing(i) && (s *= "."; i = length(s))
+    return s * "0"^(digits - (length(s) - i))
+end
+
+"""
+LaTeX cell body for a number: fixed `digits` decimals for O(1) values,
+`m.mmm\\e{n}` (the paper's `\\e` ×10ⁿ macro) for values below the rounding
+resolution, so machine-precision equivariance errors stay legible.
+"""
+function latexnum(x; digits = 4)
+    x isa Real || return string(x)
+    x == 0 && return fixeddecimals(0.0, digits)
+    if abs(x) < 10.0^(-digits)
+        e = floor(Int, log10(abs(x)))
+        m = round(x / exp10(e); digits = 3)
+        return "$(m)\\e{$(e)}"
+    end
+    return fixeddecimals(x, digits)
+end
+
+"LaTeX cell body of per-seed values: `mean \\pm std`, or the single value."
+function latexpm(vals; digits = 4)
+    v = collect(skipmissing(vals))
+    isempty(v) && return nothing
+    length(v) == 1 && return latexnum(v[1]; digits)
+    return "$(latexnum(mean(v); digits)) \\pm $(latexnum(std(v); digits))"
+end
+
+"""
+Write a paper-ready LaTeX `tabular` of the aggregate per-model metrics to
+`<plotdir>/<filename>`, with mean ± std over training seeds for every model
+that `seed_stat` (from [`get_seed_statistics_cached`](@ref)) covers.
+
+Columns: a-priori SFS tensor error, a-priori cross-correlation, time-mean
+a-posteriori solution error, mean a-priori equivariance error (skipped with
+`include_equi = false`, e.g. for the Taylor-Green case where it is not
+computed), median pointwise SFS dissipation normalized by the reference, and
+the local backscatter fraction. Cells whose artifact is missing print `--`.
+
+Reads `sfs_stats_<key>.jld2`, `les_stat.jld2`, and
+`equi-errors-prior-<key>.jld2` for the canonical values. Copy the output over
+the corresponding `tables/*.tex` in the paper repository (the reference
+backscatter fraction, needed in the caption, is written as a comment).
+"""
+function write_errors_table(
+        setup, mkeys;
+        seed_stat = nothing, include_equi = true, filename = "errors.tex",
+    )
+    (; outdir, plotdir) = setup
+    labels = getlabels()
+    refstats = load_object("$(outdir)/sfs_stats_ref.jld2")
+    refmed = refstats.diss.median
+    lesfile = "$(outdir)/les_stat.jld2"
+    les_stat = isfile(lesfile) ? load_object(lesfile) : (;)
+
+    math(c) = isnothing(c) ? "--" : "\$$(c)\$"
+    seedvals(k, metric) =
+    if !isnothing(seed_stat) && haskey(seed_stat, k)
+        v = seed_stat[k][metric]
+        any(!ismissing, v) ? v : nothing
+    else
+        nothing
+    end
+    # Cell value: seed sweep (mean ± std) if available, else the canonical
+    # artifact via `fallback` (a thunk so missing files are only probed once).
+    cell(k, metric, fallback; digits = 4) = let v = seedvals(k, metric)
+        isnothing(v) ? math(fallback()) : math(latexpm(v; digits))
+    end
+
+    rows = map(collect(mkeys)) do k
+        f = "$(outdir)/sfs_stats_$(k).jld2"
+        stats = isfile(f) ? load_object(f) : nothing
+        fe = "$(outdir)/equi-errors-prior-$(k).jld2"
+        cells = [
+            cell(k, :relerr, () -> isnothing(stats) ? nothing : latexnum(stats.apriori.relerr)),
+            cell(k, :crosscor, () -> isnothing(stats) ? nothing : latexnum(stats.apriori.crosscor)),
+            cell(
+                k, :e_post,
+                () -> haskey(les_stat, k) ? latexnum(mean(les_stat[k].e_post)) : nothing,
+            ),
+        ]
+        if include_equi
+            push!(
+                cells,
+                k == :nomo ? "N.A." :
+                    cell(k, :equi, () -> isfile(fe) ? latexnum(mean(load_object(fe))) : nothing),
+            )
+        end
+        push!(
+            cells,
+            cell(
+                k, :diss_median,
+                () -> isnothing(stats) ? nothing : latexnum(stats.diss.median / refmed; digits = 3);
+                digits = 3,
+            ),
+        )
+        push!(
+            cells,
+            cell(
+                k, :backscatter,
+                () -> isnothing(stats) ? nothing : latexnum(stats.diss.backscatter; digits = 3);
+                digits = 3,
+            ),
+        )
+        "    $(rpad(labels[k], 11)) & " * join(cells, " & ") * " \\\\"
+    end
+
+    header = [
+        "Model",
+        "            & Closure \\eqref{eq:tensor-error-prior}",
+        "            & Cross-corr.",
+        "            & Solution \\eqref{eq:tensor-error-post}",
+    ]
+    include_equi &&
+        push!(header, "            & Equivariance \\eqref{eq:equi-error-prior}")
+    append!(
+        header, [
+            "            & Median diss.",
+            "            & Backscatter \\\\",
+        ]
+    )
+
+    ncol = include_equi ? 6 : 5
+    file = joinpath(plotdir, filename)
+    open(file, "w") do io
+        println(io, "% Generated by SymmetryCode write_errors_table; do not edit by hand.")
+        println(io, "% Reference backscatter fraction: $(round(refstats.diss.backscatter; digits = 3)).")
+        println(io, "\\begin{tabular}{l $(join(fill("r", ncol), " "))}")
+        println(io, "    \\toprule")
+        foreach(h -> println(io, "    ", h), header)
+        println(io, "    \\midrule")
+        foreach(r -> println(io, r), rows)
+        println(io, "    \\bottomrule")
+        println(io, "\\end{tabular}")
+    end
+    @info "Saving LaTeX errors table to $(file)"
+    flush(stderr)
+    return file
 end

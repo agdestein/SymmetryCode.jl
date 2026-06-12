@@ -36,14 +36,22 @@ get_setup() = S.setup_turbulator_small()
 
 get_config() = (;
     # Closures included in every multi-model step. Order propagates to plots.
+    # :convsym is the group-averaged (exactly equivariant) MLP, reusing
+    # :conv's trained parameters.
     models = [
         :nomo,
         :dynsmag,
         :clar,
         :conv,
+        :convsym,
         :equi,
         :tbnn,
     ],
+
+    # Training seeds for the :seeds robustness sweep — must match (a subset
+    # of) the seeds trained by run-les.jl, whose ps-<seed_key>.jld2 are reused
+    # unchanged here.
+    seeds = 0:4,
 
     # Nominal (V₀L/ν) integral Reynolds numbers to sweep. The forced-training
     # anchor's *measured* Re_int is computed from its data, not hard-coded; the
@@ -63,6 +71,8 @@ get_config() = (;
         :sfs,                # predict_sfs -> sfs_<key>.jld2
         :stats,              # compute_sfs_stats -> KDE + bar plots + tables
         :spectral_transfer,  # compute_spectral_transfer -> eps_sfs(k) plot
+        :seeds,              # per-seed rollout + a-priori stats -> seed_stats.jld2
+        :paper_tables,       # write_errors_table -> plotdir/errors-tgv-Re=<Re>.tex
     ],
 
     # Stage labels here force a re-compute regardless of cache.
@@ -74,6 +84,7 @@ get_config() = (;
             # :sfs,
             # :stats,
             # :spectral_transfer,
+            # :seeds,
         ]
     ),
 )
@@ -170,8 +181,56 @@ function run_tgv(train, tgv, config)
     end
 
     #######################
+    # Phase A2 — seed sweep (trained seeds reused unchanged from `train`)
+    #######################
+    #
+    # Same structure as run-les.jl's seed sweep: per-seed rollout + a-priori
+    # SFS stats on the Taylor-Green flow, so the generalization metrics get a
+    # spread over training seeds. :convsym is a-priori only (its rollout costs
+    # |G|× the MLP's; the canonical-seed rollout above covers a-posteriori).
+    if :seeds in config.experiments
+        learned = filter(in([:tbnn, :equi, :conv, :convsym]), config.models)
+        for key in learned, seed in config.seeds
+            skey = S.seed_key(tgv, key, seed)
+            @info "===== seed sweep: $(skey) ====="
+            flush(stderr)
+            local built = nothing
+            getmodel() =
+                (built === nothing && (built = S.build_seed_model(train, key, seed)); built)
+            force = :seeds in config.force
+            key == :convsym || S.solve_les(tgv, skey, getmodel; force)
+            S.predict_sfs(tgv, skey, getmodel; force)
+            built = nothing
+        end
+        skeys = [S.seed_key(tgv, k, s) for k in learned for s in config.seeds]
+        S.compute_sfs_stats(tgv, skeys; force = :seeds in config.force)
+    end
+
+    #######################
     # Phase B — aggregation and plotting (reads on-disk artifacts only)
     #######################
+
+    seed_stat = nothing
+    if :seeds in config.experiments
+        learned = filter(in([:tbnn, :equi, :conv, :convsym]), config.models)
+        seed_stat = S.get_seed_statistics_cached(
+            tgv, Tuple(learned), config.seeds;
+            force = :seeds in config.force,
+        )
+        for (metric, lbl) in [
+                (:relerr, "A-priori relative SFS error"),
+                (:crosscor, "A-priori SFS cross-correlation"),
+                (:e_post, "Time-mean relative LES error"),
+                (:diss_median, "Median SFS dissipation / reference"),
+                (:backscatter, "Backscatter fraction"),
+            ]
+            S.tabulate(
+                tgv,
+                "$(lbl), mean ± std over seeds $(config.seeds)",
+                map(s -> S.pm_string(s[metric]), seed_stat),
+            )
+        end
+    end
 
     # Time evolution of the (only-stored) filtered DNS field: a 2D-section
     # montage from IC through transition (peak dissipation) into the decay.
@@ -180,8 +239,9 @@ function run_tgv(train, tgv, config)
     end
 
     if :rollouts in config.experiments
-        upostfiles = S.get_upostfiles(tgv)
-        timings = NamedTuple(k => load_object(upostfiles[k]).timing for k in config.models)
+        timings = NamedTuple(
+            k => load_object(S.upostfile(tgv, k)).timing for k in config.models
+        )
         S.tabulate(tgv, "LES rollout wall-time (seconds) per model", timings; digits = 1)
     end
 
@@ -201,7 +261,7 @@ function run_tgv(train, tgv, config)
             "Time-mean relative LES error vs filtered DNS, per model",
             map(s -> mean(s.e_post), les_stat),
         )
-        S.plot_error_post(tgv, les_stat; normalize_time = true)
+        S.plot_error_post(tgv, les_stat; normalize_time = true, seed_stat)
     end
 
     if :spectrum_les in config.experiments
@@ -239,14 +299,25 @@ function run_tgv(train, tgv, config)
         )
 
         S.plot_densities(tgv, [:ref; sfs_keys]; dolog = true)
-        S.plot_dissipation_bar(tgv, all_keys)
-        S.plot_backscatter_bar(tgv, all_keys)
-        S.plot_apriori_bar(tgv, config.models)
+        S.plot_dissipation_bar(tgv, all_keys; seed_stat)
+        S.plot_backscatter_bar(tgv, all_keys; seed_stat)
+        S.plot_apriori_bar(tgv, config.models; seed_stat)
     end
 
     if :spectral_transfer in config.experiments
         S.compute_spectral_transfer(tgv, :ref; force = :spectral_transfer in config.force)
         S.plot_spectral_transfer(tgv, [:ref; config.models])
+    end
+
+    if :paper_tables in config.experiments
+        # Paper-ready errors table (mean ± std over seeds where available);
+        # copy plotdir/errors-tgv-Re=<Re>.tex over the paper repo's version.
+        # The equivariance column is omitted (not computed for the TGV case).
+        S.write_errors_table(
+            tgv, config.models;
+            seed_stat, include_equi = false,
+            filename = "errors-tgv-Re=$(round(Int, tgv.Re_target)).tex",
+        )
     end
 
     @info "Done with Taylor-Green test at Re = $(round(Int, tgv.Re_target))."
@@ -296,15 +367,18 @@ function main()
     # itself, so the plot reads its measured eval-window-mean Re_int (and its
     # sfs_stats under train.outdir) directly — best-effort, skipped if those
     # artifacts are not present (e.g. when the forced data is only on the cluster).
+    seeds = :seeds in config.experiments ? config.seeds : nothing
     S.plot_dissipation_vs_re(
         tgvs, [:ref; config.models];
         train_anchor = train,
         Re_key = :Re_int,
+        seeds,
     )
     S.plot_dissipation_vs_re(
         tgvs, [:ref; config.models];
         train_anchor = train,
         Re_key = :Re_tay,
+        seeds,
     )
 
     @info "Done with Reynolds sweep."

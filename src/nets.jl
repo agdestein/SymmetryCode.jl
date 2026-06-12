@@ -309,6 +309,64 @@ function fullchain(setup, net, project, ps, st, Δ)
     return model
 end
 
+"""
+Group-average a *pointwise* closure over the symmetry group of the cube,
+making it exactly equivariant at inference time:
+
+    m_sym(A) = 1/|G| Σ_g R_gᵀ m(R_g A R_gᵀ) R_g.
+
+For a pointwise closure the grid-point motion of the full field action cancels
+between `g` and `g⁻¹`, so only the value-space conjugation remains — each group
+element costs one extra forward pass (|G| = 48 in 3D, 8 in 2D) and no field
+permutation. This wraps the trained MLP into the "symmetrized MLP" baseline:
+identical parameters, exact octahedral equivariance by construction, isolating
+the learned function from the architectural constraint.
+
+Only valid for closures whose output at a point depends on the velocity
+gradient at that point alone (the learned closures here); *not* for closures
+with spatial coupling such as dynamic Smagorinsky's test filter.
+"""
+function symmetrize_pointwise(model, g::Grid)
+    D = dim(g)
+    T = typeof(g.l)
+    (; permutations, signs, elements) = group_stuff(D)
+    syms = (:x, :y, :z)[1:D]
+    # Packed symmetric component order of the stacked model output, plus the
+    # (i, j) → packed-index lookup used when conjugating the output.
+    comps = D == 2 ? ((1, 1), (2, 2), (1, 2)) :
+        ((1, 1), (2, 2), (3, 3), (1, 2), (2, 3), (3, 1))
+    pidx = Dict{NTuple{2, Int}, Int}()
+    for (t, (a, b)) in enumerate(comps)
+        pidx[(a, b)] = t
+        pidx[(b, a)] = t
+    end
+    Arot = spacetensorfield_nonsym(g)
+    acc = KernelAbstractions.zeros(g.backend, T, space_ndrange(g)..., tensordim(g))
+    return function (u, A)
+        fill!(acc, 0)
+        for e in elements
+            p, s = permutations[e[1]], signs[e[2]]
+            # Rotated input, pointwise: (R A Rᵀ)_{ab} = s_a s_b A_{p_a p_b}.
+            for a in 1:D, b in 1:D
+                dst = Arot[Symbol(syms[a], syms[b])]
+                src = A[Symbol(syms[p[a]], syms[p[b]])]
+                @. dst = s[a] * s[b] * src
+            end
+            y = model(u, Arot)
+            # Accumulate the conjugated-back output:
+            # (Rᵀ M R)_{ab} = qs_a qs_b M_{q_a q_b}, (q, qs) the inverse element.
+            q, qs = invtransform(p, s)
+            for (t, (a, b)) in enumerate(comps)
+                dst = selectdim(acc, D + 1, t)
+                src = selectdim(y, D + 1, pidx[(q[a], q[b])])
+                @. dst += qs[a] * qs[b] * src
+            end
+        end
+        acc ./= length(elements)
+        return acc
+    end
+end
+
 # --- Tensor-basis neural network (TBNN) ---
 
 # 2D basis

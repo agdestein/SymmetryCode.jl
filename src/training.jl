@@ -184,6 +184,15 @@ function create_model(setup, mode; key, buildnet, makeloss, makeloaders, wrap)
     (; outdir) = setup
     file = joinpath(outdir, "ps-$(key).jld2")
     checkpointfile = joinpath(outdir, "ps-$(key)-checkpoint.jld2")
+    # A completed training leaves ps-<key>.jld2 and deletes its checkpoint, so
+    # under :resume there is nothing to continue — skip instead of retraining.
+    # This makes the (multi-seed) training loop idempotent under :resume;
+    # use :scratch to deliberately retrain.
+    if mode == :resume && isfile(file) && !isfile(checkpointfile)
+        @info "Skipping training for $(key): completed parameters at $(file)"
+        flush(stderr)
+        mode = :skip
+    end
     net_stuff = buildnet()
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
 
@@ -273,10 +282,15 @@ function learned_paramcounts(setup, keys)
     )
 end
 
-function create_tbnn(setup, mode = :resume)
+# The `seed` kwarg selects the training seed (network initialization and batch
+# shuffling). The canonical seed keeps the plain artifact key (`ps-tbnn.jld2`);
+# other seeds get a `_seed<i>` suffix — see `seed_key` / `with_seed`.
+function create_tbnn(setup, mode = :resume; seed = setup.train_setup.seed)
+    key = seed_key(setup, :tbnn, seed)
+    setup = with_seed(setup, seed)
     return create_model(
         setup, mode;
-        key = :tbnn,
+        key,
         buildnet = () -> build_net_stuff(setup, :tbnn),
         makeloss = (ns, g) -> create_loss_tbnn(g),
         makeloaders = data -> create_dataloader_tbnn(
@@ -289,32 +303,38 @@ function create_tbnn(setup, mode = :resume)
     )
 end
 
-function create_equi(setup, mode = :resume)
+function create_equi(setup, mode = :resume; seed = setup.train_setup.seed)
+    key = seed_key(setup, :equi, seed)
+    setup = with_seed(setup, seed)
     return create_model(
         setup, mode;
-        key = :equi,
+        key,
         buildnet = () -> build_net_stuff(setup, :equi),
         makeloss = (ns, g) -> create_loss(ns.project),
         makeloaders = data -> create_dataloader(
             setup, data;
             setup.train_setup.nsample,
             setup.train_setup.batchsize,
+            rng = Xoshiro(setup.train_setup.seed),
         ),
         wrap = (ns, ps, st, g) ->
         fullchain(setup, ns.net, ns.project, ps, st, setup.Δ),
     )
 end
 
-function create_conv(setup, mode = :resume)
+function create_conv(setup, mode = :resume; seed = setup.train_setup.seed)
+    key = seed_key(setup, :conv, seed)
+    setup = with_seed(setup, seed)
     return create_model(
         setup, mode;
-        key = :conv,
+        key,
         buildnet = () -> build_net_stuff(setup, :conv),
         makeloss = (ns, g) -> create_loss(ns.project),
         makeloaders = data -> create_dataloader(
             setup, data;
             setup.train_setup.nsample,
             setup.train_setup.batchsize,
+            rng = Xoshiro(setup.train_setup.seed),
         ),
         wrap = (ns, ps, st, g) ->
         fullchain(setup, ns.net, ns.project, ps, st, setup.Δ),
@@ -322,23 +342,25 @@ function create_conv(setup, mode = :resume)
 end
 
 """
-Train each learned closure (`tbnn`, `equi`, `conv`) listed in `active`,
-persisting `ps-<key>.jld2` under `setup.outdir`. Trainings run one at a
-time with `clean()` between them so GPU memory used by one model's
-dataloader / optimizer state is reclaimed before the next begins.
+Train each learned closure (`tbnn`, `equi`, `conv`) listed in `active`, for
+every seed in `seeds`, persisting `ps-<seed_key>.jld2` under `setup.outdir`.
+Trainings run one at a time with `clean()` between them so GPU memory used by
+one model's dataloader / optimizer state is reclaimed before the next begins.
 
-`train_mode`: `:scratch` retrains, `:resume` continues from a checkpoint,
-`:skip` is a no-op. Non-learned keys in `active` are ignored. Call this
-before `build_models` if you need to (re)train.
+`train_mode`: `:scratch` retrains, `:resume` continues from a checkpoint
+(and skips seeds whose training already completed), `:skip` is a no-op.
+Non-learned keys in `active` are ignored (`:convsym` has no parameters of its
+own — it reuses `:conv`'s). Call this before `build_models` if you need to
+(re)train.
 """
-function train_models(setup, active; train_mode = :skip)
+function train_models(setup, active; train_mode = :skip, seeds = (setup.train_setup.seed,))
     train_mode == :skip && return
     creators = (; tbnn = create_tbnn, equi = create_equi, conv = create_conv)
     learned = filter(in(keys(creators)), active)
     isempty(learned) && return
     clean() # drop residency from earlier work in this REPL
-    for key in learned
-        creators[key](setup, train_mode) # returned chain discarded
+    for seed in seeds, key in learned
+        creators[key](setup, train_mode; seed) # returned chain discarded
         clean()
     end
     return

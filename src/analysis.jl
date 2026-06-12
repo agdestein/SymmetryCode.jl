@@ -300,8 +300,6 @@ function compute_qr(setup, modelkeys; force = false)
     # then matches the window being plotted.
     t_kol = mean(x -> x.t_kol, data.statistics_les[eval_range])
 
-    upostfiles = get_upostfiles(setup)
-
     for k in modelkeys
         file = "$(setup.outdir)/qr_$(k).jld2"
         skip_if_cached(file; force, label = "Q-R for $(k)") && continue
@@ -309,7 +307,7 @@ function compute_qr(setup, modelkeys; force = false)
         u_series = if k == :ref
             data.inputs[eval_range]
         else
-            load_object(upostfiles[k]).u
+            load_object(upostfile(setup, k)).u
         end
 
         qr = map(u_series) do ucpu
@@ -417,7 +415,7 @@ function compute_budget(setup, key, getmodel = () -> nothing; force = false)
         u_series = data.inputs[eval_range]
         τ_ref_series = data.outputs[eval_range]
     else
-        rollout = load_object("$(setup.outdir)/u-post-$(key).jld2")
+        rollout = load_object(upostfile(setup, key))
         u_series = rollout.u
         τ_ref_series = nothing
     end
@@ -514,7 +512,7 @@ function compute_spectral_transfer(setup, key, getmodel = () -> nothing; force =
         u_series = data.inputs[eval_range]
         τ_ref_series = data.outputs[eval_range]
     else
-        rollout = load_object("$(setup.outdir)/u-post-$(key).jld2")
+        rollout = load_object(upostfile(setup, key))
         u_series = rollout.u
         τ_ref_series = nothing
     end
@@ -608,4 +606,90 @@ function get_les_statistics_cached(setup, modelkeys; force = false)
         save_object(file, les_stat)
         les_stat
     end
+end
+
+"""
+Aggregate the seed-sweep scalar metrics for the learned closures.
+
+For each `key` in `mkeys` and each seed in `seeds`, reads the per-seed
+artifacts produced by the `:seeds` stage (`sfs_stats_<skey>.jld2`,
+`equi-errors-prior-<skey>.jld2`, `u-post-<skey>.jld2`, where `skey` is
+[`seed_key`](@ref); the canonical seed reuses the plain-key artifacts) and
+collects, per model, vectors over seeds of:
+
+- `relerr`, `crosscor` — a-priori SFS tensor error / cross-correlation;
+- `diss_median` — median pointwise SFS dissipation normalized by `:ref`;
+- `backscatter` — local backscatter fraction;
+- `equi` — mean a-priori equivariance error (`missing` if not computed);
+- `e_post` — time-mean a-posteriori solution error (`missing` if no rollout);
+- `e_post_series` — the full error-vs-time series per seed (for spread bands).
+
+Persists the aggregate to `seed_stats.jld2`. Missing artifacts are skipped
+with a warning, so a partially completed sweep still aggregates; rerun with
+`force = true` once more seeds have landed.
+"""
+function get_seed_statistics_cached(setup, mkeys, seeds; force = false)
+    file = "$(setup.outdir)/seed_stats.jld2"
+    return cached(file; force, label = "seed statistics") do
+        refmed = load_object("$(setup.outdir)/sfs_stats_ref.jld2").diss.median
+
+        # One get_les_statistics pass for every seed key with a rollout, so
+        # the (large) data.jld2 is loaded once rather than per key.
+        rolled = [
+            sk for key in mkeys
+                for sk in (seed_key(setup, key, s) for s in seeds)
+                if isfile(upostfile(setup, sk))
+        ]
+        les = isempty(rolled) ? (;) : get_les_statistics(setup, Tuple(rolled))
+
+        stat = map(collect(mkeys)) do key
+            rows = map(collect(seeds)) do s
+                skey = seed_key(setup, key, s)
+                f = "$(setup.outdir)/sfs_stats_$(skey).jld2"
+                if !isfile(f)
+                    @warn "Missing $(f); skipping seed $(s) for $(key)"
+                    return nothing
+                end
+                st = load_object(f)
+                fe = "$(setup.outdir)/equi-errors-prior-$(skey).jld2"
+                equi = isfile(fe) ? mean(load_object(fe)) : missing
+                eser = haskey(les, skey) ? les[skey].e_post : missing
+                (;
+                    seed = s,
+                    relerr = st.apriori.relerr,
+                    crosscor = st.apriori.crosscor,
+                    diss_median = st.diss.median / refmed,
+                    backscatter = st.diss.backscatter,
+                    equi,
+                    e_post = ismissing(eser) ? missing : mean(eser),
+                    e_post_series = eser,
+                )
+            end
+            rows = filter(!isnothing, rows)
+            key => (;
+                seeds = [r.seed for r in rows],
+                relerr = [r.relerr for r in rows],
+                crosscor = [r.crosscor for r in rows],
+                diss_median = [r.diss_median for r in rows],
+                backscatter = [r.backscatter for r in rows],
+                equi = [r.equi for r in rows],
+                e_post = [r.e_post for r in rows],
+                e_post_series = [r.e_post_series for r in rows],
+            )
+        end |> NamedTuple
+        save_object(file, stat)
+        stat
+    end
+end
+
+"""
+Format a collection of per-seed values as `mean ± std` for the text tables
+(the `±` is omitted when fewer than two values survive `skipmissing`).
+"""
+function pm_string(vals; sigdigits = 4)
+    v = collect(skipmissing(vals))
+    isempty(v) && return "missing"
+    m = round(mean(v); sigdigits)
+    length(v) == 1 && return string(m)
+    return string(m, " ± ", round(std(v); sigdigits = 2))
 end

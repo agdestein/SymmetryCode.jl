@@ -458,7 +458,7 @@ function split_loaders(snaps, D, batchsize; rng = nothing, val_fraction = 0.2, p
     return trainloader, valloader
 end
 
-function create_dataloader(setup, data; nsample, batchsize)
+function create_dataloader(setup, data; nsample, batchsize, rng = nothing)
     (; D, Δ) = setup
     g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
     G = tensorfield_nonsym(g)
@@ -497,7 +497,7 @@ function create_dataloader(setup, data; nsample, batchsize)
     end
     return split_loaders(
         snaps, D, batchsize;
-        setup.train_setup.val_fraction, setup.train_setup.precision,
+        rng, setup.train_setup.val_fraction, setup.train_setup.precision,
     )
 end
 

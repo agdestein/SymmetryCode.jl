@@ -32,19 +32,12 @@ function les!(du, u, grid, cache; model, visc)
     return
 end
 
-get_upostfiles(setup) = map(
-    name -> "$(setup.outdir)/u-post-$(name).jld2",
-    (;
-        nomo = "nomo",
-        smag = "smag",
-        dynsmag = "dynsmag",
-        vers = "vers",
-        clar = "clar",
-        tbnn = "tbnn",
-        equi = "equi",
-        conv = "conv",
-    ),
-)
+"""
+Path of the LES rollout artifact for closure `key`. Accepts any key — model
+keys (`:nomo`, …, `:convsym`) as well as seed-suffixed variants from
+[`seed_key`](@ref).
+"""
+upostfile(setup, key) = "$(setup.outdir)/u-post-$(key).jld2"
 
 """
 Run the LES rollout for a single closure keyed under `key`, starting from the
@@ -56,7 +49,7 @@ so a cached run never instantiates the model. Persists snapshots and timing to
 function solve_les(setup, key, getmodel; force = false)
     (; D, l, n_les, backend, visc, cfl, forced) = setup
     grid = Grid{D}(; l, n = n_les, backend)
-    file = get_upostfiles(setup)[key]
+    file = upostfile(setup, key)
     skip_if_cached(file; force, label = "LES rollout for $(key)") && return
     model = getmodel()
 
@@ -164,7 +157,6 @@ function get_les_statistics(setup, keys)
     (; D, l, n_les, backend, visc) = setup
 
     data = joinpath(setup.outdir, "data.jld2") |> load_object
-    files = get_upostfiles(setup)
 
     g = Grid{D}(; l, n = n_les, backend)
     dissfield_les = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
@@ -173,7 +165,7 @@ function get_les_statistics(setup, keys)
     u_les_gpu = vectorfield(g)
     u_ref_gpu = vectorfield(g)
     return map(keys) do k
-        f = files[k]
+        f = upostfile(setup, k)
         @info "Reading $(f)"
         flush(stderr)
         u_les = f |> load_object |> x -> x.u

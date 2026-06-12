@@ -27,7 +27,10 @@ get_setup() = S.setup_turbulator_small()
 
 get_config() = (;
     # Closures included in every multi-model step. Order propagates to plots.
-    # Available: :nomo, :dynsmag, :clar, :smag, :vers, :bard, :tbnn, :equi, :conv.
+    # Available: :nomo, :dynsmag, :clar, :smag, :vers, :bard, :tbnn, :equi,
+    # :conv, :convsym (= :conv with group-averaged, exactly equivariant
+    # inference; reuses :conv's trained parameters, costs |G| = 48 forward
+    # passes per closure call).
     models = [
         :nomo,
         # :smag,
@@ -36,13 +39,21 @@ get_config() = (;
         :dynsmag,
         :clar,
         :conv,
+        :convsym,
         :equi,
         :tbnn,
     ],
 
     # How to load trainable closures (:skip loads ps-<key>.jld2 without
-    # retraining; :resume continues from a checkpoint; :scratch retrains).
+    # retraining; :resume continues from a checkpoint, skipping seeds whose
+    # training already completed; :scratch retrains).
     train_mode = :skip,
+
+    # Training seeds for the :seeds robustness sweep. The first (canonical)
+    # seed backs all single-model figures and reuses the plain-key artifacts;
+    # the others train the learned closures again (network init + batch
+    # shuffling) so scalar metrics get a mean ± std over seeds.
+    seeds = 0:4,
 
     # Smoothing parameter for q-r plot
     # smooth_σ = nothing,
@@ -64,6 +75,8 @@ get_config() = (;
         :velocities,         # plot_velocities slice grid
         :sfs_plot,           # plot_sfs tensor-field snapshots
         :qr,                 # compute_qr + plot_qr
+        :seeds,              # per-seed rollout + a-priori stats -> seed_stats.jld2
+        :paper_tables,       # write_errors_table -> plotdir/errors.tex
     ],
 
     # Stage labels here force a re-compute regardless of cache. Uncomment
@@ -80,6 +93,7 @@ get_config() = (;
             # :equi_prior,
             # :equi_post,
             # :qr,
+            # :seeds,
         ]
     ),
 )
@@ -143,8 +157,14 @@ function main()
     #######################
 
     # train_models is a no-op when train_mode = :skip; otherwise each
-    # learned closure is trained in isolation with clean() between them.
-    S.train_models(setup, config.models; config.train_mode)
+    # (learned closure, seed) pair is trained in isolation with clean()
+    # between them. Only the canonical (first) seed is trained unless the
+    # :seeds stage is active.
+    S.train_models(
+        setup, config.models;
+        config.train_mode,
+        seeds = :seeds in config.experiments ? config.seeds : (setup.train_setup.seed,),
+    )
 
     #######################
     # Phase A — per-model compute loop
@@ -178,7 +198,10 @@ function main()
                 )
             end
         end
-        if :equi_post in config.experiments
+        if :equi_post in config.experiments && key != :convsym
+            # :convsym is skipped: it is equivariant by construction (the
+            # a-priori stage confirms machine precision) and the a-posteriori
+            # test costs 48 rollouts at 48 forward passes per closure call.
             S.apost_equivariance_error(
                 setup, key, getmodel;
                 force = :equi_post in config.force,
@@ -199,8 +222,64 @@ function main()
     end
 
     #######################
+    # Phase A2 — seed sweep for the learned closures
+    #######################
+    #
+    # Repeats rollout + a-priori stats for every (learned model, seed) pair so
+    # the scalar metrics get a spread over training seeds. The canonical seed
+    # maps to the plain key (seed_key) and therefore reuses the Phase A
+    # artifacts. :convsym rides on :conv's seeds and only the a-priori part is
+    # swept — its rollout costs |G|× the MLP's, and the canonical-seed rollout
+    # from Phase A already provides its a-posteriori error.
+    if :seeds in config.experiments
+        learned = filter(in([:tbnn, :equi, :conv, :convsym]), config.models)
+        for key in learned, seed in config.seeds
+            skey = S.seed_key(setup, key, seed)
+            @info "===== seed sweep: $(skey) ====="
+            flush(stderr)
+            S.clean()
+            local built = nothing
+            getmodel() =
+                (built === nothing && (built = S.build_seed_model(setup, key, seed)); built)
+            force = :seeds in config.force
+            key == :convsym || S.solve_les(setup, skey, getmodel; force)
+            S.predict_sfs(setup, skey, getmodel; force)
+            key == :convsym || S.apriori_equivariance_error(setup, skey, getmodel; force)
+            built = nothing
+            S.clean()
+        end
+        skeys = [S.seed_key(setup, k, s) for k in learned for s in config.seeds]
+        S.compute_sfs_stats(setup, skeys; force = :seeds in config.force)
+    end
+
+    #######################
     # Phase B — aggregation and plotting (reads on-disk artifacts only)
     #######################
+
+    # Seed aggregation first: the bar plots, error-vs-time plot, and LaTeX
+    # tables below all accept the spread when it is available.
+    seed_stat = nothing
+    if :seeds in config.experiments
+        learned = filter(in([:tbnn, :equi, :conv, :convsym]), config.models)
+        seed_stat = S.get_seed_statistics_cached(
+            setup, Tuple(learned), config.seeds;
+            force = :seeds in config.force,
+        )
+        for (metric, lbl) in [
+                (:relerr, "A-priori relative SFS error"),
+                (:crosscor, "A-priori SFS cross-correlation"),
+                (:e_post, "Time-mean relative LES error"),
+                (:equi, "Mean a-priori equivariance error"),
+                (:diss_median, "Median SFS dissipation / reference"),
+                (:backscatter, "Backscatter fraction"),
+            ]
+            tabulate(
+                setup,
+                "$(lbl), mean ± std over seeds $(config.seeds)",
+                map(s -> S.pm_string(s[metric]), seed_stat),
+            )
+        end
+    end
 
     if :training_summary in config.experiments
         learned = filter(in([:tbnn, :equi, :conv]), config.models)
@@ -220,8 +299,9 @@ function main()
     end
 
     if :rollouts in config.experiments
-        upostfiles = S.get_upostfiles(setup)
-        timings = NamedTuple(k => load_object(upostfiles[k]).timing for k in config.models)
+        timings = NamedTuple(
+            k => load_object(S.upostfile(setup, k)).timing for k in config.models
+        )
         tabulate(setup, "LES rollout wall-time (seconds) per model", timings; digits = 1)
     end
 
@@ -234,7 +314,7 @@ function main()
             "Time-mean relative LES error vs filtered DNS, per model",
             map(s -> mean(s.e_post), les_stat),
         )
-        S.plot_error_post(setup, les_stat)
+        S.plot_error_post(setup, les_stat; seed_stat)
     end
 
     if :spectrum_les in config.experiments
@@ -277,9 +357,9 @@ function main()
         )
 
         S.plot_densities(setup, [:ref; sfs_keys]; dolog = true)
-        S.plot_dissipation_bar(setup, all_keys)
-        S.plot_backscatter_bar(setup, all_keys)
-        S.plot_apriori_bar(setup, config.models)
+        S.plot_dissipation_bar(setup, all_keys; seed_stat)
+        S.plot_backscatter_bar(setup, all_keys; seed_stat)
+        S.plot_apriori_bar(setup, config.models; seed_stat)
     end
 
     if :budget in config.experiments
@@ -327,6 +407,12 @@ function main()
         qr_keys = [:ref; config.models]
         S.compute_qr(setup, qr_keys; force = :qr in config.force)
         S.plot_qr(setup, qr_keys; config.smooth_σ)
+    end
+
+    if :paper_tables in config.experiments
+        # Paper-ready errors table (mean ± std over seeds where available);
+        # copy plotdir/errors.tex over the paper repo's tables/errors.tex.
+        S.write_errors_table(setup, config.models; seed_stat)
     end
 
     @info "Done."

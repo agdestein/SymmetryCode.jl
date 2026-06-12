@@ -251,12 +251,31 @@ data_ranges(setup) = let n = setup.datagen.nstep, nt = setup.datagen.n_train
 end
 
 """
+Variant of `setup` whose learned closures train with a different `seed`
+(network initialization and batch shuffling; the data, solver, and DNS
+warm-up are unaffected). Together with [`seed_key`](@ref) this drives the
+seed sweep.
+"""
+with_seed(setup, seed) = (; setup..., train_setup = (; setup.train_setup..., seed))
+
+"""
+Artifact key for closure `key` trained with `seed`. The canonical seed (the
+one in `setup.train_setup` as defined by the setup constructor) keeps the
+plain key, so all pre-existing single-seed artifacts stay valid; other seeds
+get a `_seed<i>` suffix (`ps-tbnn_seed1.jld2`, `u-post-tbnn_seed1.jld2`, …).
+Call with the *base* setup, not a [`with_seed`](@ref) variant.
+"""
+seed_key(setup, key, seed) =
+    seed == setup.train_setup.seed ? key : Symbol(key, :_seed, seed)
+
+"""
 Build the inference-ready closure models named in `active`, in the requested
 order. Trainable closures (`tbnn`/`equi`/`conv`) always read their parameters
 from `ps-<key>.jld2` under `setup.outdir`; call [`train_models`](@ref) first
-if any of those files are missing or stale. Classical closures are
-constructed against a fresh LES `Grid`. Keys not in `active` are never
-instantiated.
+if any of those files are missing or stale. `:convsym` is the group-averaged
+("symmetrized") MLP — `:conv`'s trained parameters wrapped in
+[`symmetrize_pointwise`](@ref). Classical closures are constructed against a
+fresh LES `Grid`. Keys not in `active` are never instantiated.
 """
 function build_models(setup, active)
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
@@ -270,6 +289,24 @@ function build_models(setup, active)
         tbnn = () -> create_tbnn(setup, :skip)[1],
         equi = () -> create_equi(setup, :skip)[1],
         conv = () -> create_conv(setup, :skip)[1],
+        convsym = () -> symmetrize_pointwise(create_conv(setup, :skip)[1], g),
     )
     return NamedTuple(k => build[k]() for k in active)
+end
+
+"""
+Build one inference-ready learned closure for a specific training `seed`
+(used by the seed sweep). Learned keys load `ps-<seed_key>.jld2` from
+`setup.outdir`; `:convsym` wraps that seed's MLP in
+[`symmetrize_pointwise`](@ref).
+"""
+function build_seed_model(setup, key, seed)
+    key === :tbnn && return create_tbnn(setup, :skip; seed)[1]
+    key === :equi && return create_equi(setup, :skip; seed)[1]
+    key === :conv && return create_conv(setup, :skip; seed)[1]
+    if key === :convsym
+        g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
+        return symmetrize_pointwise(create_conv(setup, :skip; seed)[1], g)
+    end
+    return error("not a seed-swept closure: $(key)")
 end
