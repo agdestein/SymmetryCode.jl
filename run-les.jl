@@ -20,10 +20,10 @@ import SymmetryCode as S
 # Pick one. `getsetup` derives output paths automatically.
 
 # get_setup() = S.setup_laptop()
-get_setup() = S.setup_turbulator_small()
+# get_setup() = S.setup_turbulator_small()
 # get_setup() = S.setup_turbulator_medium()
 # get_setup() = S.setup_turbulator_large()
-# get_setup() = S.setup_snellius()
+get_setup() = S.setup_snellius()
 
 get_config() = (;
     # Closures included in every multi-model step. Order propagates to plots.
@@ -56,8 +56,8 @@ get_config() = (;
     seeds = 0:4,
 
     # Smoothing parameter for q-r plot
-    # smooth_σ = nothing,
-    smooth_σ = 2,
+    smooth_σ = nothing,
+    # smooth_σ = 1,
 
     # Pipeline stages to execute. Cached stages skip per-key when their
     # artifact already exists under setup.outdir — see :force for invalidation.
@@ -71,7 +71,7 @@ get_config() = (;
         :budget,             # compute_budget -> budget_<k>.jld2; KE(t) + eps_sfs(t) plot
         :spectral_transfer,  # compute_spectral_transfer -> transfer_<k>.jld2; eps_sfs(k) plot
         :equi_prior,         # apriori_equivariance_error + plot
-        :equi_post,          # apost_equivariance_error + plot
+        # :equi_post,          # apost_equivariance_error + plot
         :velocities,         # plot_velocities slice grid
         :sfs_plot,           # plot_sfs tensor-field snapshots
         :qr,                 # compute_qr + plot_qr

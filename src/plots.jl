@@ -1104,9 +1104,10 @@ function plot_qr(setup, modelkeys; smooth_σ = nothing)
             ncat = 6
         elseif contains(name, "snellius")
             # ran = 1.0e-4, 1.0e1
-            # ncat = 7
-            ran = 1.0e-3, 1.0e1
-            ncat = 7
+            ncat = 6
+            ran = 5.0e-3, 1.0e1
+            # ran = 1.0e-2, 1.0e2
+            # ncat = 5
         end
         # key => extrema(qr.density) |> display
         isref = key == :dns || key == :ref
@@ -1137,8 +1138,10 @@ function plot_qr(setup, modelkeys; smooth_σ = nothing)
         elseif contains(name, "snellius")
             # xlims!(ax, -2.0, 2.0)
             # ylims!(ax, -3, 4)
-            xlims!(ax, -1.2, 1.4)
-            ylims!(ax, -2.5, 3)
+            # xlims!(ax, -1.0, 1.2)
+            # ylims!(ax, -2.2, 2.5)
+            xlims!(ax, -0.8, 1.1)
+            ylims!(ax, -2.0, 2.0)
         end
     end
     save("$(setup.plotdir)/qr.pdf", fig; backend = CairoMakie)

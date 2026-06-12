@@ -20,10 +20,10 @@ import SymmetryCode as S
 # Pick one. Output paths are derived automatically.
 
 # get_setup() = S.setup_laptop()
-get_setup() = S.setup_turbulator_small()
+# get_setup() = S.setup_turbulator_small()
 # get_setup() = S.setup_turbulator_medium()
 # get_setup() = S.setup_turbulator_large()
-# get_setup() = S.setup_snellius()
+get_setup() = S.setup_snellius()
 
 get_config() = (;
     # Pipeline stages to execute, in order. `create_dns` (:dns) writes

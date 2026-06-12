@@ -29,10 +29,10 @@ import SymmetryCode as S
 # Pick the *training* setup whose trained closures (ps-*.jld2) we reuse.
 # The paper uses setup_snellius; the others work identically.
 
-get_setup() = S.setup_turbulator_small()
+# get_setup() = S.setup_turbulator_small()
 # get_setup() = S.setup_turbulator_medium()
 # get_setup() = S.setup_turbulator_large()
-# get_setup() = S.setup_snellius()
+get_setup() = S.setup_snellius()
 
 get_config() = (;
     # Closures included in every multi-model step. Order propagates to plots.
