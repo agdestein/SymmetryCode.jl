@@ -11,7 +11,7 @@ getlabels() = (;
     clar = "Clark",
     bard = "Bardina",
     tbnn = "TBNN",
-    equi = "G-Conv",
+    equi = "G-CNN",
     conv = "MLP",
     convsym = "MLP (sym)",
 )

@@ -1,4 +1,4 @@
-# Generic training loop and per-model orchestration (TBNN, G-Conv, Conv).
+# Generic training loop and per-model orchestration (TBNN, G-CNN, Conv).
 
 create_loss(project) = function loss(net, ps, st, (x, y))
     ps = project(ps)
