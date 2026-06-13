@@ -247,7 +247,7 @@ function run_tgv(train, tgv, config)
 
     if :budget in config.experiments
         S.compute_budget(tgv, :ref; force = :budget in config.force)
-        S.plot_budget(tgv, [:ref; config.models])
+        S.plot_budget(tgv, [:ref; config.models]; normalize_time = true)
         # Headline Taylor-Green benchmark: ε*(t*) and E*(t*) vs DNS + published Re=1600.
         S.plot_dissipation_tgv(tgv, [:ref; config.models])
     end

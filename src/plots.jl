@@ -117,9 +117,21 @@ function plot_training(setup, mkeys)
     return fig
 end
 
-# `normalize_time` plots against the dimensionless convective time t* = t·V₀/L
-# (L = 1), matching `plot_dissipation_tgv`; used for the decaying TGV test, where
-# t* is comparable across the Reynolds sweep. The forced case keeps raw time.
+"""
+Average large-eddy turnover time `T = ⟨L/u'⟩` of the filtered-DNS reference,
+used to nondimensionalize the time axis of the a-posteriori plots. Averaged
+over the stored DNS-resolution reference statistics (`statistics_dns`; `t_int`
+from [`turbulence_statistics`](@ref) is the eddy-turnover time `L/u'`).
+"""
+function reference_turnover_time(setup)
+    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    return mean(s -> s.t_int, data.statistics_dns)
+end
+
+# The forced case counts reference large-eddy turnover times t / T (T from
+# `reference_turnover_time`); `normalize_time` switches to the convective time
+# t* = t·V₀/L (L = 1) used for the decaying TGV test, comparable across the
+# Reynolds sweep (matching `plot_dissipation_tgv`).
 #
 # `seed_stat` (from `get_seed_statistics_cached`) draws a min-max band over
 # training seeds behind each learned model's curve. When `:tbnn` is among the
@@ -131,14 +143,22 @@ function plot_error_post(setup, les_stat; normalize_time = false, seed_stat = no
     fig = Figure(; size = (400, 360))
     ax = Axis(
         fig[1, 1];
-        # xlabel = normalize_time ? L"t^* = t V_0 / L" : "Time",
+        # `normalize_time` (TGV) measures the convective time t* = t·V₀/L,
+        # comparable across the Reynolds sweep; otherwise (forced) the time axis
+        # counts reference large-eddy turnover times t / T.
+        # xlabel = normalize_time ? L"t^* = t V_0 / L" : L"t / T",
         xlabel = "Time",
         ylabel = "Relative error",
     )
-    # e_post is eval-window-aligned; pull the matching times.
+    # e_post is eval-window-aligned; pull the matching times and shift to start
+    # at zero.
     t = data.times[data_ranges(setup).eval]
     t .-= t[1] # Mark start time as zero
-    normalize_time && (t .*= setup.V0)
+    if normalize_time
+        t .*= setup.V0
+    else
+        t ./= mean(s -> s.t_int, data.statistics_dns)
+    end
     labels = getlabels()
     styles = getstyles()
     for k in keys(les_stat)
@@ -197,7 +217,7 @@ function plot_densities(setup, mkeys; dolog)
     (; outdir, plotdir, name) = setup
     yscale = dolog ? log10 : identity
 
-    # t_kol = mean(x -> x.t_kol, data.statistics_les)
+    # t_kol = mean(x -> x.t_kol, data.statistics_dns)
 
     fig = Figure(; size = (900, 300))
     labels = getlabels()
@@ -501,18 +521,23 @@ backscatter). Same drain convention as [`plot_densities`](@ref),
 
 `keys` should include `:ref` and any closure keys. Reads `budget_<k>.jld2`.
 """
-function plot_budget(setup, keys)
+function plot_budget(setup, keys; normalize_time = false)
     (; outdir, plotdir) = setup
     labels = getlabels()
     styles = getstyles()
     fig = Figure(; size = (820, 360))
-    ax_ke = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Kinetic energy")
-    ax_eps = Axis(fig[1, 2]; xlabel = "Time", ylabel = "SFS dissipation rate")
+    # Match `plot_error_post`: TGV uses the convective time t* = t·V₀/L, the
+    # forced case counts reference large-eddy turnover times t / T.
+    # xlabel = normalize_time ? L"t^* = t V_0 / L" : L"t / T"
+    xlabel = "Time"
+    tnorm = normalize_time ? setup.V0 : inv(reference_turnover_time(setup))
+    ax_ke = Axis(fig[1, 1]; xlabel, ylabel = "Kinetic energy")
+    ax_eps = Axis(fig[1, 2]; xlabel, ylabel = "SFS dissipation rate")
     for k in keys
         b = load_object("$(outdir)/budget_$(k).jld2")
         kw = (; label = labels[k], color = styles[k].color, linestyle = styles[k].linestyle)
-        lines!(ax_ke, b.t .- b.t[1], b.ke; kw...)
-        lines!(ax_eps, b.t .- b.t[1], b.eps_sfs; kw...)
+        lines!(ax_ke, (b.t .- b.t[1]) .* tnorm, b.ke; kw...)
+        lines!(ax_eps, (b.t .- b.t[1]) .* tnorm, b.eps_sfs; kw...)
     end
     Legend(
         fig[0, :], ax_ke;
