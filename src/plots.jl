@@ -853,7 +853,7 @@ function plot_spectral_transfer(setup, keys)
     Legend(
         fig[0, 1], ax;
         tellwidth = false, tellheight = true, framevisible = false,
-        horizontal = true, nbanks = 3,
+        horizontal = true, nbanks = 4,
     )
     rowgap!(fig.layout, 5)
     file = "$(plotdir)/spectral-transfer.pdf"
@@ -1094,11 +1094,12 @@ function plot_qr(setup, modelkeys; smooth_σ = nothing)
         equi = colorvec[lescolor],
     )
 
-    plotkeys = filter(!=(:ref), modelkeys)
+    # plotkeys = filter(!=(:ref), modelkeys)
+    plotkeys = modelkeys
 
     # Panel grid grows with the model count (2 rows, as many columns as needed).
     npanel = length(plotkeys)
-    nrow = npanel <= 3 ? 1 : 2
+    nrow = npanel <= 4 ? 1 : 2
     ncol = ceil(Int, npanel / nrow)
     fig = Figure(; size = (217 * ncol, 220 * nrow))
 
@@ -1623,8 +1624,9 @@ function plot_spectrum_les(setup, les_stat)
         tellwidth = false,
         tellheight = true,
         framevisible = false,
-        horizontal = true,
-        nbanks = 2,
+        # horizontal = true,
+        # nbanks = 4,
+        orientation = :horizontal,
     )
     rowgap!(fig.layout, 5)
 
