@@ -40,7 +40,7 @@ function predict_sfs(setup, key, getmodel; force = false)
         # Prediction by LES model
         unstack_symtensor(model(u, AA), g) |> cpu_device()
     end
-    save_object(file, τ_series)
+    save_object_atomic(file, τ_series)
     return
 end
 
@@ -213,7 +213,7 @@ function compute_sfs_stats(setup, keys; force = false)
             ),
             apriori = (; relerr = mean(relerrs), crosscor = mean(crosscors)),
         )
-        save_object(file, result)
+        save_object_atomic(file, result)
     end
     return
 end
@@ -253,7 +253,7 @@ function apriori_equivariance_error(setup, key, getmodel; force = false)
             rmG = stack(rmG_split)
             norm(rmG - mrG) / norm(mrG)
         end
-        save_object(file, err)
+        save_object_atomic(file, err)
         err
     end
 end
@@ -333,7 +333,7 @@ function compute_qr(setup, modelkeys; force = false)
             npoints = (1000, 1000),
         )
         @info "Saving Q-R density to $(file)"
-        save_object(file, (; dens.x, dens.y, dens.density))
+        save_object_atomic(file, (; dens.x, dens.y, dens.density))
     end
     return nothing
 end
@@ -362,7 +362,7 @@ function apost_equivariance_error(setup, key, getmodel; force = false, tstop = 1
                 groupindex = i, tstop, dolog = false,
             )
         end
-        save_object(file, err)
+        save_object_atomic(file, err)
         err
     end
 end
@@ -477,7 +477,7 @@ function compute_budget(setup, key, getmodel = () -> nothing; force = false)
         eps_sfs[i] = -mean(contract_dissipation(τ, S, g))
     end
 
-    save_object(file, (; t = times, ke, eps_visc, eps_sfs))
+    save_object_atomic(file, (; t = times, ke, eps_visc, eps_sfs))
     return
 end
 
@@ -535,7 +535,7 @@ function compute_spectral_transfer(setup, key, getmodel = () -> nothing; force =
     nsnap = length(u_series)
 
     if key == :nomo
-        save_object(file, (; k = collect(stuff.k), eps_sfs = T_accum))
+        save_object_atomic(file, (; k = collect(stuff.k), eps_sfs = T_accum))
         return
     end
 
@@ -586,7 +586,7 @@ function compute_spectral_transfer(setup, key, getmodel = () -> nothing; force =
     # shells (positive = backscatter). Negate to switch to the drain
     # convention `ε_sfs(k)` shared by the rest of the pipeline.
     eps_sfs = .-T_accum ./ nsnap
-    save_object(file, (; k = collect(stuff.k), eps_sfs))
+    save_object_atomic(file, (; k = collect(stuff.k), eps_sfs))
     return
 end
 
@@ -603,7 +603,7 @@ function get_les_statistics_cached(setup, modelkeys; force = false)
     file = "$(setup.outdir)/les_stat.jld2"
     return cached(file; force, label = "LES statistics") do
         les_stat = get_les_statistics(setup, modelkeys)
-        save_object(file, les_stat)
+        save_object_atomic(file, les_stat)
         les_stat
     end
 end
@@ -677,7 +677,7 @@ function get_seed_statistics_cached(setup, mkeys, seeds; force = false)
                 e_post_series = [r.e_post_series for r in rows],
             )
         end |> NamedTuple
-        save_object(file, stat)
+        save_object_atomic(file, stat)
         stat
     end
 end

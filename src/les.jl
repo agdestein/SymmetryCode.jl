@@ -76,7 +76,7 @@ function solve_les(setup, key, getmodel; force = false)
     snapshots = solve_les!(u_model; times, grid, visc, model, cfl, forced)
     t = time() - t
 
-    save_object(file, (; times, u = snapshots, timing = t))
+    save_object_atomic(file, (; times, u = snapshots, timing = t))
     return
 end
 

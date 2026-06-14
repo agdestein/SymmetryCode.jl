@@ -107,7 +107,7 @@ function create_dns(setup; force = false)
     # Save results
     @info "Saving final DNS snapshot to $(filename)"
     flush(stderr)
-    jldsave(
+    jldsave_atomic(
         filename;
         u = u |> cpu_device(),
         times,
@@ -228,7 +228,7 @@ function create_data(setup; force = false)
     timing = time() - timing
 
     # Save results
-    save_object(
+    save_object_atomic(
         filename,
         (;
             inputs,
@@ -365,7 +365,7 @@ function create_data_tgv(setup)
     timing = time() - timing
 
     # Save results
-    save_object(
+    save_object_atomic(
         filename,
         (;
             inputs,

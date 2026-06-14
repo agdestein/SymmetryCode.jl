@@ -125,7 +125,7 @@ function train(;
             end
 
             if !isnothing(checkpointfile) && step % checkpoint_every == 0
-                jldsave(
+                jldsave_atomic(
                     checkpointfile;
                     epoch = iepoch - 1, # resume re-runs at most this epoch
                     ps_cur = train_state.parameters |> cpu_device(),
@@ -143,7 +143,7 @@ function train(;
         epochs_since_improve =
             l_best < l_best_epoch_start ? 0 : epochs_since_improve + 1
         if !isnothing(checkpointfile)
-            jldsave(
+            jldsave_atomic(
                 checkpointfile;
                 epoch = iepoch,
                 ps_cur = train_state.parameters |> cpu_device(),
@@ -210,7 +210,7 @@ function create_model(setup, mode; key, buildnet, makeloss, makeloaders, wrap)
             checkpointfile,
             resume = mode == :resume,
         )
-        save_object(
+        save_object_atomic(
             file,
             (;
                 ps = result.ps |> cpu_device(),

@@ -32,7 +32,7 @@ and return its result; `compute` is responsible for persisting to `file`.
 
     cached(file; force) do
         result = expensive()
-        save_object(file, result)
+        save_object_atomic(file, result)
         result
     end
 """
@@ -43,6 +43,45 @@ function cached(compute, file; force = false, label = basename(file))
         return load_object(file)
     end
     return compute()
+end
+
+"""
+Atomically persist `obj` to `file` via `JLD2.save_object`: write to a temporary
+file in the *same directory*, then `mv` it over `file`. The rename is atomic on a
+POSIX filesystem, so a crash mid-write — e.g. the `SIGBUS` JLD2 raises when an
+mmap'd write hits a full filesystem/quota — leaves `file` either absent or fully
+intact, never a truncated artifact that `skip_if_cached`/`cached` would mistake
+for a complete cache entry. Use this instead of `save_object` for any pipeline
+artifact that a later run treats as cached.
+"""
+function save_object_atomic(file, obj)
+    tmp = tempname(dirname(file); cleanup = false)
+    try
+        save_object(tmp, obj)
+        mv(tmp, file; force = true)
+    catch
+        isfile(tmp) && rm(tmp; force = true)
+        rethrow()
+    end
+    return
+end
+
+"""
+Atomically persist a multi-key JLD2 archive: like [`save_object_atomic`](@ref)
+but wrapping `JLD2.jldsave` (write to a sibling temp file, then `mv` over `file`).
+Used for the multi-field DNS/data archives and the resumable training checkpoint,
+where a half-written file would corrupt the cache or break `:resume`.
+"""
+function jldsave_atomic(file; kwargs...)
+    tmp = tempname(dirname(file); cleanup = false)
+    try
+        jldsave(tmp; kwargs...)
+        mv(tmp, file; force = true)
+    catch
+        isfile(tmp) && rm(tmp; force = true)
+        rethrow()
+    end
+    return
 end
 
 "Path of the text table artifact `\$(setup.plotdir)/<filename>` (default `tables.txt`).
