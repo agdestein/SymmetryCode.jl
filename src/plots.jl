@@ -140,7 +140,7 @@ end
 # *bounds* the difference instead of hiding it.
 function plot_error_post(setup, les_stat; normalize_time = false, seed_stat = nothing)
     data = joinpath(setup.outdir, "data.jld2") |> load_object
-    fig = Figure(; size = (400, 360))
+    fig = Figure(; size = (450, 380))
     ax = Axis(
         fig[1, 1];
         # `normalize_time` (TGV) measures the convective time t* = t·V₀/L,
@@ -206,7 +206,7 @@ function plot_error_post(setup, les_stat; normalize_time = false, seed_stat = no
         tellheight = true,
         framevisible = false,
         horizontal = true,
-        nbanks = 3,
+        nbanks = 4,
     )
     rowgap!(fig.layout, 5)
     save("$(setup.plotdir)/error-post.pdf", fig; backend = CairoMakie)
@@ -542,7 +542,8 @@ function plot_budget(setup, keys; normalize_time = false)
     Legend(
         fig[0, :], ax_ke;
         tellwidth = false, tellheight = true, framevisible = false,
-        horizontal = true, nbanks = 4,
+        # horizontal = true, nbanks = 4,
+        orientation = :horizontal,
     )
     rowgap!(fig.layout, 5)
     file = "$(plotdir)/budget.pdf"
@@ -834,7 +835,7 @@ function plot_spectral_transfer(setup, keys)
     r = spectrum_reference(setup, stats)
     ε = stats.diss
 
-    fig = Figure(; size = (520, 360))
+    fig = Figure(; size = (450, 360))
     ax = Axis(
         fig[1, 1];
         xscale = log10,
