@@ -73,6 +73,7 @@ get_config() = (;
         :spectral_transfer,  # compute_spectral_transfer -> eps_sfs(k) plot
         :seeds,              # per-seed rollout + a-priori stats -> seed_stats.jld2
         :paper_tables,       # write_errors_table -> plotdir/errors-tgv-Re=<Re>.tex
+        :Re_sweep,           # Reynolds number sweep plot
     ],
 
     # Stage labels here force a re-compute regardless of cache.
@@ -199,7 +200,9 @@ function run_tgv(train, tgv, config)
                 (built === nothing && (built = S.build_seed_model(train, key, seed)); built)
             force = :seeds in config.force
             key == :convsym || S.solve_les(tgv, skey, getmodel; force)
-            S.predict_sfs(tgv, skey, getmodel; force)
+            if :sfs in config.experiments
+                S.predict_sfs(tgv, skey, getmodel; force)
+            end
             built = nothing
         end
         skeys = [S.seed_key(tgv, k, s) for k in learned for s in config.seeds]
@@ -367,21 +370,26 @@ function main()
     # itself, so the plot reads its measured eval-window-mean Re_int (and its
     # sfs_stats under train.outdir) directly — best-effort, skipped if those
     # artifacts are not present (e.g. when the forced data is only on the cluster).
-    seeds = :seeds in config.experiments ? config.seeds : nothing
-    S.plot_dissipation_vs_re(
-        tgvs, [:ref; config.models];
-        train_anchor = train,
-        Re_key = :Re_int,
-        seeds,
-    )
-    S.plot_dissipation_vs_re(
-        tgvs, [:ref; config.models];
-        train_anchor = train,
-        Re_key = :Re_tay,
-        seeds,
-    )
+    if :Re_sweep in config.experiments
+        @info "Doing Reynolds sweep."
+        flush(stderr)
 
-    @info "Done with Reynolds sweep."
+        seeds = :seeds in config.experiments ? config.seeds : nothing
+        S.plot_dissipation_vs_re(
+            tgvs, [:ref; config.models];
+            train_anchor = train,
+            Re_key = :Re_int,
+            seeds,
+        )
+        S.plot_dissipation_vs_re(
+            tgvs, [:ref; config.models];
+            train_anchor = train,
+            Re_key = :Re_tay,
+            seeds,
+        )
+    end
+
+    @info "Done with TGV."
     flush(stderr)
     return
 end

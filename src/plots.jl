@@ -185,7 +185,7 @@ function plot_error_post(setup, les_stat; normalize_time = false, seed_stat = no
         axin = Axis(
             fig[1, 1];
             width = Relative(0.45), height = Relative(0.3),
-            halign = 0.95, valign = 0.08,
+            halign = 0.95, valign = 0.12,
             xticklabelsize = 8, yticklabelsize = 8,
             title = "Difference to TBNN", titlesize = 9, titlegap = 2,
             backgroundcolor = (:white, 0.85),
@@ -198,6 +198,10 @@ function plot_error_post(setup, les_stat; normalize_time = false, seed_stat = no
             lines!(axin, t[1:n], e[1:n] .- e_tbnn[1:n]; color = styles[k].color)
         end
         hlines!(axin, [0.0]; color = (:black, 0.5), linestyle = :dash, linewidth = 0.7)
+
+        # https://discourse.julialang.org/t/makie-inset-axes-and-their-drawing-order/60987/5
+        translate!(axin.scene, 0, 0, 10)
+        translate!(axin.elements[:background], 0, 0, 9)
     end
     Legend(
         fig[0, 1],
