@@ -1641,36 +1641,55 @@ end
 
 # --- Paper-ready LaTeX tables ---
 
-"Fixed-point decimal string with exactly `digits` decimals (no Printf dep)."
+"""
+Fixed-point decimal string with exactly `digits` decimals (no Printf dep).
+Built from the integer of the scaled value, so it stays correct for small
+magnitudes that `string` would otherwise render in scientific notation
+(`string(6.0e-5) == \"6.0e-5\"`).
+"""
 function fixeddecimals(x, digits)
-    s = string(round(x; digits))
-    i = findfirst('.', s)
-    isnothing(i) && (s *= "."; i = length(s))
-    return s * "0"^(digits - (length(s) - i))
+    neg = x < 0
+    scaled = round(Int, abs(x) * 10.0^digits)
+    s = lpad(string(scaled), digits + 1, '0')
+    frac = digits == 0 ? "" : "." * s[(end - digits + 1):end]
+    return (neg ? "-" : "") * s[1:(end - digits)] * frac
 end
 
-"""
-LaTeX cell body for a number: fixed `digits` decimals for O(1) values,
-`m.mmm\\e{n}` (the paper's `\\e` ×10ⁿ macro) for values below the rounding
-resolution, so machine-precision equivariance errors stay legible.
-"""
-function latexnum(x; digits = 4)
-    x isa Real || return string(x)
-    x == 0 && return fixeddecimals(0.0, digits)
-    if abs(x) < 10.0^(-digits)
-        e = floor(Int, log10(abs(x)))
-        m = round(x / exp10(e); digits = 3)
-        return "$(m)\\e{$(e)}"
+"Minimal number of decimals needed to write `x` exactly (robust vs float `log10` edge cases)."
+function _ndecimals(x)
+    x == 0 && return 0
+    d = 0
+    while round(x; digits = d) != x && d < 15
+        d += 1
     end
-    return fixeddecimals(x, digits)
+    return d
 end
 
-"LaTeX cell body of per-seed values: `mean \\pm std`, or the single value."
-function latexpm(vals; digits = 4)
-    v = collect(skipmissing(vals))
-    isempty(v) && return nothing
-    length(v) == 1 && return latexnum(v[1]; digits)
-    return "$(latexnum(mean(v); digits)) \\pm $(latexnum(std(v); digits))"
+"""
+Number of decimals needed to show `x`'s leading significant figure(s) as
+fixed-point: `sigdecimals(3.0e-4) == 4`, `sigdecimals(0.25) == 1`,
+`sigdecimals(0) == 0`. Drives the per-column precision in
+[`write_errors_table`](@ref) so no fixed-point cell is rounded away to `0.000`.
+"""
+sigdecimals(x; sigdigits = 1) = x == 0 ? 0 : _ndecimals(round(x; sigdigits))
+
+"Fixed-point cell body `c` (or `c \\pm s`; `s === nothing` for a lone value), both at `d` decimals."
+function format_fixed(c, s, d)
+    isnothing(s) && return fixeddecimals(c, d)
+    return "$(fixeddecimals(c, d)) \\pm $(fixeddecimals(s, d))"
+end
+
+"""
+Scientific cell body `m.mmm\\e{n}` (the paper's `\\e` ×10ⁿ macro), or
+`(m.mmm \\pm s.sss)\\e{n}` when seeded — the std shares the mean's exponent so
+both align. Used for the O(1e-15) equivariance errors, which sit below any
+sensible fixed-point resolution.
+"""
+function format_sci(c, s)
+    e = floor(Int, log10(abs(c)))
+    cs = fixeddecimals(c / exp10(e), 3)
+    isnothing(s) && return "$(cs)\\e{$(e)}"
+    return "($(cs) \\pm $(fixeddecimals(s / exp10(e), 3)))\\e{$(e)}"
 end
 
 """
@@ -1683,6 +1702,12 @@ a-posteriori solution error, mean a-priori equivariance error (skipped with
 `include_equi = false`, e.g. for the Taylor-Green case where it is not
 computed), median pointwise SFS dissipation normalized by the reference, and
 the local backscatter fraction. Cells whose artifact is missing print `--`.
+
+Each column is printed at a *uniform* decimal precision: a per-column floor,
+widened so the cell with the smallest (seed std / value) still shows its leading
+significant figure, so seeded and non-seeded rows line up and nothing is rounded
+away to `0.000`. Values too small for that (the O(1e-15) equivariance errors)
+fall back to shared-exponent `\\e{n}` scientific notation per cell.
 
 Reads `sfs_stats_<key>.jld2`, `les_stat.jld2`, and
 `equi-errors-prior-<key>.jld2` for the canonical values. Copy the output over
@@ -1700,7 +1725,11 @@ function write_errors_table(
     lesfile = "$(outdir)/les_stat.jld2"
     les_stat = isfile(lesfile) ? load_object(lesfile) : (;)
 
-    math(c) = isnothing(c) ? "--" : "\$$(c)\$"
+    # Values below this many fixed-point decimals print in `\e{}` scientific
+    # notation instead of widening a whole column to show them (keeps the
+    # O(1e-15) equivariance errors out of the decimal columns).
+    maxdec = 6
+
     seedvals(k, metric) =
     if !isnothing(seed_stat) && haskey(seed_stat, k)
         v = seed_stat[k][metric]
@@ -1708,48 +1737,74 @@ function write_errors_table(
     else
         nothing
     end
-    # Cell value: seed sweep (mean ± std) if available, else the canonical
-    # artifact via `fallback` (a thunk so missing files are only probed once).
-    cell(k, metric, fallback; digits = 4) = let v = seedvals(k, metric)
-        isnothing(v) ? math(fallback()) : math(latexpm(v; digits))
+    # Raw cell descriptor: `nothing` (→ "--"), a passthrough LaTeX string
+    # (`N.A.` / `\mathrm{NaN}`), or `(; c, s)` with central value `c` and seed
+    # std `s` (`nothing` for a single seed / exact reproducibility) — from the
+    # seed sweep if present, else the canonical `fallback` artifact (a thunk so
+    # missing files are only probed once).
+    function cellval(k, metric, fallback)
+        v = seedvals(k, metric)
+        if isnothing(v)
+            c = fallback()
+            isnothing(c) && return nothing
+            s = nothing
+        else
+            vv = collect(skipmissing(v))
+            isempty(vv) && return nothing
+            c = mean(vv)
+            s = length(vv) > 1 && std(vv) > 0 ? std(vv) : nothing
+        end
+        isnan(c) && return "\$\\mathrm{NaN}\$"
+        return (; c = float(c), s = isnothing(s) ? nothing : float(s))
     end
 
-    rows = map(collect(mkeys)) do k
+    # One descriptor per cell, in column order.
+    descs = map(collect(mkeys)) do k
         f = "$(outdir)/sfs_stats_$(k).jld2"
         stats = isfile(f) ? load_object(f) : nothing
         fe = "$(outdir)/equi-errors-prior-$(k).jld2"
-        cells = [
-            cell(k, :relerr, () -> isnothing(stats) ? nothing : latexnum(stats.apriori.relerr)),
-            cell(k, :crosscor, () -> isnothing(stats) ? nothing : latexnum(stats.apriori.crosscor)),
-            cell(
-                k, :e_post,
-                () -> haskey(les_stat, k) ? latexnum(mean(les_stat[k].e_post)) : nothing,
-            ),
+        ds = Any[
+            cellval(k, :relerr, () -> isnothing(stats) ? nothing : stats.apriori.relerr),
+            cellval(k, :crosscor, () -> isnothing(stats) ? nothing : stats.apriori.crosscor),
+            cellval(k, :e_post, () -> haskey(les_stat, k) ? mean(les_stat[k].e_post) : nothing),
         ]
-        if include_equi
-            push!(
-                cells,
-                k == :nomo ? "N.A." :
-                    cell(k, :equi, () -> isfile(fe) ? latexnum(mean(load_object(fe))) : nothing),
-            )
-        end
-        push!(
-            cells,
-            cell(
-                k, :diss_median,
-                () -> isnothing(stats) ? nothing : latexnum(stats.diss.median / refmed; digits = 3);
-                digits = 3,
-            ),
+        include_equi && push!(
+            ds,
+            k == :nomo ? "N.A." :
+                cellval(k, :equi, () -> isfile(fe) ? mean(load_object(fe)) : nothing),
         )
-        push!(
-            cells,
-            cell(
-                k, :backscatter,
-                () -> isnothing(stats) ? nothing : latexnum(stats.diss.backscatter; digits = 3);
-                digits = 3,
-            ),
-        )
-        "    $(rpad(labels[k], 11)) & " * join(cells, " & ") * " \\\\"
+        push!(ds, cellval(k, :diss_median, () -> isnothing(stats) ? nothing : stats.diss.median / refmed))
+        push!(ds, cellval(k, :backscatter, () -> isnothing(stats) ? nothing : stats.diss.backscatter))
+        ds
+    end
+
+    # Per-column uniform precision: each numeric column floors at `bases[j]` and
+    # widens to the most decimals any of its fixed-point cells needs to show its
+    # leading significant figure (the std's, when seeded). Sub-`maxdec` cells
+    # stay scientific and don't participate. Result: every fixed cell in a column
+    # prints at one shared decimal place and none collapses to `0.000`.
+    bases = include_equi ? [4, 4, 4, 4, 3, 3] : [4, 4, 4, 3, 3]
+    isfixed(d) = d isa NamedTuple && (d.c == 0 || sigdecimals(d.c) <= maxdec)
+    coldigits = map(eachindex(bases)) do j
+        reqs = [
+            isnothing(d.s) ? sigdecimals(d.c) : max(sigdecimals(d.c), sigdecimals(d.s))
+            for d in getindex.(descs, j) if isfixed(d)
+        ]
+        max(bases[j], maximum(reqs; init = 0))
+    end
+
+    fmt(d, dcol) =
+        d === nothing ? "--" :
+        d isa AbstractString ? d :
+        isfixed(d) ? "\$$(format_fixed(d.c, d.s, dcol))\$" : "\$$(format_sci(d.c, d.s))\$"
+
+    # Format every cell, then pad each column to its widest entry so the source
+    # `.tex` stays column-aligned (trailing pad on the last column is trimmed).
+    cellrows = [[fmt(ds[j], coldigits[j]) for j in eachindex(bases)] for ds in descs]
+    widths = [maximum(length(cr[j]) for cr in cellrows) for j in eachindex(bases)]
+    rows = map(zip(collect(mkeys), cellrows)) do (k, cells)
+        padded = join((rpad(cells[j], widths[j]) for j in eachindex(bases)), " & ")
+        rstrip("    $(rpad(labels[k], 11)) & " * padded) * " \\\\"
     end
 
     header = [
