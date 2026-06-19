@@ -1758,7 +1758,7 @@ function write_errors_table(
             c = mean(vv)
             s = length(vv) > 1 && std(vv) > 0 ? std(vv) : nothing
         end
-        isnan(c) && return "\$\\mathrm{NaN}\$"
+        isnan(c) && return "--"  # undefined (e.g. 0/0 cross-corr when a model's predicted stress vanishes)
         return (; c = float(c), s = isnothing(s) ? nothing : float(s))
     end
 
