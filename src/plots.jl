@@ -1843,3 +1843,37 @@ function write_errors_table(
     flush(stderr)
     return file
 end
+
+"""
+Plot the Phase-0 Re_Δ binning diagnostic produced by
+[`compute_redelta_binning`](@ref): median (band = inter-quartile range) of the
+two scale-invariant targets vs pointwise `Re_Δ`, with the within-flow slope in
+each panel title. A flat line ⇒ no usable within-flow Re_Δ signal; compare the
+slope *sign* to `fig:dissipation-vs-re` (`Notes/ReDependence.md`).
+"""
+function plot_redelta_binning(setup)
+    r = load_object("$(setup.outdir)/redelta_binning.jld2")
+    fig = Figure(; size = (820, 340))
+    panels = (
+        (r.diss, r.slope.diss, L"-\tau_{ij}S_{ij}\,/\,(\Delta^2|\bar A|^3)", "Normalized SFS dissipation"),
+        (r.stress, r.slope.stress, L"\|\tau\|_F\,/\,(\Delta^2|\bar A|^2)", "Normalized SFS stress"),
+    )
+    for (col, (st, slope, ylabel, title)) in enumerate(panels)
+        ax = Axis(
+            fig[1, col];
+            xscale = log10,
+            xlabel = L"\mathrm{Re}_\Delta = \Delta^2|\bar A|/\nu",
+            ylabel,
+            title = "$(title) — slope $(round(slope; sigdigits = 2))/decade",
+        )
+        ok = findall(b -> st.count[b] > 0 && isfinite(st.median[b]), eachindex(st.median))
+        band!(ax, r.centers[ok], st.q25[ok], st.q75[ok]; color = (:black, 0.12))
+        lines!(ax, r.centers[ok], st.median[ok]; color = :black)
+        scatter!(ax, r.centers[ok], st.median[ok]; color = :black, markersize = 6)
+    end
+    file = "$(setup.plotdir)/redelta-binning.pdf"
+    save(file, fig; backend = CairoMakie)
+    @info "Saving Re_Δ binning diagnostic to $(file)"
+    flush(stderr)
+    return fig
+end

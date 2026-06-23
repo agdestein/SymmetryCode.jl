@@ -219,6 +219,150 @@ function compute_sfs_stats(setup, keys; force = false)
 end
 
 """
+Phase-0 diagnostic for the Re_Δ-as-input experiment (`Notes/ReExperiment.md`).
+
+Bins the a-priori filtered-DNS pairs by **pointwise** filter-scale Reynolds
+number `Re_Δ = Δ²|Ā|/ν` and reports, per bin, the median of the two quantities
+the closures hold *scale-invariant*:
+
+- `C_ε = -τᵢⱼSᵢⱼ / (Δ²|Ā|³)` — the dimensionless SFS dissipation (transfer)
+  coefficient;
+- `‖τ‖_F / (Δ²|Ā|²)` — the normalized SFS stress magnitude (the exact target the
+  dataloaders regress in `create_dataloader`).
+
+A **flat** curve means the normalized target is independent of Re_Δ within this
+single flow (pure self-similarity → no usable Re_Δ signal); a **sloped** curve is
+a within-flow Re_Δ dependence.
+
+Why this gates the experiment (see `Notes/ReDependence.md`): with ν and Δ fixed,
+`Re_Δ ∝ |Ā|`, so this is *amplitude/intermittency* spread at a single Reynolds
+number, not Reynolds-number variation. The Re_Δ feature only pays off if this
+**within-flow** slope has the *same sign* as the **across-flow** trend in
+`fig:dissipation-vs-re` (lower global Re_Δ → less sub-filter energy → smaller
+normalized stress, i.e. a *positive* across-flow slope). Opposite or flat ⇒
+Simpson confound ⇒ pivot to a *global* Re_Δ feature + a viscosity sweep before
+spending any DNS hours.
+
+Operates on the existing forced-HIT `data.jld2` (filtered-DNS reference stress,
+`data.outputs`); needs no trained model. `subsample` strides the per-snapshot
+points to cap memory. Persists `redelta_binning.jld2`; returns nothing.
+"""
+function compute_redelta_binning(
+        setup;
+        force = false, nbin = 30, quantiles = (0.005, 0.995), subsample = 1,
+    )
+    (; outdir, D, l, n_les, backend, Δ, visc) = setup
+    file = "$(outdir)/redelta_binning.jld2"
+    skip_if_cached(file; force, label = "Re_Δ binning") && return
+
+    data = joinpath(outdir, "data.jld2") |> load_object
+    inputs_eval = data.inputs[data_ranges(setup).eval]
+    outputs_eval = data.outputs[data_ranges(setup).eval]
+
+    g = Grid{D}(; l, n = n_les, backend)
+    u = vectorfield(g)
+    τ_ref = spacetensorfield(g)
+    τhat = scalarfield(g)
+    plan = plan_rfft(τ_ref.xx)
+    A = tensorfield_nonsym(g)
+    AA = spacetensorfield_nonsym(g)
+
+    re = Float64[]        # pointwise Re_Δ = Δ²|Ā|/ν
+    cdiss = Float64[]     # C_ε   = -τ:S / (Δ²|Ā|³)
+    cstress = Float64[]   # ‖τ‖_F / (Δ²|Ā|²)
+
+    @info "Re_Δ binning over $(length(inputs_eval)) eval snapshots"
+    flush(stderr)
+    for i in eachindex(inputs_eval)
+        # Physical velocity gradient from the filtered DNS — same recipe as
+        # `compute_sfs_stats` / `predict_sfs`.
+        foreach(copyto!, u, inputs_eval[i])
+        apply!(vectorgradient!, g, (A, u, g))
+        for (AA, A) in zip(AA, A)
+            apply!(twothirds!, g, (A, g))
+            to_phys!(AA, A, plan, g)
+        end
+        S = strain_from_gradient(AA, g)
+
+        # Reference deviatoric SFS stress (spectral → physical, trace-free).
+        for (τ, τcpu) in zip(τ_ref, outputs_eval[i])
+            copyto!(τhat, τcpu)
+            apply!(twothirds!, g, (τhat, g))
+            to_phys!(τ, τhat, plan, g)
+        end
+        make_tracefree!(τ_ref, g)
+
+        # |Ā|² = Σ_{ij} (∂ūᵢ/∂xⱼ)² pointwise (all D² gradient components).
+        A2 = zero(AA.xx)
+        for a in AA
+            @. A2 += a^2
+        end
+        Anorm = sqrt.(A2)
+
+        # Pointwise Re_Δ and the two scale-invariant targets. `contract_dissipation`
+        # with both arguments equal to τ yields ‖τ‖_F² (it already carries the
+        # factor-2 on the off-diagonals), so no separate norm helper is needed.
+        reδ = @. Δ^2 * Anorm / visc
+        eps_sfs = .-contract_dissipation(τ_ref, S, g)            # -τ:S
+        cε = @. eps_sfs / (Δ^2 * Anorm^3 + eps(eltype(A2)))
+        τF2 = contract_dissipation(τ_ref, τ_ref, g)             # ‖τ‖_F²
+        cσ = @. sqrt(τF2) / (Δ^2 * A2 + eps(eltype(A2)))
+
+        idx = 1:subsample:length(reδ)
+        append!(re, view(vec(Array(reδ)), idx))
+        append!(cdiss, view(vec(Array(cε)), idx))
+        append!(cstress, view(vec(Array(cσ)), idx))
+    end
+
+    # Log-spaced bins between robust quantiles of Re_Δ (heavy-tailed |Ā|).
+    lo, hi = quantile(re, quantiles[1]), quantile(re, quantiles[2])
+    edges = 10.0 .^ range(log10(lo), log10(hi); length = nbin + 1)
+    centers = sqrt.(edges[1:(end - 1)] .* edges[2:end])
+    bin = map(re) do x
+        lo ≤ x ≤ hi ? clamp(searchsortedlast(edges, x), 1, nbin) : 0
+    end
+
+    binstats(samples) = let per = [Float64[] for _ in 1:nbin]
+        for (b, v) in zip(bin, samples)
+            b == 0 || push!(per[b], v)
+        end
+        (;
+            median = map(b -> isempty(b) ? NaN : median(b), per),
+            q25 = map(b -> isempty(b) ? NaN : quantile(b, 0.25), per),
+            q75 = map(b -> isempty(b) ? NaN : quantile(b, 0.75), per),
+            count = map(length, per),
+        )
+    end
+    diss = binstats(cdiss)
+    stress = binstats(cstress)
+
+    # Within-flow slope: count-weighted least squares of the bin median against
+    # log10(Re_Δ) over non-empty bins. The *sign* is the deliverable.
+    function slope(st)
+        ok = findall(b -> st.count[b] > 0 && isfinite(st.median[b]), 1:nbin)
+        x, y, w = log10.(centers[ok]), st.median[ok], Float64.(st.count[ok])
+        wmean(a) = sum(w .* a) / sum(w)
+        return sum(w .* (x .- wmean(x)) .* (y .- wmean(y))) / sum(w .* (x .- wmean(x)) .^ 2)
+    end
+    slopes = (; diss = slope(diss), stress = slope(stress))
+
+    save_object_atomic(
+        file,
+        (;
+            centers, edges, diss, stress, slope = slopes,
+            npoint = length(re), re_range = (; lo, hi, quantiles),
+        ),
+    )
+    @info "Within-flow slope per decade of Re_Δ — " *
+        "C_ε: $(round(slopes.diss; sigdigits = 3)), " *
+        "‖τ‖_norm: $(round(slopes.stress; sigdigits = 3)). " *
+        "Compare the sign to the across-flow trend in fig:dissipation-vs-re " *
+        "(same sign ⇒ the pointwise Re_Δ feature is worth pursuing)."
+    flush(stderr)
+    return
+end
+
+"""
 A-priori equivariance error for a single closure: compares `R(model(G))`
 with `model(R(G))` for every octahedral group element. Persists to
 `equi-errors-prior-<key>.jld2`; load all keys back with

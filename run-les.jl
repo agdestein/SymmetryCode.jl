@@ -68,6 +68,7 @@ get_config() = (;
         :spectrum_les,       # LES energy-spectrum plot
         :sfs,                # predict_sfs -> sfs_<key>.jld2
         :stats,              # compute_sfs_stats -> sfs_stats_<k>.jld2; KDE + bar plots + tables
+        :redelta,            # compute_redelta_binning -> redelta_binning.jld2; Re_Δ-vs-target diagnostic
         :budget,             # compute_budget -> budget_<k>.jld2; KE(t) + eps_sfs(t) plot
         :spectral_transfer,  # compute_spectral_transfer -> transfer_<k>.jld2; eps_sfs(k) plot
         :equi_prior,         # apriori_equivariance_error + plot
@@ -88,6 +89,7 @@ get_config() = (;
             # :les_stats,
             # :sfs,
             # :stats,
+            # :redelta,
             # :budget,
             # :spectral_transfer,
             # :equi_prior,
@@ -360,6 +362,17 @@ function main()
         S.plot_dissipation_bar(setup, all_keys; seed_stat)
         S.plot_backscatter_bar(setup, all_keys; seed_stat)
         S.plot_apriori_bar(setup, config.models; seed_stat)
+    end
+
+    if :redelta in config.experiments
+        # Phase-0 diagnostic for the Re_Δ-as-input experiment: bins the
+        # filtered-DNS (Ā, τ) pairs by pointwise Re_Δ = Δ²|Ā|/ν and reports the
+        # within-flow slope of the normalized SFS dissipation / stress. Compare
+        # its sign to the across-flow trend in fig:dissipation-vs-re before
+        # committing DNS to the Re_Δ feature (Notes/ReExperiment.md). Model-
+        # independent — reads data.jld2 only, so no getmodel / GPU needed.
+        S.compute_redelta_binning(setup; force = :redelta in config.force)
+        S.plot_redelta_binning(setup)
     end
 
     if :budget in config.experiments
