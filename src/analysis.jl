@@ -266,6 +266,7 @@ function compute_redelta_binning(
     plan = plan_rfft(τ_ref.xx)
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
+    ϵ = eps(eltype(AA.xx))   # scalar 0-guard; must stay out of the `@.` blocks
 
     re = Float64[]        # pointwise Re_Δ = Δ²|Ā|/ν
     cdiss = Float64[]     # C_ε   = -τ:S / (Δ²|Ā|³)
@@ -302,12 +303,11 @@ function compute_redelta_binning(
         # Pointwise Re_Δ and the two scale-invariant targets. `contract_dissipation`
         # with both arguments equal to τ yields ‖τ‖_F² (it already carries the
         # factor-2 on the off-diagonals), so no separate norm helper is needed.
-        epsA = eps(eltype(A2)) # Safety margin for laminar flow
         reδ = @. Δ^2 * Anorm / visc
         eps_sfs = .-contract_dissipation(τ_ref, S, g)            # -τ:S
-        cε = @. eps_sfs / (Δ^2 * Anorm^3 + epsA)
+        cε = @. eps_sfs / (Δ^2 * Anorm^3 + ϵ)
         τF2 = contract_dissipation(τ_ref, τ_ref, g)             # ‖τ‖_F²
-        cσ = @. sqrt(τF2) / (Δ^2 * A2 + epsA)
+        cσ = @. sqrt(τF2) / (Δ^2 * A2 + ϵ)
 
         idx = 1:subsample:length(reδ)
         append!(re, view(vec(Array(reδ)), idx))
