@@ -302,11 +302,12 @@ function compute_redelta_binning(
         # Pointwise Re_Δ and the two scale-invariant targets. `contract_dissipation`
         # with both arguments equal to τ yields ‖τ‖_F² (it already carries the
         # factor-2 on the off-diagonals), so no separate norm helper is needed.
+        epsA = eps(eltype(A2)) # Safety margin for laminar flow
         reδ = @. Δ^2 * Anorm / visc
         eps_sfs = .-contract_dissipation(τ_ref, S, g)            # -τ:S
-        cε = @. eps_sfs / (Δ^2 * Anorm^3 + eps(eltype(A2)))
+        cε = @. eps_sfs / (Δ^2 * Anorm^3 + epsA)
         τF2 = contract_dissipation(τ_ref, τ_ref, g)             # ‖τ‖_F²
-        cσ = @. sqrt(τF2) / (Δ^2 * A2 + eps(eltype(A2)))
+        cσ = @. sqrt(τF2) / (Δ^2 * A2 + epsA)
 
         idx = 1:subsample:length(reδ)
         append!(re, view(vec(Array(reδ)), idx))

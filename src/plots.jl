@@ -1862,8 +1862,10 @@ function plot_redelta_binning(setup)
         ax = Axis(
             fig[1, col];
             xscale = log10,
-            xlabel = L"\mathrm{Re}_\Delta = \Delta^2|\bar A|/\nu",
-            ylabel,
+            # xlabel = L"\mathrm{Re}_\Delta = \Delta^2|\bar A|/\nu",
+            xlabel = "Filter-scale Reynolds number",
+            # ylabel,
+            ylabel = title,
             title = "$(title) — slope $(round(slope; sigdigits = 2))/decade",
         )
         ok = findall(b -> st.count[b] > 0 && isfinite(st.median[b]), eachindex(st.median))
