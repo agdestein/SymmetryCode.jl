@@ -411,85 +411,114 @@ function split_loaders(snaps, D, batchsize; rng = nothing, val_fraction = 0.2, p
     return trainloader, valloader
 end
 
-function create_dataloader(setup, data; nsample, batchsize, rng = nothing)
-    (; D, Δ) = setup
-    g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
+"""
+Append a constant standardized `log Re_Δ` channel along the channel axis (the
+group-invariant Re_Δ input feature); a no-op unless `use_redelta`. `redelta_norm`
+is `(; μ, σ)` from the trainpool.
+"""
+function append_redelta(x, re, use_redelta, redelta_norm, D)
+    use_redelta || return x
+    z = (log(re) - redelta_norm.μ) / redelta_norm.σ
+    chan = fill!(similar(x, size(x)[1:D]..., 1), z)
+    return cat(x, chan; dims = D + 1)
+end
+
+"""
+(train, val) `DataLoader`s for the G-CNN / MLP closures from a `trainpool` — a
+list of `(dns, Δ_factor)` coordinates. Each dataset's heavy fields are read from
+its `fieldsfile`, the normalized pair `(∇ū/|∇ū|, τ/(Δ²|∇ū|²))` is formed using
+*that dataset's* Δ, and all snapshots are concatenated. With `use_redelta`, each
+snapshot's standardized `log Re_Δ` is appended as an extra input channel. The val
+set is a holdout of the pool (monitoring only — see [`train`](@ref)).
+"""
+function create_dataloader(
+        case, trainpool;
+        batchsize, rng = nothing, use_redelta = false, redelta_norm = nothing,
+    )
+    (; D) = case
+    g = Grid{D}(; case.l, n = case.n_les, case.backend)
     G = tensorfield_nonsym(g)
     u = vectorfield(g)
     τ = scalarfield(g)
     GG = spacetensorfield_nonsym(g)
     ττ = spacetensorfield(g)
     plan = plan_rfft(GG.xx)
-    T = typeof(setup.l)
-    train_range = data_ranges(setup).train
-    nsample_use = min(nsample, length(train_range))
+    T = typeof(case.l)
     fac = get_fft_fac(g)
-    snaps = map(train_range[1:nsample_use]) do j
-        ucpu, τcpu = data.inputs[j], data.outputs[j]
-        foreach(copyto!, u, ucpu)
-        apply!(vectorgradient!, g, (G, u, g))
-        for (GG, G) in zip(GG, G)
-            apply!(twothirds!, g, (G, g))
-            ldiv!(GG, plan, G) # Inverse RFFT
-            GG .*= fac
+    snaps = mapreduce(vcat, trainpool) do (dns, Δf)
+        inputs, outputs, Δ, redelta =
+            load(fieldsfile(case, dns, Δf), "inputs", "outputs", "Δ", "redelta")
+        map(eachindex(inputs)) do j
+            foreach(copyto!, u, inputs[j])
+            apply!(vectorgradient!, g, (G, u, g))
+            for (GG, G) in zip(GG, G)
+                apply!(twothirds!, g, (G, g))
+                ldiv!(GG, plan, G) # Inverse RFFT
+                GG .*= fac
+            end
+            for (ττ, τcpu) in zip(ττ, outputs[j])
+                copyto!(τ, τcpu)
+                apply!(twothirds!, g, (τ, g))
+                ldiv!(ττ, plan, τ) # Inverse RFFT
+                ττ .*= fac
+            end
+            x = stack(GG)
+            y = stack(ττ)
+            A2 = sum(abs2, x; dims = D + 1) # VGT squared norm
+            @. x ./= (sqrt(A2) + eps(T)) # Normalize input gradient
+            @. y ./= (Δ^2 * A2 + eps(T)) # Normalize output stress (this dataset's Δ)
+            x = append_redelta(x, redelta[j], use_redelta, redelta_norm, D)
+            (x, y) |> cpu_device()
         end
-        for (ττ, τcpu) in zip(ττ, τcpu)
-            copyto!(τ, τcpu)
-            apply!(twothirds!, g, (τ, g))
-            ldiv!(ττ, plan, τ) # Inverse RFFT
-            ττ .*= fac
-        end
-        x = stack(GG)
-        y = stack(ττ)
-        A2 = sum(abs2, x; dims = D + 1) # VGT squared norm
-        # The nets learn an O(1), dimensionless mapping; inference in
-        # `fullchain` multiplies by the same Δ^2 * |∇u|^2 factor.
-        @. x ./= (sqrt(A2) + eps(T)) # Normalize input gradient
-        @. y ./= (Δ^2 * A2 + eps(T)) # Normalize output stress
-        (x, y) |> cpu_device()
     end
     return split_loaders(
         snaps, D, batchsize;
-        rng, setup.train_setup.val_fraction, setup.train_setup.precision,
+        rng, val_fraction = case.schedule.val_fraction, precision = case.schedule.precision,
     )
 end
 
-function create_dataloader_tbnn(setup, data; nsample, batchsize, rng)
-    (; D, Δ) = setup
-    g = Grid{D}(; setup.l, n = setup.n_les, setup.backend)
+"""
+(train, val) `DataLoader`s for the TBNN from a `trainpool`. Same per-dataset Δ
+normalization as [`create_dataloader`](@ref); the input packs the gradient
+invariants followed by the (O(1)) basis tensors. (Re_Δ as an extra invariant is
+wired in a later increment.)
+"""
+function create_dataloader_tbnn(
+        case, trainpool;
+        batchsize, rng = nothing, use_redelta = false, redelta_norm = nothing,
+    )
+    (; D) = case
+    g = Grid{D}(; case.l, n = case.n_les, case.backend)
     nx = space_ndrange(g)
     u = vectorfield(g)
     τ = scalarfield(g)
     ττ = spacetensorfield(g)
     plan = plan_rfft(ττ.xx)
-    train_range = data_ranges(setup).train
-    nsample_use = min(nsample, length(train_range))
     fac = get_fft_fac(g)
-    T = typeof(setup.l)
-    snaps = map(train_range[1:nsample_use]) do j
-        ucpu, τcpu = data.inputs[j], data.outputs[j]
-        foreach(copyto!, u, ucpu)
-        G = getgradient(u, g)
-        for (ττ, τcpu) in zip(ττ, τcpu)
-            copyto!(τ, τcpu)
-            apply!(twothirds!, g, (τ, g))
-            ldiv!(ττ, plan, τ) # Inverse RFFT
-            ττ .*= fac
+    T = typeof(case.l)
+    snaps = mapreduce(vcat, trainpool) do (dns, Δf)
+        inputs, outputs, Δ = load(fieldsfile(case, dns, Δf), "inputs", "outputs", "Δ")
+        map(eachindex(inputs)) do j
+            foreach(copyto!, u, inputs[j])
+            G = getgradient(u, g)
+            for (ττ, τcpu) in zip(ττ, outputs[j])
+                copyto!(τ, τcpu)
+                apply!(twothirds!, g, (τ, g))
+                ldiv!(ττ, plan, τ) # Inverse RFFT
+                ττ .*= fac
+            end
+            i, b, a2 = build_tensorbasis(G, g)
+            y = reshape(stack(ττ), nx..., tensordim(g))
+            a2 = reshape(a2, nx..., 1)
+            @. y = y / (Δ^2 * a2 + eps(T))
+            i = i |> cpu_device()
+            b = reshape(b, nx..., :) |> cpu_device()
+            x = cat(i, b; dims = D + 1)
+            x, y |> cpu_device()
         end
-        i, b, a2 = build_tensorbasis(G, g)
-        y = reshape(stack(ττ), nx..., tensordim(g))
-        a2 = reshape(a2, nx..., 1)
-        # Normalize output stress by Δ^2 * |A|^2, exactly as create_dataloader
-        # does, so TBNN regresses the same normalized target as equi/conv.
-        @. y = y / (Δ^2 * a2 + eps(T))
-        i = i |> cpu_device()
-        b = reshape(b, nx..., :) |> cpu_device()
-        x = cat(i, b; dims = D + 1)
-        y = y |> cpu_device()
-        x, y
     end
     return split_loaders(
         snaps, D, batchsize;
-        rng, setup.train_setup.val_fraction, setup.train_setup.precision,
+        rng, val_fraction = case.schedule.val_fraction, precision = case.schedule.precision,
     )
 end
