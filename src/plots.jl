@@ -856,8 +856,9 @@ function plot_sfs(case, dns, Δf, models)
     return fig
 end
 
-function plot_evolution_dns(setup)
-    times, stats = load("$(setup.outdir)/dns.jld2", "times", "statistics")
+"DNS warm-up energy/dissipation time series (from [`dnsfile`](@ref))."
+function plot_evolution_dns(case, dns)
+    times, stats = load(dnsfile(case, dns), "times", "statistics")
     e = map(s -> s.e, stats)
     diss = map(s -> s.diss, stats)
 
@@ -878,30 +879,31 @@ function plot_evolution_dns(setup)
     rowgap!(fig.layout, 10)
 
     # Save plot
-    file = joinpath(setup.plotdir, "evolution-dns.pdf")
+    file = joinpath(dnsfigdir(case, dns), "evolution-dns.pdf")
     @info "Saving DNS time series plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
     return fig
 end
 
-function plot_evolution_data(setup)
-    (; D) = setup
-
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-
-    times_warmup, stats_warmup = load("$(setup.outdir)/dns.jld2", "times", "statistics")
-    times_warmup .-= times_warmup[end] # Use negative times for warmup
+"""
+Energy/dissipation/Reynolds time series over the data-generation window
+([`dnsmetafile`](@ref) `statistics_dns`), with the warm-up tail
+([`dnsfile`](@ref)) drawn dashed at negative times.
+"""
+function plot_evolution_data(case, dns)
+    times_warmup, stats_warmup = load(dnsfile(case, dns), "times", "statistics")
+    times_warmup = times_warmup .- times_warmup[end] # Use negative times for warmup
     energies_warmup = map(s -> s.e, stats_warmup)
     dissipations_warmup = map(s -> s.diss, stats_warmup)
     Re_tay_warmup = map(s -> s.Re_tay, stats_warmup)
     t_int_warmup = map(s -> s.t_int, stats_warmup)
 
-    times = data.times
-    energies = map(s -> s.e, data.statistics_dns)
-    dissipations = map(s -> s.diss, data.statistics_dns)
-    Re_tay = map(s -> s.Re_tay, data.statistics_dns)
-    t_int = map(s -> s.t_int, data.statistics_dns)
+    times, statistics_dns = load(dnsmetafile(case, dns), "times", "statistics_dns")
+    energies = map(s -> s.e, statistics_dns)
+    dissipations = map(s -> s.diss, statistics_dns)
+    Re_tay = map(s -> s.Re_tay, statistics_dns)
+    t_int = map(s -> s.t_int, statistics_dns)
 
     emax = max(maximum(energies), maximum(energies_warmup))
     dmax = max(maximum(dissipations), maximum(dissipations_warmup))
@@ -936,15 +938,16 @@ function plot_evolution_data(setup)
     rowgap!(fig.layout, 10)
 
     # Save plot
-    file = joinpath(setup.plotdir, "evolution-data.pdf")
+    file = joinpath(dnsfigdir(case, dns), "evolution-data.pdf")
     @info "Saving energy and dissipation time series plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
     return fig
 end
 
-function plot_dissipation_finite_difference(setup)
-    times, stats = load("$(setup.outdir)/dns.jld2", "times", "statistics")
+"DNS warm-up dissipation vs −dE/dt finite-difference check (from [`dnsfile`](@ref))."
+function plot_dissipation_finite_difference(case, dns)
+    times, stats = load(dnsfile(case, dns), "times", "statistics")
     e = map(s -> s.e, stats)
     diss = map(s -> s.diss, stats)
 
@@ -970,7 +973,7 @@ function plot_dissipation_finite_difference(setup)
     rowgap!(fig.layout, 10)
 
     # Save plot
-    file = joinpath(setup.plotdir, "dissipation_finite_difference.pdf")
+    file = joinpath(dnsfigdir(case, dns), "dissipation_finite_difference.pdf")
     @info "Saving DNS dissipation plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
@@ -988,18 +991,24 @@ function mean_of_named_tuple_series(series)
     return NamedTuple(p)
 end
 
-function plot_spectrum_data(setup)
-    (; D, l, n_dns, backend) = setup
+"""
+Time-averaged DNS vs filtered-DNS energy spectra over the data-generation window
+([`dnsmetafile`](@ref) `spectra_dns` + [`lesmetafile`](@ref) `spectra_les`), with
+the forcing band shaded.
+"""
+function plot_spectrum_data(case, dns, Δf)
+    (; D, l, n_dns, backend) = case
     g_dns = Grid{D}(; l, n = n_dns, backend)
 
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    spectra_dns, statistics_dns = load(dnsmetafile(case, dns), "spectra_dns", "statistics_dns")
+    spectra_les = load(lesmetafile(case, dns, Δf), "spectra_les")
 
-    s_dns = mean(data.spectra_dns)
-    s_les = mean(data.spectra_les)
-    r = spectrum_reference(setup, mean_of_named_tuple_series(data.statistics_dns))
+    s_dns = mean(spectra_dns)
+    s_les = mean(spectra_les)
+    r = spectrum_reference(case, mean_of_named_tuple_series(statistics_dns))
 
-    k_dns = 2π / setup.l * eachindex(s_dns)
-    k_les = 2π / setup.l * eachindex(s_les)
+    k_dns = 2π / l * eachindex(s_dns)
+    k_les = 2π / l * eachindex(s_les)
 
     fig = Figure(; size = (400, 340))
     ax = Axis(
@@ -1051,28 +1060,32 @@ function plot_spectrum_data(setup)
     )
     rowgap!(fig.layout, 5)
 
-    save(joinpath(setup.plotdir, "spectrum-data.pdf"), fig; backend = CairoMakie)
+    save(joinpath(figdir(case, dns, Δf), "spectrum-data.pdf"), fig; backend = CairoMakie)
     return fig
 end
 
-function plot_spectrum_dns(setup)
-    (; outdir, plotdir, D, l, n_dns, n_les, backend, visc) = setup
+"""
+DNS vs filtered-DNS energy spectrum of the warmed field ([`dnsfile`](@ref)),
+filtered at the `Δf` filter width.
+"""
+function plot_spectrum_dns(case, dns, Δf)
+    (; D, l, n_dns, n_les, backend) = case
+    Δ = Δf * l / n_les
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
-    statistics = load("$(outdir)/dns.jld2", "statistics")
-    u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
+    statistics, u = load(dnsfile(case, dns), "statistics", "u")
+    u = u |> adapt(backend)
     ubar = vectorfield(g_les)
     for (ubar, u) in zip(ubar, u)
         apply!(cutoff!, g_les, (ubar, u))
-        apply!(gaussianfilter!, g_les, (ubar, setup.Δ, g_les))
+        apply!(gaussianfilter!, g_les, (ubar, Δ, g_les))
     end
-    D = dim(g_dns)
     stuff_dns = spectral_stuff(g_dns)
     stuff_les = spectral_stuff(g_les)
     stat = statistics[end]
     s_dns = spectrum(u, g_dns, stuff_dns)
     s_les = spectrum(ubar, g_les, stuff_les)
-    r = spectrum_reference(setup, stat)
+    r = spectrum_reference(case, stat)
 
     fig = Figure(; size = (400, 340))
     ax = Axis(
@@ -1126,7 +1139,7 @@ function plot_spectrum_dns(setup)
     rowgap!(fig.layout, 5)
 
     # Save plot
-    file = "$(plotdir)/spectrum-dns.pdf"
+    file = joinpath(figdir(case, dns, Δf), "spectrum-dns.pdf")
     @info "Saving DNS spectrum to $file"
     flush(stderr)
     save(file, fig; backend = CairoMakie)

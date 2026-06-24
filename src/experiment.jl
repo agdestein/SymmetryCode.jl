@@ -201,3 +201,7 @@ so the same figure name from different (ν, seed, Δ) points never clobbers.
 """
 figdir(case, dns, Δf) =
     joinpath(case.plotdir, "$(dns.role)_visc=$(dns.visc)_seed=$(dns.seed)_delta=$(Δf)") |> mkpath
+
+"Per-DNS (Δ-independent) figure directory under `case.plotdir`."
+dnsfigdir(case, dns) =
+    joinpath(case.plotdir, "$(dns.role)_visc=$(dns.visc)_seed=$(dns.seed)") |> mkpath
