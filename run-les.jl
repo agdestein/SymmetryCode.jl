@@ -1,6 +1,10 @@
-# Train LES closures and evaluate them a-priori and a-posteriori.
-# Adjust the parameters in `get_setup` and `get_config`.
-# Results are written to `plotdir` and arrays are cached in `outdir`.
+# Train the LES closures over the multi-(ν, Δ) training pool and evaluate them
+# a-priori + a-posteriori across the (ν, Δ) test grid — the Re_Δ experiment.
+#
+# Coordinate-driven: the sweep axes (architecture, size tier, Re_Δ on/off, network
+# seed) are loose coordinates combined by Cartesian product, never fused into a
+# monolithic config. Each eval point is a `(dns, Δf)` pair; artifacts self-locate
+# from coordinates via the path functions.
 
 @info "Loading packages"
 flush(stderr)
@@ -13,424 +17,182 @@ using Statistics: mean
 
 import SymmetryCode as S
 
-#######################
-# Setup + experiment config
-#######################
-
-# Pick one. `getsetup` derives output paths automatically.
-
-# get_setup() = S.setup_laptop()
-# get_setup() = S.setup_turbulator_small()
-# get_setup() = S.setup_turbulator_medium()
-# get_setup() = S.setup_turbulator_large()
-get_setup() = S.setup_snellius()
+get_case() = S.case_snellius()
 
 get_config() = (;
-    # Closures included in every multi-model step. Order propagates to plots.
-    # Available: :nomo, :dynsmag, :clar, :smag, :vers, :bard, :tbnn, :equi,
-    # :conv, :convsym (= :conv with group-averaged, exactly equivariant
-    # inference; reuses :conv's trained parameters, costs |G| = 48 forward
-    # passes per closure call).
-    models = [
-        :nomo,
-        # :smag,
-        # :vers,
-        # :bard,
-        :dynsmag,
-        :clar,
-        :conv,
-        :convsym,
-        :equi,
-        :tbnn,
-    ],
+    # Learned-model sweep axes (Cartesian product → families × seeds).
+    archs = (:conv, :equi, :tbnn),
+    tiers = (:saturated,),
+    use_redelta = (false, true),
+    netseeds = 0:0,
 
-    # How to load trainable closures (:skip loads ps-<key>.jld2 without
-    # retraining; :resume continues from a checkpoint, skipping seeds whose
-    # training already completed; :scratch retrains).
-    train_mode = :skip,
+    # Classical baselines in every per-eval-point comparison (no Re_Δ / seeds).
+    classical = [:nomo, :clar],
 
-    # Training seeds for the :seeds robustness sweep. The first (canonical)
-    # seed backs all single-model figures and reuses the plain-key artifacts;
-    # the others train the learned closures again (network init + batch
-    # shuffling) so scalar metrics get a mean ± std over seeds.
-    seeds = 0:4,
+    # Whether to (re)train. Training spans the whole trainpool, once per coordinate.
+    train = true,
 
-    # Smoothing parameter for q-r plot
-    smooth_σ = nothing,
-    # smooth_σ = 1,
-
-    # Pipeline stages to execute. Cached stages skip per-key when their
-    # artifact already exists under setup.outdir — see :force for invalidation.
+    # Pipeline stages.
     experiments = [
-        :training_summary,   # print training wall-time per learned model
-        :rollouts,           # solve_les -> u-post-<key>.jld2
-        :les_stats,          # get_les_statistics -> les_stat.jld2 + error-vs-t plot
-        :spectrum_les,       # LES energy-spectrum plot
-        :sfs,                # predict_sfs -> sfs_<key>.jld2
-        :stats,              # compute_sfs_stats -> sfs_stats_<k>.jld2; KDE + bar plots + tables
-        :redelta,            # compute_redelta_binning -> redelta_binning.jld2; Re_Δ-vs-target diagnostic
-        :budget,             # compute_budget -> budget_<k>.jld2; KE(t) + eps_sfs(t) plot
-        :spectral_transfer,  # compute_spectral_transfer -> transfer_<k>.jld2; eps_sfs(k) plot
-        :equi_prior,         # apriori_equivariance_error + plot
-        # :equi_post,          # apost_equivariance_error + plot
-        :velocities,         # plot_velocities slice grid
-        :sfs_plot,           # plot_sfs tensor-field snapshots
-        :qr,                 # compute_qr + plot_qr
-        :seeds,              # per-seed rollout + a-priori stats -> seed_stats.jld2
-        :paper_tables,       # write_errors_table -> plotdir/errors.tex
+        :apriori,          # predict_sfs + compute_sfs_stats
+        :aposteriori,      # solve_les (reduce-on-the-fly)
+        :equivariance,     # apriori_equivariance_error (learned only)
+        :redelta_binning,  # Phase-0 pointwise-Re_Δ diagnostic
+        :seeds,            # get_seed_statistics per eval point (feeds trend + tables)
+        :plots,            # per-eval-point figures
+        :trend,            # plot_trend_vs_redelta (the H2 figure)
+        :tables,           # write_errors_table
+        # :showcase,       # savefields rollout + velocity/SFS field montages
     ],
 
-    # Stage labels here force a re-compute regardless of cache. Uncomment
-    # a line below (or `push!(config.force, :qr)` at the REPL) to invalidate.
-    # Only the cached stages are listed; the others have nothing to invalidate.
-    force = Set{Symbol}(
-        [
-            # :rollouts,
-            # :les_stats,
-            # :sfs,
-            # :stats,
-            # :redelta,
-            # :budget,
-            # :spectral_transfer,
-            # :equi_prior,
-            # :equi_post,
-            # :qr,
-            # :seeds,
-        ]
-    ),
+    # Stages whose cache is invalidated this run.
+    force = Set{Symbol}([]),
 )
 
+# Learned-model families (no seed) and the full model list (with seed) per point.
+families(c) = [
+    (; arch, tier, use_redelta = ur)
+        for arch in c.archs for tier in c.tiers for ur in c.use_redelta
+]
+learned_models(c) = [
+    (; arch, tier, netseed, use_redelta = ur)
+        for arch in c.archs for tier in c.tiers
+        for ur in c.use_redelta for netseed in c.netseeds
+]
+eval_models(c) = [c.classical; learned_models(c)]
 
-# Script-specific table file. create-data.jl and run-les.jl share a setup (hence
-# a plotdir), so each writes its summary tables to its own file to avoid one
-# script truncating the other's. Defined as a function (not a `const`) so both
-# scripts can be `include`d into the same REPL session — a `const` in one would
-# clash with the `const` of the same name in the other, whereas a function method
-# is freely redefinable. These thin wrappers thread that filename through
-# `S.tabulate` / `S.reset_tables` so the call sites below stay uncluttered.
+# Build a single closure (classical symbol or learned coordinate) against `setup`.
+buildone(case, setup, m) = S.build_models(case, setup, [m])[S.modelname(m)]
+
+# Per-script table file (shares case.plotdir with create-data.jl).
 tablefile() = "tables-les.txt"
-reset_tables(setup; kwargs...) = S.reset_tables(setup; filename = tablefile(), kwargs...)
+reset_tables(case; kwargs...) = S.reset_tables(case; filename = tablefile(), kwargs...)
 tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile(), kwargs...)
 
-"Just a little helper for designing architectures."
-function printnetsizes()
-    setup = get_setup()
-    config = get_config()
-    reset_tables(setup)
-    learned = filter(in([:tbnn, :equi, :conv]), config.models)
-    tabulate(
-        setup,
-        "Trainable parameters per learned model (equi counted pre-synthesis)",
-        NamedTuple(k => S.paramcount(setup, k) for k in learned),
-    )
-    error()
-end
-
-# # Print sizes and raise error
-# printnetsizes()
-
 function main()
-    # Load setup/config from top of file
-    setup = get_setup()
+    case = get_case()
     config = get_config()
-    reset_tables(setup)
-    tabulate(setup, "Problem setup", setup)
+    reset_tables(case)
 
-    let
-        r = S.data_ranges(setup)
-        dg = setup.datagen
-        tabulate(
-            setup,
-            "Train/eval split (data.jld2 snapshot indices)",
-            (;
-                nstep = dg.nstep,
-                tstop = dg.tstop,
-                n_train = dg.n_train,
-                t_train = dg.tstop * dg.n_train / dg.nstep,
-                n_eval = length(r.eval),
-                eval_first = r.eval[1],
-                eval_last = r.eval[end],
-            ),
+    fams = families(config)
+    models = eval_models(config)
+    trainpool = S.build_trainpool(case)
+    testpoints = [(dns, Δf) for dns in S.dns_runs().test for Δf in case.filters_test]
+
+    #######################
+    # Train (once per coordinate, over the whole trainpool)
+    #######################
+    if config.train
+        S.train_models(
+            case, trainpool;
+            config.archs, config.tiers, config.netseeds, config.use_redelta,
+            force = :train in config.force,
         )
+        timings = NamedTuple(
+            S.modelkey(m) => (isfile(S.psfile(case, m)) ? load(S.psfile(case, m), "timing") : :missing)
+                for m in learned_models(config)
+        )
+        tabulate(case, "Training wall-time (s) per learned coordinate", timings; digits = 1)
     end
 
     #######################
-    # Train learned closures
+    # Per-eval-point evaluation across the (ν, Δ) test grid
     #######################
-
-    # train_models is a no-op when train_mode = :skip; otherwise each
-    # (learned closure, seed) pair is trained in isolation with clean()
-    # between them. Only the canonical (first) seed is trained unless the
-    # :seeds stage is active.
-    S.train_models(
-        setup, config.models;
-        config.train_mode,
-        seeds = :seeds in config.experiments ? config.seeds : (setup.train_setup.seed,),
-    )
-
-    #######################
-    # Phase A — per-model compute loop
-    #######################
-    #
-    # Each closure is built lazily, at most once per key via the memoized
-    # `getmodel` thunk: a stage only invokes it on a cache miss, so cached or
-    # plot-only runs never instantiate the model (no ps-*.jld2 / GPU needed).
-    # The closure goes out of scope at the per-key `clean()`, bounding the GPU
-    # footprint to a single closure's working set.
-
-    for key in config.models
-        @info "===== compute phase: $(key) ====="
+    for (dns, Δf) in testpoints
+        @info "===== eval point: role=$(dns.role), visc=$(dns.visc), Δ=$(Δf) ====="
         flush(stderr)
-        S.clean()
+        setup = S.make_setup(case, dns, Δf)
+        withref = [:ref; models]
 
-        local built = nothing
-        getmodel() = (built === nothing && (built = S.build_models(setup, [key])[key]); built)
+        # Reference a-posteriori budget/transfer (no model).
+        :aposteriori in config.experiments &&
+            S.solve_les(case, :ref, dns, Δf; force = :aposteriori in config.force)
 
-        if :rollouts in config.experiments
-            S.solve_les(setup, key, getmodel; force = :rollouts in config.force)
-        end
-        if key != :nomo
-            if :sfs in config.experiments
-                S.predict_sfs(setup, key, getmodel; force = :sfs in config.force)
-            end
-            if :equi_prior in config.experiments
-                S.apriori_equivariance_error(
-                    setup, key, getmodel;
-                    force = :equi_prior in config.force,
-                )
-            end
-        end
-        if :equi_post in config.experiments && key != :convsym
-            # :convsym is skipped: it is equivariant by construction (the
-            # a-priori stage confirms machine precision) and the a-posteriori
-            # test costs 48 rollouts at 48 forward passes per closure call.
-            S.apost_equivariance_error(
-                setup, key, getmodel;
-                force = :equi_post in config.force,
-            )
-        end
-        if :budget in config.experiments
-            S.compute_budget(setup, key, getmodel; force = :budget in config.force)
-        end
-        if :spectral_transfer in config.experiments
-            S.compute_spectral_transfer(
-                setup, key, getmodel;
-                force = :spectral_transfer in config.force,
-            )
-        end
-
-        built = nothing
-        S.clean()
-    end
-
-    #######################
-    # Phase A2 — seed sweep for the learned closures
-    #######################
-    #
-    # Repeats rollout + a-priori stats for every (learned model, seed) pair so
-    # the scalar metrics get a spread over training seeds. The canonical seed
-    # maps to the plain key (seed_key) and therefore reuses the Phase A
-    # artifacts. :convsym rides on :conv's seeds and only the a-priori part is
-    # swept — its rollout costs |G|× the MLP's, and the canonical-seed rollout
-    # from Phase A already provides its a-posteriori error.
-    if :seeds in config.experiments
-        learned = filter(in([:tbnn, :equi, :conv, :convsym]), config.models)
-        for key in learned, seed in config.seeds
-            skey = S.seed_key(setup, key, seed)
-            @info "===== seed sweep: $(skey) ====="
-            flush(stderr)
+        # Per model: lazy build, GPU reclaimed between models.
+        for m in models
             S.clean()
             local built = nothing
-            getmodel() =
-                (built === nothing && (built = S.build_seed_model(setup, key, seed)); built)
-            force = :seeds in config.force
-            key == :convsym || S.solve_les(setup, skey, getmodel; force)
-            S.predict_sfs(setup, skey, getmodel; force)
-            key == :convsym || S.apriori_equivariance_error(setup, skey, getmodel; force)
+            getmodel() = (built === nothing && (built = buildone(case, setup, m)); built)
+
+            if :apriori in config.experiments && m !== :nomo
+                S.predict_sfs(case, m, dns, Δf, getmodel; force = :apriori in config.force)
+            end
+            if :aposteriori in config.experiments
+                S.solve_les(case, m, dns, Δf, getmodel; force = :aposteriori in config.force)
+            end
+            if :equivariance in config.experiments && m isa NamedTuple
+                S.apriori_equivariance_error(
+                    case, m, dns, Δf, getmodel;
+                    force = :equivariance in config.force,
+                )
+            end
             built = nothing
             S.clean()
         end
-        skeys = [S.seed_key(setup, k, s) for k in learned for s in config.seeds]
-        S.compute_sfs_stats(setup, skeys; force = :seeds in config.force)
-    end
 
-    #######################
-    # Phase B — aggregation and plotting (reads on-disk artifacts only)
-    #######################
+        :apriori in config.experiments &&
+            S.compute_sfs_stats(case, withref, dns, Δf; force = :apriori in config.force)
 
-    # Seed aggregation first: the bar plots, error-vs-time plot, and LaTeX
-    # tables below all accept the spread when it is available.
-    seed_stat = nothing
-    if :seeds in config.experiments
-        learned = filter(in([:tbnn, :equi, :conv, :convsym]), config.models)
-        seed_stat = S.get_seed_statistics_cached(
-            setup, Tuple(learned), config.seeds;
-            force = :seeds in config.force,
-        )
-        for (metric, lbl) in [
-                (:relerr, "A-priori relative SFS error"),
-                (:crosscor, "A-priori SFS cross-correlation"),
-                (:e_post, "Time-mean relative LES error"),
-                (:equi, "Mean a-priori equivariance error"),
-                (:diss_median, "Median SFS dissipation / reference"),
-                (:backscatter, "Backscatter fraction"),
-            ]
-            tabulate(
-                setup,
-                "$(lbl), mean ± std over seeds $(config.seeds)",
-                map(s -> S.pm_string(s[metric]), seed_stat),
-            )
+        if :redelta_binning in config.experiments
+            S.compute_redelta_binning(case, dns, Δf; force = :redelta_binning in config.force)
+            S.plot_redelta_binning(case, dns, Δf)
+        end
+
+        :seeds in config.experiments &&
+            S.get_seed_statistics(case, fams, dns, Δf, config.netseeds; force = :seeds in config.force)
+
+        if :plots in config.experiments
+            S.plot_apriori_bar(case, dns, Δf, models)
+            S.plot_dissipation_bar(case, dns, Δf, withref)
+            S.plot_backscatter_bar(case, dns, Δf, withref)
+            S.plot_densities(case, dns, Δf, [:ref; filter(!=(:nomo), models)])
+            S.plot_error_post(case, dns, Δf, models)
+            S.plot_budget(case, dns, Δf, withref)
+            S.plot_spectral_transfer(case, dns, Δf, withref)
+            S.plot_spectrum_les(case, dns, Δf, withref)
+            S.plot_equivariance_errors(case, dns, Δf, models)
         end
     end
 
-    if :training_summary in config.experiments
-        learned = filter(in([:tbnn, :equi, :conv]), config.models)
-        timings = NamedTuple(
-            map(learned) do k
-                file = joinpath(setup.outdir, "ps-$(k).jld2")
-                k => isfile(file) ? load_object(file).timing : :missing
-            end
+    #######################
+    # Cross-eval-point: the Re_Δ trend figure + paper table
+    #######################
+    if :trend in config.experiments
+        trainpoints = [(dns, Δf) for dns in S.dns_runs().train for Δf in case.filters_train]
+        S.plot_trend_vs_redelta(
+            case, testpoints, fams;
+            netseeds = config.netseeds,
+            classical = Tuple(filter(!=(:nomo), config.classical)),  # :nomo diss-ratio = 0 (log axis)
+            trainpoints,
         )
-        tabulate(setup, "Training wall-time (seconds) per learned model", timings; digits = 1)
-        tabulate(
-            setup,
-            "Trainable parameters per learned model (equi counted pre-synthesis)",
-            NamedTuple(k => S.paramcount(setup, k) for k in learned),
-        )
-        S.plot_training(setup, config.models)
     end
 
-    if :rollouts in config.experiments
-        timings = NamedTuple(
-            k => load_object(S.upostfile(setup, k)).timing for k in config.models
-        )
-        tabulate(setup, "LES rollout wall-time (seconds) per model", timings; digits = 1)
+    if :tables in config.experiments
+        dns, Δf = first(testpoints)
+        S.write_errors_table(case, dns, Δf, models; netseeds = config.netseeds)
     end
 
-    if :les_stats in config.experiments
-        les_stat = S.get_les_statistics_cached(
-            setup, Tuple(config.models); force = :les_stats in config.force,
-        )
-        tabulate(
-            setup,
-            "Time-mean relative LES error vs filtered DNS, per model",
-            map(s -> mean(s.e_post), les_stat),
-        )
-        S.plot_error_post(setup, les_stat; seed_stat)
-    end
-
-    if :spectrum_les in config.experiments
-        les_stat = S.get_les_statistics_cached(setup, Tuple(config.models))
-        S.plot_spectrum_les(setup, les_stat)
-    end
-
-    if :stats in config.experiments
-        sfs_keys = filter(!=(:nomo), config.models)
-        all_keys = [:ref; config.models]
-        S.compute_sfs_stats(setup, all_keys; force = :stats in config.force)
-
-        stats = NamedTuple(
-            k => load_object("$(setup.outdir)/sfs_stats_$(k).jld2") for k in all_keys
-        )
-        tabulate(
-            setup,
-            "A-priori relative SFS error per model",
-            map(s -> s.apriori.relerr, stats),
-        )
-        tabulate(
-            setup,
-            "A-priori SFS cross-correlation per model",
-            map(s -> s.apriori.crosscor, stats),
-        )
-        tabulate(
-            setup,
-            "Median pointwise SFS dissipation per model (incl :ref baseline)",
-            map(s -> s.diss.median, stats),
-        )
-        tabulate(
-            setup,
-            "Dissipation skewness per model (negative = backscatter tail)",
-            map(s -> s.diss.skewness, stats),
-        )
-        tabulate(
-            setup,
-            "Backscatter fraction per model (τ:S > 0; 0 for Smag by construction)",
-            map(s -> s.diss.backscatter, stats),
-        )
-
-        S.plot_densities(setup, [:ref; sfs_keys]; dolog = true)
-        S.plot_dissipation_bar(setup, all_keys; seed_stat)
-        S.plot_backscatter_bar(setup, all_keys; seed_stat)
-        S.plot_apriori_bar(setup, config.models; seed_stat)
-    end
-
-    if :redelta in config.experiments
-        # Phase-0 diagnostic for the Re_Δ-as-input experiment: bins the
-        # filtered-DNS (Ā, τ) pairs by pointwise Re_Δ = Δ²|Ā|/ν and reports the
-        # within-flow slope of the normalized SFS dissipation / stress. Compare
-        # its sign to the across-flow trend in fig:dissipation-vs-re before
-        # committing DNS to the Re_Δ feature (Notes/ReExperiment.md). Model-
-        # independent — reads data.jld2 only, so no getmodel / GPU needed.
-        S.compute_redelta_binning(setup; force = :redelta in config.force)
-        S.plot_redelta_binning(setup)
-    end
-
-    if :budget in config.experiments
-        S.compute_budget(setup, :ref; force = :budget in config.force)
-        S.plot_budget(setup, [:ref; config.models])
-    end
-
-    if :spectral_transfer in config.experiments
-        S.compute_spectral_transfer(setup, :ref; force = :spectral_transfer in config.force)
-        S.plot_spectral_transfer(setup, [:ref; config.models])
-    end
-
-    if :equi_prior in config.experiments
-        equi_keys = filter(!=(:nomo), config.models)
-        errs = S.load_equivariance_errors(setup, equi_keys, :prior)
-        tabulate(
-            setup,
-            "Mean a-priori equivariance error (over group elements) per model",
-            map(mean, errs),
-        )
-        S.plot_equivariance_errors(setup, errs; tag = :prior)
-    end
-
-    if :equi_post in config.experiments
-        errs = S.load_equivariance_errors(setup, config.models, :post)
-        tabulate(
-            setup,
-            "Mean a-posteriori equivariance error (over group elements) per model",
-            map(mean, errs),
-        )
-        S.plot_equivariance_errors(setup, errs; tag = :post)
-    end
-
-    if :velocities in config.experiments
-        S.plot_velocities(setup, :x, [:ref; config.models])
-        S.plot_velocities(setup, :z, [:ref; config.models])
-        S.plot_velocities(setup, :vortz, [:ref; config.models])
-    end
-
-    if :sfs_plot in config.experiments
-        S.plot_sfs(setup, filter(!=(:nomo), config.models))
-    end
-
-    if :qr in config.experiments
-        qr_keys = [:ref; config.models]
-        S.compute_qr(setup, qr_keys; force = :qr in config.force)
-        S.plot_qr(setup, qr_keys; config.smooth_σ)
-    end
-
-    if :paper_tables in config.experiments
-        # Paper-ready errors table (mean ± std over seeds where available);
-        # copy plotdir/errors.tex over the paper repo's tables/errors.tex.
-        S.write_errors_table(setup, config.models; seed_stat)
+    #######################
+    # Optional showcase: full-field rollout montages at one eval point
+    #######################
+    if :showcase in config.experiments
+        dns, Δf = first(testpoints)
+        setup = S.make_setup(case, dns, Δf)
+        show_models = [
+            :clar,
+            (; arch = config.archs[1], tier = config.tiers[1], netseed = first(config.netseeds), use_redelta = false),
+        ]
+        for m in show_models
+            S.clean()
+            getmodel() = buildone(case, setup, m)
+            S.solve_les(case, m, dns, Δf, getmodel; force = true, savefields = true)
+        end
+        S.plot_velocities(case, dns, Δf, [:ref; show_models], :vortz)
+        S.plot_sfs(case, dns, Δf, show_models)
     end
 
     @info "Done."
     flush(stderr)
-
     return
 end
 
