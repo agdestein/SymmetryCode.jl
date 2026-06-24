@@ -357,11 +357,13 @@ Split per-snapshot `(x, y)` pairs into a training and a held-out validation
 (time-ordered) snapshots become the validation set. The last spatial axis is
 folded into the batch dimension (the pointwise 1x1 models use no neighbor
 information) so each snapshot is cheap and 2D gets as many samples as 3D; a
-singleton keeps the `Conv` seeing `D` spatial dims. Arrays are converted to
-`precision`. Used by every model's dataloader so all closures see the same
+singleton keeps the `Conv` seeing `D` spatial dims. The caller stores snapshots
+already in the training precision (so nothing here is ever the Float64 solver
+type — the TBNN dataset, ~5× the channels of the others, would otherwise blow up
+host RAM). Used by every model's dataloader so all closures see the same
 train/val partition and float type.
 """
-function split_loaders(snaps, D, batchsize; rng = nothing, val_fraction = 0.2, precision = Float32)
+function split_loaders(snaps, D, batchsize; rng = nothing, val_fraction = 0.2)
     n = length(snaps)
     @assert n >= 2 "need at least 2 snapshots to form a train/val split"
     nval = clamp(round(Int, val_fraction * n), 1, n - 1)
@@ -374,7 +376,7 @@ function split_loaders(snaps, D, batchsize; rng = nothing, val_fraction = 0.2, p
         y = permutedims(y, perm)
         x = reshape(x, size(x)[1:(D - 1)]..., 1, size(x, D), :)
         y = reshape(y, size(y)[1:(D - 1)]..., 1, size(y, D), :)
-        return (precision.(x), precision.(y))
+        return (x, y)
     end
     xt, yt = build(snaps[1:(n - nval)])
     xv, yv = build(snaps[(n - nval + 1):n])
@@ -447,13 +449,13 @@ function create_dataloader(
             @. x ./= (sqrt(A2) + eps(T)) # Normalize input gradient
             @. y ./= (Δ^2 * A2 + eps(T)) # Normalize output stress (this dataset's Δ)
             x = append_redelta(x, redelta[j], use_redelta, redelta_norm, D)
-            (x, y) |> cpu_device()
+            # Downcast to the training precision *before* storing on the host, so
+            # the concatenated dataset never holds the Float64 solver type.
+            P = case.schedule.precision
+            (P.(x), P.(y)) |> cpu_device()
         end
     end
-    return split_loaders(
-        snaps, D, batchsize;
-        rng, val_fraction = case.schedule.val_fraction, precision = case.schedule.precision,
-    )
+    return split_loaders(snaps, D, batchsize; rng, val_fraction = case.schedule.val_fraction)
 end
 
 """
@@ -497,11 +499,15 @@ function create_dataloader_tbnn(
             i = append_redelta(i, redelta[j], use_redelta, redelta_norm, D) # extra invariant
             b = reshape(b, nx..., :) |> cpu_device()
             x = cat(i, b; dims = D + 1)
-            x, y |> cpu_device()
+            # Downcast to the training precision before storing — the TBNN dataset
+            # carries the (O(1)) basis tensors (~5× the channels of the others), so
+            # keeping it Float64 on the host is what OOMs the node.
+            P = case.schedule.precision
+            (P.(x), P.(y)) |> cpu_device()
         end
     end
     return split_loaders(
         snaps, D, batchsize;
-        rng, val_fraction = case.schedule.val_fraction, precision = case.schedule.precision,
+        rng, val_fraction = case.schedule.val_fraction,
     )
 end
