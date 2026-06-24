@@ -146,6 +146,21 @@ function build_net_stuff(netsetup, arch, layers; same_as_equi = false)
 end
 
 """
+Inference closure `(u, ∇ū) -> τ` for a trained learned-model coordinate `m`,
+wrapping `psfile(case, m)` for evaluation at `setup` (which supplies the filter
+width Δ). (Re_Δ-augmented inference is wired in a later increment.)
+"""
+function build_model(case, m, setup)
+    ns = build_net_stuff(make_netsetup(case, m.netseed), m.arch, case.tiers[m.tier][m.arch])
+    d = load(psfile(case, m))
+    ps = d["ps"] |> f64 |> adapt(case.backend)
+    st = d["st"]
+    g = Grid{case.D}(; case.l, n = case.n_les, case.backend)
+    return m.arch === :tbnn ? tbnn(ns.net, ps, st, setup.Δ, g) :
+        fullchain(setup, ns.net, ns.project, ps, st, setup.Δ)
+end
+
+"""
 Default training pool: every `(dns, Δ_factor)` from the training DNS runs crossed
 with the training filter ratios. Pass an explicit list to subset it.
 """

@@ -8,14 +8,20 @@ it to every eval-window filtered-DNS snapshot. `getmodel` is a zero-arg thunk
 that builds the closure; it is only invoked on a cache miss. Persists the
 resulting `Vector{NamedTuple}` to `sfs_<key>.jld2`; returns nothing.
 """
-function predict_sfs(setup, key, getmodel; force = false)
-    (; outdir, D, l, n_les, backend) = setup
-    file = "$(outdir)/sfs_$(key).jld2"
-    skip_if_cached(file; force, label = "SFS for $(key)") && return
+"""
+Predict the a-priori SFS stress series for closure `m` on test dataset (dns, Δf):
+apply `getmodel()` to every filtered-DNS snapshot in `fieldsfile`, persisting the
+`Vector{NamedTuple}` to `sfsfile(case, dns, Δf, m)`. `m` names the artifact (a
+learned coordinate or a classical symbol); `getmodel` is a zero-arg thunk that
+builds the closure, invoked only on a cache miss.
+"""
+function predict_sfs(case, m, dns, Δf, getmodel; force = false)
+    (; D, l, n_les, backend) = case
+    file = sfsfile(case, dns, Δf, m)
+    skip_if_cached(file; force, label = "SFS for $(modelname(m))") && return
     model = getmodel()
 
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    inputs_eval = data.inputs[data_ranges(setup).eval]
+    inputs = load(fieldsfile(case, dns, Δf), "inputs")
 
     g = Grid{D}(; l, n = n_les, backend)
     u = vectorfield(g)
@@ -23,9 +29,9 @@ function predict_sfs(setup, key, getmodel; force = false)
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
 
-    @info "Computing SFS for $(key)"
+    @info "Computing SFS for $(modelname(m))"
     flush(stderr)
-    τ_series = map(inputs_eval) do ucpu
+    τ_series = map(inputs) do ucpu
         GC.gc()
         CUDA.reclaim()
 
@@ -62,44 +68,32 @@ end
 """
 Aggregate per-snapshot SFS samples into a single statistics artifact per key.
 
-For each key in `keys`, persists `sfs_stats_<key>.jld2` containing:
+For each closure `m` in `models`, on test dataset (dns, Δf), persists
+`sfsstatsfile(case, dns, Δf, m)` containing:
 
-- `kde.xx`, `kde.xy`, `kde.diss` — kernel density estimates of the τ₁₁,
-  τ₁₂, and pointwise SFS dissipation rate `ε_sfs = -τᵢⱼSᵢⱼ` distributions
-  over the eval window. **Convention** (shared by every dissipation-flavored
-  statistic in this pipeline, including [`compute_budget`](@ref) and
-  [`compute_spectral_transfer`](@ref)): `ε_sfs > 0` is drain on resolved
-  KE; `ε_sfs < 0` is local backscatter.
-- `diss` — `(; mean, median, std, skewness, backscatter)` of the pointwise
-  `ε_sfs` samples. `backscatter` is the fraction of points with `ε_sfs < 0`
-  (equivalently `τᵢⱼSᵢⱼ > 0`); it is exactly 0 for any closure of the form
-  `τ = -2νₜS` with `νₜ ≥ 0` (e.g. Smagorinsky), and is ≈ 0.3–0.4 for
-  filtered HIT.
-- `apriori` — `(; relerr, crosscor)` against the filtered-DNS reference over
-  the full trace-free tensor. `(0.0, 1.0)` for `:ref`, `(1.0, 0.0)` for `:nomo`.
+- `apriori` — `(; relerr, crosscor)` against the filtered-DNS reference over the
+  full trace-free tensor. `(0.0, 1.0)` for `:ref`, `(1.0, 0.0)` for `:nomo`.
+- `diss` — `(; mean, median, std, skewness, backscatter)` of the pointwise SFS
+  dissipation `ε_sfs = -τᵢⱼSᵢⱼ`. `backscatter` is the fraction with `ε_sfs < 0`;
+  exactly 0 for `τ = -2νₜS` with `νₜ ≥ 0` (e.g. Smagorinsky), ≈ 0.3–0.4 for
+  filtered HIT. Convention: `ε_sfs > 0` drain, `< 0` backscatter.
+- `kde.diss` — KDE of `ε_sfs` (the backscatter evidence; the τ-component PDFs are
+  dropped — only the dissipation PDF is kept, per ReExperiment.md).
 
-`:ref` reads its tensor from `data.outputs[eval]` directly; other keys load
-`sfs_<key>.jld2` (produced by [`predict_sfs`](@ref)). `:nomo` is treated as
-zero SFS stress (no `sfs_nomo.jld2` is required).
-
-Replaces the legacy `compute_densities` / `apriori_error` /
-`get_dissipation_errors` trio, which all iterated the same per-snapshot
-sample collection separately.
+`:ref` uses the filtered-DNS `outputs` directly; `:nomo` is zero stress; other
+closures load `sfsfile` (from [`predict_sfs`](@ref)).
 """
-function compute_sfs_stats(setup, keys; force = false)
-    (; outdir, D, l, n_les, backend) = setup
+function compute_sfs_stats(case, models, dns, Δf; force = false)
+    (; D, l, n_les, backend) = case
 
-    todo = filter(k -> force || !isfile("$(outdir)/sfs_stats_$(k).jld2"), keys)
+    todo = filter(m -> force || !isfile(sfsstatsfile(case, dns, Δf, m)), models)
     if isempty(todo)
         @info "All SFS stats cached"
         flush(stderr)
         return
     end
 
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    eval_range = data_ranges(setup).eval
-    inputs_eval = data.inputs[eval_range]
-    outputs_eval = data.outputs[eval_range]
+    inputs, outputs = load(fieldsfile(case, dns, Δf), "inputs", "outputs")
 
     g = Grid{D}(; l, n = n_les, backend)
     u = vectorfield(g)
@@ -111,30 +105,23 @@ function compute_sfs_stats(setup, keys; force = false)
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
 
-    for key in todo
-        file = "$(outdir)/sfs_stats_$(key).jld2"
-        @info "Computing SFS stats for $(key)"
+    for m in todo
+        @info "Computing SFS stats for $(modelname(m))"
         flush(stderr)
 
         # Per-snapshot model source. :nomo has no file; :ref uses the
         # spectral-space reference (re-IFFTed in the loop). Others load
         # the cached physical-space prediction.
-        τ_series = if key in (:nomo, :ref)
-            nothing
-        else
-            load_object("$(outdir)/sfs_$(key).jld2")
-        end
+        τ_series = m in (:nomo, :ref) ? nothing : load_object(sfsfile(case, dns, Δf, m))
 
-        xx_samples = Float64[]
-        xy_samples = Float64[]
         diss_samples = Float64[]
         relerrs = Float64[]
         crosscors = Float64[]
 
-        for i in eachindex(inputs_eval)
-            # Strain rate from ubar (model-independent; recomputed per key
+        for i in eachindex(inputs)
+            # Strain rate from ubar (model-independent; recomputed per model
             # for memory simplicity — cheap compared to the model work).
-            foreach(copyto!, u, inputs_eval[i])
+            foreach(copyto!, u, inputs[i])
             apply!(vectorgradient!, g, (A, u, g))
             for (AA, A) in zip(AA, A)
                 apply!(twothirds!, g, (A, g))
@@ -143,7 +130,7 @@ function compute_sfs_stats(setup, keys; force = false)
             S = strain_from_gradient(AA, g)
 
             # Reference τ (spectral → physical, trace-free)
-            for (τ, τcpu) in zip(τ_ref, outputs_eval[i])
+            for (τ, τcpu) in zip(τ_ref, outputs[i])
                 copyto!(τhat, τcpu)
                 apply!(twothirds!, g, (τhat, g))
                 to_phys!(τ, τhat, plan, g)
@@ -151,11 +138,11 @@ function compute_sfs_stats(setup, keys; force = false)
             make_tracefree!(τ_ref, g)
 
             # Model τ
-            if key == :nomo
+            if m === :nomo
                 for t in τ_model
                     fill!(t, 0)
                 end
-            elseif key == :ref
+            elseif m === :ref
                 for (t, r) in zip(τ_model, τ_ref)
                     copyto!(t, r)
                 end
@@ -167,18 +154,15 @@ function compute_sfs_stats(setup, keys; force = false)
                 make_tracefree!(τ_model, g)
             end
 
-            # Sample the three fields of interest.
-            # ε_sfs = -τᵢⱼSᵢⱼ is the SFS dissipation rate (positive = drain).
-            append!(xx_samples, vec(Array(τ_model.xx)))
-            append!(xy_samples, vec(Array(τ_model.xy)))
+            # ε_sfs = -τᵢⱼSᵢⱼ (positive = drain).
             dissfield .= contract_dissipation(τ_model, S, g)
             append!(diss_samples, .-vec(Array(dissfield)))
 
-            # A-priori metrics over the full trace-free tensor vs reference
-            if key == :ref
+            # A-priori metrics over the full trace-free tensor vs reference.
+            if m === :ref
                 push!(relerrs, 0.0)
                 push!(crosscors, 1.0)
-            elseif key == :nomo
+            elseif m === :nomo
                 push!(relerrs, 1.0)
                 push!(crosscors, 0.0)
             else
@@ -190,30 +174,18 @@ function compute_sfs_stats(setup, keys; force = false)
             end
         end
 
-        # Aggregate. KDE the three sample arrays (zero-variance :nomo is
-        # handled by saving an empty estimate; plot_densities filters :nomo out).
-        kde_or_empty(samples) = if iszero(std(samples))
+        kdiss = if iszero(std(diss_samples))
             (; x = Float64[], density = Float64[])
         else
-            e = kde(samples)
+            e = kde(diss_samples)
             (; x = collect(e.x), density = collect(e.density))
         end
         result = (;
-            kde = (;
-                xx = kde_or_empty(xx_samples),
-                xy = kde_or_empty(xy_samples),
-                diss = kde_or_empty(diss_samples),
-            ),
-            diss = (;
-                moments(diss_samples)...,
-                # Fraction of points with ε_sfs < 0 (local backscatter).
-                # Exactly 0 for any closure of the form τ = -2νₜS with
-                # νₜ ≥ 0 (e.g. Smag), since then ε_sfs = 2νₜ|S|² ≥ 0.
-                backscatter = mean(<(0), diss_samples),
-            ),
+            kde = (; diss = kdiss),
+            diss = (; moments(diss_samples)..., backscatter = mean(<(0), diss_samples)),
             apriori = (; relerr = mean(relerrs), crosscor = mean(crosscors)),
         )
-        save_object_atomic(file, result)
+        save_object_atomic(sfsstatsfile(case, dns, Δf, m), result)
     end
     return
 end
