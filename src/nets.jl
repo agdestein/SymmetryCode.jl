@@ -143,9 +143,11 @@ function equivariant_net(setup, nchan; synthesis = true, use_redelta = false)
         if use_redelta
             # Trivial-rep Re_Δ channel: one learnable scalar per output channel,
             # broadcast equally to all |G| regular-rep copies (the trivial→regular
-            # intertwiner). Output index k = r + nreg·(j-1) (copy r fastest), so
-            # `repeat(…, inner = nreg)` places w_re[j] in every copy of channel j.
-            wre = reshape(repeat(vec(ps.weight_re), inner = nreg), 1, nreg * c_out)
+            # intertwiner). `repeat(weight_re, nreg)` tiles the (1, c_out) row to
+            # (nreg, c_out); the column-major flatten then places w_re[j] at every
+            # output index k = r + nreg·(j-1) — exactly the bias broadcast below, and
+            # (unlike `repeat(…; inner)`) its Zygote adjoint stays on the GPU.
+            wre = reshape(repeat(ps.weight_re, nreg), 1, nreg * c_out)
             w = vcat(w, wre)   # (nten+1, nreg·c_out)
         end
         weight = reshape(w, kern..., size(w, 1), nreg * c_out)
