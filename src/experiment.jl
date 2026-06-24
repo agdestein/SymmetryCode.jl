@@ -41,8 +41,8 @@ capacity comparison isolates inductive bias rather than raw capacity. Widths are
 placeholders pending the Phase-0b capacity sweep; `paramcount` asserts the match.
 """
 default_tiers() = (;
-    small = (; tbnn = [10, 16, 32], equi = [4, 8, 8], conv = [8, 16, 32]),
-    medium = (; tbnn = [12, 24, 64], equi = [4, 4, 8], conv = [12, 24, 64]),
+    small = (; tbnn = [10, 16, 32], equi = [4, 4, 8], conv = [8, 16, 32]),
+    medium = (; tbnn = [12, 24, 64], equi = [4, 8, 8], conv = [12, 24, 64]),
     saturated = (; tbnn = [46, 64, 64], equi = [4, 8, 16], conv = [44, 64, 64]),
 )
 
@@ -62,14 +62,14 @@ function case_snellius(;
     return (;
         name = "snellius",
         D = 3,
-        l = 6.283,
+        l = 2π,
         n_dns = 810,
         n_les = 128,
         cfl = 0.35,
         forced = true,
         totalenergy = 0.2,
-        warmup_tstop = 10.0,
-        train_sampling = (; nsnap = 8, nturnover = 2),
+        warmup_tstop = 0.05,
+        train_sampling = (; nsnap = 8, nturnover = 0.05),
         test_sampling = (; nsnap = 40, nturnover = 1),
         filters_train = [2.0, 3.0, 4.0],          # Δ/h; window [2, 5] (ReExperiment.md §B)
         filters_test = [2.5, 3.5, 5.0],           # interp {2.5, 3.5} + extrap {5}
@@ -109,13 +109,13 @@ function make_setup(case, dns, Δ_factor)
     Δ = Δ_factor * l / n_les
     return (;
         case.name, D, l, n_dns, n_les, Δ, Δ_factor,
-        visc = dns.visc, seed = dns.seed, role = dns.role,
+        dns.visc, dns.seed, dns.role,
         cfl, forced,
-        totalenergy = case.totalenergy,
-        warmup_tstop = case.warmup_tstop,
+        case.totalenergy,
+        case.warmup_tstop,
         sampling = dns.role === :train ? case.train_sampling : case.test_sampling,
-        schedule = case.schedule,
-        tiers = case.tiers,
+        case.schedule,
+        case.tiers,
         backend,
         outdir = datadir(case, dns, Δ_factor) |> mkpath,
         plotdir = case.plotdir,

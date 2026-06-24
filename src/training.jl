@@ -169,11 +169,11 @@ end
 """
 Train one learned-model coordinate `m = (; arch, tier, netseed, use_redelta)` on
 `trainpool`, persisting `ps`, states, loss curves, timing, and the Re_Δ
-standardization to `pspath(case, m)`. Fixed-budget (see [`train`](@ref)); skips
+standardization to `psfile(case, m)`. Fixed-budget (see [`train`](@ref)); skips
 when the file already exists unless `force`.
 """
 function train_model(case, m, trainpool; force = false)
-    file = pspath(case, m)
+    file = psfile(case, m)
     if !force && isfile(file)
         @info "skip (exists): $(modelkey(m))"
         flush(stderr)
