@@ -1,4 +1,4 @@
-# Generic training loop and per-model orchestration (TBNN, G-CNN, Conv).
+# Generic training loop and coordinate-driven per-model orchestration.
 
 create_loss(project) = function loss(net, ps, st, (x, y))
     ps = project(ps)
@@ -34,88 +34,62 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
     return l, st, (;)
 end
 
-function train(;
-        loss, setup, trainloader, valloader, net_stuff,
-        checkpointfile = nothing, resume = false,
-    )
-    (; backend, train_setup) = setup
-    (;
-        nepoch, learning_rate, log_every, grad_clip, patience,
-        warmup_frac, checkpoint_every,
-    ) = train_setup
+"""
+Fixed-budget training: linear-warmup → cosine LR decay to the end, returning the
+*final* parameters. The nets are tiny and train fast, so there is no early
+stopping, patience, or file checkpointing; the validation loss is tracked only
+for the convergence curve (`case.schedule.val_fraction`), never for model
+selection.
+"""
+function train(; loss, case, trainloader, valloader, net_stuff)
+    (; backend, schedule) = case
+    (; nepoch, learning_rate, log_every, grad_clip, warmup_frac) = schedule
     (; net, ps, st) = net_stuff
     device = adapt(backend)
     opt = OptimiserChain(ClipNorm(grad_clip), AdamW(learning_rate))
 
-    # Warmup: compile the train step on a throwaway state so the timed loop
-    # is measured accurately and starts from the initial parameters.
+    # Compile the train step on a throwaway state so the timed loop starts from
+    # the initial parameters.
     let ts = Training.TrainState(net, deepcopy(ps), deepcopy(st), opt)
         x, y = first(trainloader) |> device
         Training.single_train_step!(AutoZygote(), loss, (x, y), ts)
     end
 
-
     train_state = Training.TrainState(net, deepcopy(ps), st, opt)
     b_valid = first(valloader) |> device
-    ps_best = deepcopy(train_state.parameters)
-    st_best = deepcopy(train_state.states)
-    l_best = Inf
     losses_train = Float64[]
     losses_valid = Float64[]
-    start_epoch = 1
-
-    if resume && !isnothing(checkpointfile) && isfile(checkpointfile)
-        @info "Resuming training from $(checkpointfile)"
-        flush(stderr)
-        ck = load(checkpointfile)
-        train_state =
-            Training.TrainState(net, ck["ps_cur"] |> device, ck["st_cur"], opt)
-        ps_best = ck["ps_best"] |> device
-        st_best = ck["st_best"]
-        l_best = ck["l_best"]
-        losses_train = ck["losses_train"]
-        losses_valid = ck["losses_valid"]
-        start_epoch = ck["epoch"] + 1
-    end
 
     nbatch = length(trainloader)
     total = nepoch * nbatch
     nwarm = max(1, round(Int, warmup_frac * total))
     # Linear warmup then cosine decay to zero.
-    schedule(s) =
+    schedfn(s) =
         s < nwarm ? learning_rate * s / nwarm :
         learning_rate * (1 + cos(π * (s - nwarm) / max(1, total - nwarm))) / 2
-    step = (start_epoch - 1) * nbatch
-    epochs_since_improve = 0
 
+    step = 0
     timing = time()
-    for iepoch in start_epoch:nepoch
-        l_best_epoch_start = l_best
+    for iepoch in 1:nepoch
         for (ibatch, batch) in enumerate(trainloader)
             step += 1
-            Optimisers.adjust!(train_state.optimizer_state, schedule(step))
+            Optimisers.adjust!(train_state.optimizer_state, schedfn(step))
             x, y = batch |> device
             _, l_train, _, train_state =
                 Training.single_train_step!(AutoZygote(), loss, (x, y), train_state)
 
-            # Validate on the held-out set against the current parameters.
+            # Validation loss for the convergence curve (not for selection).
             l_valid =
-                loss(net, train_state.parameters, train_state.states, b_valid) |>
-                first
+                loss(net, train_state.parameters, train_state.states, b_valid) |> first
             push!(losses_train, l_train)
             push!(losses_valid, l_valid)
-            if l_valid < l_best
-                l_best = l_valid
-                ps_best = deepcopy(train_state.parameters)
-                st_best = deepcopy(train_state.states)
-            end
 
             if ibatch % log_every == 0
                 @info join(
                     [
                         "epoch $(iepoch)/$(nepoch)",
                         "batch $(ibatch)/$(nbatch)",
-                        "lr = $(round(schedule(step); sigdigits = 3))",
+                        "lr = $(round(schedfn(step); sigdigits = 3))",
                         "loss (valid) = $(round(l_valid; sigdigits = 4))",
                         "loss (train) = $(round(l_train; sigdigits = 4))",
                     ],
@@ -123,244 +97,126 @@ function train(;
                 )
                 flush(stderr)
             end
-
-            if !isnothing(checkpointfile) && step % checkpoint_every == 0
-                jldsave_atomic(
-                    checkpointfile;
-                    epoch = iepoch - 1, # resume re-runs at most this epoch
-                    ps_cur = train_state.parameters |> cpu_device(),
-                    st_cur = train_state.states |> cpu_device(),
-                    ps_best = ps_best |> cpu_device(),
-                    st_best,
-                    l_best,
-                    losses_train,
-                    losses_valid,
-                )
-            end
-        end
-
-        # Early stopping on the held-out validation loss.
-        epochs_since_improve =
-            l_best < l_best_epoch_start ? 0 : epochs_since_improve + 1
-        if !isnothing(checkpointfile)
-            jldsave_atomic(
-                checkpointfile;
-                epoch = iepoch,
-                ps_cur = train_state.parameters |> cpu_device(),
-                st_cur = train_state.states,
-                ps_best = ps_best |> cpu_device(),
-                st_best,
-                l_best,
-                losses_train,
-                losses_valid,
-            )
-        end
-        if epochs_since_improve >= patience
-            @info "Early stopping: no validation improvement in $(patience) epochs"
-            flush(stderr)
-            break
         end
     end
     timing = time() - timing
 
-    return (; ps = ps_best, st = st_best, losses_train, losses_valid, timing)
+    return (;
+        ps = train_state.parameters, st = train_state.states,
+        losses_train, losses_valid, timing,
+    )
 end
 
-"""
-Generic training orchestrator shared by all learned closures, so the three
-models differ only in architecture/loss, not in training treatment.
-
-`mode`:
-- `:scratch` — train from the initial parameters (ignore any checkpoint)
-- `:resume`  — continue from `ps-<key>-checkpoint.jld2` if present, else
-               train from scratch; periodic checkpoints make it SLURM-safe
-- `:skip`    — do not train; just load the persisted parameters
-
-A `Bool` is accepted for backwards compatibility: `true → :resume`,
-`false → :skip`.
-"""
-function create_model(setup, mode; key, buildnet, makeloss, makeloaders, wrap)
-    mode = mode isa Bool ? (mode ? :resume : :skip) : mode
-    (; outdir) = setup
-    file = joinpath(outdir, "ps-$(key).jld2")
-    checkpointfile = joinpath(outdir, "ps-$(key)-checkpoint.jld2")
-    # A completed training leaves ps-<key>.jld2 and deletes its checkpoint, so
-    # under :resume there is nothing to continue — skip instead of retraining.
-    # This makes the (multi-seed) training loop idempotent under :resume;
-    # use :scratch to deliberately retrain.
-    if mode == :resume && isfile(file) && !isfile(checkpointfile)
-        @info "Skipping training for $(key): completed parameters at $(file)"
-        flush(stderr)
-        mode = :skip
-    end
-    net_stuff = buildnet()
-    g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-
-    if mode != :skip
-        @info "Training $(key)"
-        flush(stderr)
-        data = joinpath(outdir, "data.jld2") |> load_object
-        trainloader, valloader = makeloaders(data)
-        result = train(;
-            loss = makeloss(net_stuff, g),
-            setup,
-            trainloader,
-            valloader,
-            net_stuff,
-            checkpointfile,
-            resume = mode == :resume,
-        )
-        save_object_atomic(
-            file,
-            (;
-                ps = result.ps |> cpu_device(),
-                st = result.st,
-                result.losses_train,
-                result.losses_valid,
-                result.timing,
-            ),
-        )
-        isfile(checkpointfile) && rm(checkpointfile)
-    end
-
-    d = load_object(file)
-    # Inference runs in Float64 to match the solver — training stays in
-    # train_setup.precision, but we upcast the loaded weights here so the
-    # forward pass through `wrap` is uniformly Float64. Diagnostics like the
-    # apost equivariance error would otherwise be pinned to Float32 eps.
-    ps = d.ps |> f64 |> adapt(setup.backend)
-    chain = wrap(net_stuff, ps, d.st, g)
-    return chain, (; d.losses_train, d.losses_valid, d.timing)
-end
+# --- coordinate-driven model orchestration ---
 
 """
-Construct the untrained Lux network and initial parameters/states for a
-learned closure `key` (`:tbnn`, `:equi`, or `:conv`) — the `net_stuff` that
-`create_model` trains and then `wrap`s. Factored out of the `create_*`
-wrappers so the parameter-count report ([`learned_paramcounts`](@ref)) can
-build the same net without training it.
-
-For `:equi` the returned `ps` is the *compact, pre-synthesis* basis;
-`ns.project` is the synthesis operator that expands it into the full (tied)
-weights Lux actually operates on. For `:tbnn`/`:conv` there is no synthesis,
-so `ps` is the full Lux chain and `ns.project = identity`.
+Lightweight `setup`-shaped view carrying just what the `nets.jl` builders read —
+the grid plus the network-init `seed` and `precision`. Lets those builders stay
+unchanged while the *network* seed becomes a model coordinate (`netseed`),
+distinct from the DNS seed.
 """
-function build_net_stuff(setup, key)
-    if key === :tbnn
-        net = tbnn_net(setup, setup.tbnn_setup.layers)
+make_netsetup(case, netseed) = (;
+    case.D, case.l, case.n_les, case.backend,
+    train_setup = (; seed = netseed, precision = case.schedule.precision),
+)
+
+"""
+Untrained net + initial parameters/states for a learned closure `arch`
+(`:tbnn`/`:equi`/`:conv`) at hidden widths `layers`. `netsetup` carries the grid
++ init seed/precision (see [`make_netsetup`](@ref)). For `:equi` the `ps` is the
+compact pre-synthesis basis and `project` is the synthesis operator; for
+`:tbnn`/`:conv` `project = identity`.
+"""
+function build_net_stuff(netsetup, arch, layers; same_as_equi = false)
+    if arch === :tbnn
+        net = tbnn_net(netsetup, layers)
         net |> display
         flush(stdout)
-        f = setup.train_setup.precision === Float32 ? f32 : f64
+        f = netsetup.train_setup.precision === Float32 ? f32 : f64
         ps, st =
-            Lux.setup(Xoshiro(setup.train_setup.seed), net) |> f |>
-            adapt(setup.backend)
+            Lux.setup(Xoshiro(netsetup.train_setup.seed), net) |> f |> adapt(netsetup.backend)
         return (; net, ps, st, project = identity)
-    elseif key === :equi
-        return equivariant_net(setup, setup.equi_setup.layers)
-    elseif key === :conv
-        return mlp(setup, setup.conv_setup.layers; setup.conv_setup.same_as_equi)
+    elseif arch === :equi
+        return equivariant_net(netsetup, layers)
+    elseif arch === :conv
+        return mlp(netsetup, layers; same_as_equi)
     else
-        error("not a learned closure: $(key)")
+        error("not a learned closure: $(arch)")
     end
 end
 
 """
-Number of trainable parameters per learned closure named in `keys`
-(non-learned keys are ignored, original order preserved), as a NamedTuple
-suitable for [`tabulate`](@ref).
-
-For `:conv`/`:tbnn` this is the parameter count of the Lux chain. For `:equi`
-it is the count of the *compact, pre-synthesis* basis — the `ps` the optimiser
-actually updates — which is smaller than the full tied weights Lux reports,
-because the synthesis operator (`project`) expands those learnables into the
-equivariant weight block.
+Default training pool: every `(dns, Δ_factor)` from the training DNS runs crossed
+with the training filter ratios. Pass an explicit list to subset it.
 """
-function learned_paramcounts(setup, keys)
-    learned = filter(in((:tbnn, :equi, :conv)), keys)
-    return NamedTuple(
-        k => Lux.parameterlength(build_net_stuff(setup, k).ps) for k in learned
-    )
+build_trainpool(case; dns = dns_runs().train, filters = case.filters_train) =
+    [(d, Δf) for d in dns for Δf in filters]
+
+"Standardization `(; μ, σ)` of `log Re_Δ` over the trainpool — stored with `ps`."
+function compute_redelta_norm(case, trainpool)
+    logre = Float64[]
+    for (dns, Δf) in trainpool
+        append!(logre, log.(load(fieldsfile(case, dns, Δf), "redelta")))
+    end
+    return (; μ = mean(logre), σ = std(logre))
 end
 
-# The `seed` kwarg selects the training seed (network initialization and batch
-# shuffling). The canonical seed keeps the plain artifact key (`ps-tbnn.jld2`);
-# other seeds get a `_seed<i>` suffix — see `seed_key` / `with_seed`.
-function create_tbnn(setup, mode = :resume; seed = setup.train_setup.seed)
-    key = seed_key(setup, :tbnn, seed)
-    setup = with_seed(setup, seed)
-    return create_model(
-        setup, mode;
-        key,
-        buildnet = () -> build_net_stuff(setup, :tbnn),
-        makeloss = (ns, g) -> create_loss_tbnn(g),
-        makeloaders = data -> create_dataloader_tbnn(
-            setup, data;
-            setup.train_setup.nsample,
-            setup.train_setup.batchsize,
-            rng = Xoshiro(setup.train_setup.seed),
-        ),
-        wrap = (ns, ps, st, g) -> tbnn(ns.net, ps, st, setup.Δ, g),
-    )
-end
-
-function create_equi(setup, mode = :resume; seed = setup.train_setup.seed)
-    key = seed_key(setup, :equi, seed)
-    setup = with_seed(setup, seed)
-    return create_model(
-        setup, mode;
-        key,
-        buildnet = () -> build_net_stuff(setup, :equi),
-        makeloss = (ns, g) -> create_loss(ns.project),
-        makeloaders = data -> create_dataloader(
-            setup, data;
-            setup.train_setup.nsample,
-            setup.train_setup.batchsize,
-            rng = Xoshiro(setup.train_setup.seed),
-        ),
-        wrap = (ns, ps, st, g) ->
-        fullchain(setup, ns.net, ns.project, ps, st, setup.Δ),
-    )
-end
-
-function create_conv(setup, mode = :resume; seed = setup.train_setup.seed)
-    key = seed_key(setup, :conv, seed)
-    setup = with_seed(setup, seed)
-    return create_model(
-        setup, mode;
-        key,
-        buildnet = () -> build_net_stuff(setup, :conv),
-        makeloss = (ns, g) -> create_loss(ns.project),
-        makeloaders = data -> create_dataloader(
-            setup, data;
-            setup.train_setup.nsample,
-            setup.train_setup.batchsize,
-            rng = Xoshiro(setup.train_setup.seed),
-        ),
-        wrap = (ns, ps, st, g) ->
-        fullchain(setup, ns.net, ns.project, ps, st, setup.Δ),
-    )
+make_loaders(case, m, trainpool, redelta_norm) = let rng = Xoshiro(m.netseed)
+    loader = m.arch === :tbnn ? create_dataloader_tbnn : create_dataloader
+    loader(case, trainpool; case.schedule.batchsize, rng, m.use_redelta, redelta_norm)
 end
 
 """
-Train each learned closure (`tbnn`, `equi`, `conv`) listed in `active`, for
-every seed in `seeds`, persisting `ps-<seed_key>.jld2` under `setup.outdir`.
-Trainings run one at a time with `clean()` between them so GPU memory used by
-one model's dataloader / optimizer state is reclaimed before the next begins.
-
-`train_mode`: `:scratch` retrains, `:resume` continues from a checkpoint
-(and skips seeds whose training already completed), `:skip` is a no-op.
-Non-learned keys in `active` are ignored (`:convsym` has no parameters of its
-own — it reuses `:conv`'s). Call this before `build_models` if you need to
-(re)train.
+Train one learned-model coordinate `m = (; arch, tier, netseed, use_redelta)` on
+`trainpool`, persisting `ps`, states, loss curves, timing, and the Re_Δ
+standardization to `pspath(case, m)`. Fixed-budget (see [`train`](@ref)); skips
+when the file already exists unless `force`.
 """
-function train_models(setup, active; train_mode = :skip, seeds = (setup.train_setup.seed,))
-    train_mode == :skip && return
-    creators = (; tbnn = create_tbnn, equi = create_equi, conv = create_conv)
-    learned = filter(in(keys(creators)), active)
-    isempty(learned) && return
-    clean() # drop residency from earlier work in this REPL
-    for seed in seeds, key in learned
-        creators[key](setup, train_mode; seed) # returned chain discarded
+function train_model(case, m, trainpool; force = false)
+    file = pspath(case, m)
+    if !force && isfile(file)
+        @info "skip (exists): $(modelkey(m))"
+        flush(stderr)
+        return
+    end
+    g = Grid{case.D}(; case.l, n = case.n_les, case.backend)
+    layers = case.tiers[m.tier][m.arch]
+    net_stuff = build_net_stuff(make_netsetup(case, m.netseed), m.arch, layers)
+    redelta_norm = m.use_redelta ? compute_redelta_norm(case, trainpool) : nothing
+    trainloader, valloader = make_loaders(case, m, trainpool, redelta_norm)
+    loss = m.arch === :tbnn ? create_loss_tbnn(g) : create_loss(net_stuff.project)
+
+    @info "Training $(modelkey(m)) on $(length(trainpool)) datasets"
+    flush(stderr)
+    result = train(; loss, case, trainloader, valloader, net_stuff)
+    jldsave_atomic(
+        file;
+        ps = result.ps |> cpu_device(),
+        st = result.st,
+        result.losses_train,
+        result.losses_valid,
+        result.timing,
+        redelta_norm,
+    )
+    return
+end
+
+"""
+Train the Cartesian product of model coordinates (`archs × tiers × netseeds ×
+use_redelta`) on `trainpool`, one at a time with `clean()` between them so each
+model's GPU working set is reclaimed before the next.
+"""
+function train_models(
+        case, trainpool = build_trainpool(case);
+        archs = (:tbnn, :equi, :conv),
+        tiers = (:saturated,),
+        netseeds = 0:0,
+        use_redelta = (false,),
+        force = false,
+    )
+    clean()
+    for arch in archs, tier in tiers, netseed in netseeds, ur in use_redelta
+        train_model(case, (; arch, tier, netseed, use_redelta = ur), trainpool; force)
         clean()
     end
     return
