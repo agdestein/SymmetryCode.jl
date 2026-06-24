@@ -33,13 +33,6 @@ function les!(du, u, grid, cache; model, visc)
 end
 
 """
-Path of the LES rollout artifact for closure `key`. Accepts any key — model
-keys (`:nomo`, …, `:convsym`) as well as seed-suffixed variants from
-[`seed_key`](@ref).
-"""
-upostfile(setup, key) = "$(setup.outdir)/u-post-$(key).jld2"
-
-"""
 A-posteriori rollout for one closure `m` (a learned coordinate or a classical
 symbol) on test dataset (dns, Δf), reducing the metrics **on the fly** and
 discarding the heavy LES fields (Notes/ReExperiment.md — storing full LES

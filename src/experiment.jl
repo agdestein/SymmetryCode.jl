@@ -9,9 +9,10 @@
 # Pure path functions locate every artifact from its coordinates, so no block has
 # to destructure-and-rebuild a setup to find its inputs.
 #
-# Status: additive foundation (refactor increment 1). Nothing references it yet;
-# the legacy `getsetup`/`setup_*`/`with_seed`/`seed_key` layer still drives the
-# code until later increments migrate onto `make_setup` and delete the old one.
+# This is the live configuration layer: `make_setup` and the path functions drive
+# data generation, training, evaluation, and the plots. The only legacy holdovers
+# are the Taylor-Green setup builder (`getsetup`/`setup_taylorgreen`) and the
+# DNS-data diagnostic plots, migrated with the drivers/TGV increment.
 
 """
 Fixed-budget training schedule shared by every learned closure. The nets are tiny
