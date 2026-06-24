@@ -175,3 +175,21 @@ apostfile(case, dns, Δf, m) =
 "Full LES rollout field series for the single showcase case (`savefields=true`)."
 apostfieldsfile(case, dns, Δf, m) =
     joinpath(datadir(case, dns, Δf) |> mkpath, "apostfields-$(modelname(m)).jld2")
+
+"A-priori equivariance-error series for closure `m` on (dns, Δ)."
+equipriorfile(case, dns, Δf, m) =
+    joinpath(datadir(case, dns, Δf) |> mkpath, "equiprior-$(modelname(m)).jld2")
+
+"Phase-0 pointwise-Re_Δ binning diagnostic on (dns, Δ) (needs no trained model)."
+redeltabinningfile(case, dns, Δf) =
+    joinpath(datadir(case, dns, Δf) |> mkpath, "redelta-binning.jld2")
+
+"""
+Family key for a learned-model coordinate with the `netseed` dropped — the unit
+the seed sweep aggregates over (every `modelkey` in the family shares it but for
+the `_seed<i>` suffix).
+"""
+familyname(m) = Symbol(m.arch, :_, m.tier, m.use_redelta ? :_re : Symbol())
+
+"Netseed-aggregated scalar metrics for all model families at evaluation point (dns, Δ)."
+seedstatsfile(case, dns, Δf) = joinpath(datadir(case, dns, Δf) |> mkpath, "seedstats.jld2")
