@@ -164,3 +164,14 @@ sfsfile(case, dns, Δf, m) = joinpath(datadir(case, dns, Δf) |> mkpath, "sfs-$(
 "Aggregated a-priori SFS statistics for closure `m` on (dns, Δ)."
 sfsstatsfile(case, dns, Δf, m) =
     joinpath(datadir(case, dns, Δf) |> mkpath, "sfsstats-$(modelname(m)).jld2")
+
+"""
+Reduced a-posteriori metrics for closure `m` on (dns, Δ): the light artifact the
+rollout writes after discarding the heavy LES fields (see [`solve_les`](@ref)).
+"""
+apostfile(case, dns, Δf, m) =
+    joinpath(datadir(case, dns, Δf) |> mkpath, "apost-$(modelname(m)).jld2")
+
+"Full LES rollout field series for the single showcase case (`savefields=true`)."
+apostfieldsfile(case, dns, Δf, m) =
+    joinpath(datadir(case, dns, Δf) |> mkpath, "apostfields-$(modelname(m)).jld2")
