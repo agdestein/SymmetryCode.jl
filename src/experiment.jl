@@ -10,9 +10,8 @@
 # to destructure-and-rebuild a setup to find its inputs.
 #
 # This is the live configuration layer: `make_setup` and the path functions drive
-# data generation, training, evaluation, and the plots. The only legacy holdovers
-# are the Taylor-Green setup builder (`getsetup`/`setup_taylorgreen`) and the
-# DNS-data diagnostic plots, migrated with the drivers/TGV increment.
+# data generation, training, evaluation, and the plots for both the forced-HIT
+# runs (`dns_runs`) and the decaying Taylor-Green test (`tgv_runs`).
 
 """
 Fixed-budget training schedule shared by every learned closure. The nets are tiny
@@ -39,7 +38,8 @@ default_schedule(;
 """
 Per-size-tier network widths, **parameter-matched across the three models** so the
 capacity comparison isolates inductive bias rather than raw capacity. Widths are
-placeholders pending the Phase-0b capacity sweep; `paramcount` asserts the match.
+placeholders pending the Phase-0b capacity sweep; use `paramcount(case, m)` to
+check the match across the three architectures.
 """
 default_tiers() = (;
     small = (; tbnn = [10, 16, 32], equi = [4, 4, 8], conv = [8, 16, 32]),
@@ -72,6 +72,7 @@ function case_snellius(;
         warmup_tstop = 0.05,
         train_sampling = (; nsnap = 8, nturnover = 0.05),
         test_sampling = (; nsnap = 40, nturnover = 1),
+        tgv_sampling = (; nsnap = 100, tconv = 20),   # decaying TGV: span tconv convective times
         filters_train = [2.0, 3.0, 4.0],          # Δ/h; window [2, 5] (ReExperiment.md §B)
         filters_test = [2.5, 3.5, 5.0],           # interp {2.5, 3.5} + extrap {5}
         tiers = default_tiers(),
@@ -100,6 +101,16 @@ function dns_runs()
 end
 
 """
+The decaying Taylor-Green vortex test run(s): the trained forced-HIT closures are
+applied to a transitioning-then-decaying TGV at `Re_target` (initial amplitude
+`V0 = Re_target·ν`, with `L = 1` so `Re = Re_target`). The IC is deterministic, so
+`seed` only keeps the artifact path distinct from the forced runs. Reuses the case
+grid and test filters, so the whole `predict_sfs` / `solve_les` / plot pipeline
+applies unchanged on the `(tgv, Δf)` eval points.
+"""
+tgv_runs() = [(; visc = 2.5e-4, seed = 0, role = :tgv, Re_target = 1600)]
+
+"""
 Per-(ν, Δ) `setup` view consumed by the rest of the pipeline. Built **once** from
 coordinates: `dns = (; visc, seed, role)` and `Δ_factor` (the filter-to-grid
 ratio; the filter width is `Δ = Δ_factor · l / n_les`). Never derived from another
@@ -114,7 +125,8 @@ function make_setup(case, dns, Δ_factor)
         cfl, forced,
         case.totalenergy,
         case.warmup_tstop,
-        sampling = dns.role === :train ? case.train_sampling : case.test_sampling,
+        sampling = dns.role === :train ? case.train_sampling :
+            dns.role === :tgv ? case.tgv_sampling : case.test_sampling,
         case.schedule,
         case.tiers,
         backend,

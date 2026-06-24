@@ -359,47 +359,28 @@ function read_tgv_reference(reffile)
 end
 
 """
-Taylor-Green dissipation benchmark: two panels in standard nondimensional units
-(`t* = t V0 / L`), left = kinetic energy `E_k / V0²`, right = dissipation rate
-`ε L / V0³`. Overlays, for the full transition:
-
-- the full-grid DNS (`data.statistics_dns`: `e`, `diss`) — the gold reference;
-- the published `Re = 1600` curve from `reffile` (if present);
-- per-key LES results as the *effective* dissipation `ε_visc + ε_sfs` evaluated
-  a-posteriori on each rollout (`budget_<k>.jld2`), where `:ref` is the
-  filtered-DNS budget and `:nomo` is resolved-viscous only (`ε_sfs = 0`).
-
-`keys` should include `:ref` and the closure keys. Requires `setup.V0`.
+Taylor-Green dissipation benchmark for TGV run `tgv` at filter `Δf`: two panels in
+standard nondimensional units (`t* = t V0 / L`), left = kinetic energy `E_k / V0²`,
+right = dissipation rate `ε L / V0³`. Overlays the full-grid DNS (gold reference,
+[`dnsmetafile`](@ref) `statistics_dns`), the published `Re = 1600` curve from
+`reffile`, and each closure's *effective* dissipation `ε_visc + ε_sfs` evaluated
+a-posteriori on its rollout ([`apostfile`](@ref); `:nomo` is resolved-viscous only).
 """
 function plot_dissipation_tgv(
-        setup, keys;
+        case, tgv, Δf, models;
         reffile = joinpath(@__DIR__, "..", "reference", "tgv_re1600.csv"),
     )
-    (; outdir, plotdir, V0) = setup
+    times, statistics_dns, V0 = load(dnsmetafile(case, tgv), "times", "statistics_dns", "V0")
     labels = getlabels()
-    styles = getstyles()
-    data = joinpath(outdir, "data.jld2") |> load_object
 
     fig = Figure(; size = (820, 360))
-    ax_e = Axis(
-        fig[1, 1];
-        # xlabel = L"t^* = t V_0 / L",
-        # ylabel = L"E_k / V_0^2",
-        xlabel = "Time",
-        ylabel = "Kinetic energy",
-    )
-    ax_eps = Axis(
-        fig[1, 2];
-        # xlabel = L"t^* = t V_0 / L",
-        # ylabel = L"\varepsilon\, L / V_0^3",
-        xlabel = "Time",
-        ylabel = "Dissipation rate",
-    )
+    ax_e = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Kinetic energy")
+    ax_eps = Axis(fig[1, 2]; xlabel = "Time", ylabel = "Dissipation rate")
 
     # Full-grid DNS over the whole trajectory (gold reference).
-    tdns = data.times .* V0
-    lines!(ax_e, tdns, [s.e for s in data.statistics_dns] ./ V0^2; color = :black, label = labels.dns)
-    lines!(ax_eps, tdns, [s.diss for s in data.statistics_dns] ./ V0^3; color = :black, label = labels.dns)
+    tdns = times .* V0
+    lines!(ax_e, tdns, [s.e for s in statistics_dns] ./ V0^2; color = :black, label = labels.dns)
+    lines!(ax_eps, tdns, [s.diss for s in statistics_dns] ./ V0^3; color = :black, label = labels.dns)
 
     # Published Re=1600 reference (already nondimensional), if available.
     # Gray dotted, so it cannot be confused with the black dashed filtered-DNS.
@@ -412,10 +393,10 @@ function plot_dissipation_tgv(
     end
 
     # LES closures: effective dissipation ε_visc + ε_sfs on each rollout.
-    for k in keys
-        b = load_object("$(outdir)/budget_$(k).jld2")
+    for m in models
+        b = load_object(apostfile(case, tgv, Δf, m))
         t = b.t .* V0
-        kw = (; label = labels[k], color = styles[k].color, linestyle = styles[k].linestyle)
+        kw = (; label = plotlabel(m), color = plotstyle(m).color, linestyle = plotstyle(m).linestyle)
         lines!(ax_e, t, b.ke ./ V0^2; kw...)
         lines!(ax_eps, t, (b.eps_visc .+ b.eps_sfs) ./ V0^3; kw...)
     end
@@ -426,7 +407,7 @@ function plot_dissipation_tgv(
         horizontal = true, nbanks = 4,
     )
     rowgap!(fig.layout, 5)
-    file = "$(plotdir)/dissipation-tgv.pdf"
+    file = joinpath(figdir(case, tgv, Δf), "dissipation-tgv.pdf")
     @info "Saving Taylor-Green dissipation plot to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
@@ -671,30 +652,29 @@ function plot_velocities(case, dns, Δf, models, comp)
 end
 
 """
-    plot_field_evolution_tgv(setup; field = :vortz, ntime = 5, zslice = 1)
+    plot_field_evolution_tgv(case, tgv, Δf; field = :vortz, ntime = 5, zslice = 1)
 
-Time-evolution montage of the **filtered DNS** field for the decaying Taylor-Green
-test: a row of 2D sections sampled from the initial condition, through transition
-into turbulence (anchored on the peak-dissipation snapshot), and into the decay.
-Only the filtered velocity is stored (`data.inputs`, spectral `ubar`), so that is
-what is shown — either a velocity component (`field ∈ (:x, :y, :z)`) or the
-out-of-plane vorticity `ω_z = ∂_x u_y - ∂_y u_x` (`field = :vortz`, the default;
-it sharply marks the roll-up into turbulence). In 3D a `z = zslice` section is
-taken. A single shared, zero-centered color range across panels makes the decay
-of the field amplitude legible. Mirrors `plot_velocities` in conventions.
+Time-evolution montage of the filtered-DNS field for TGV run `tgv` at filter `Δf`:
+a row of 2D sections from the initial condition, through transition into turbulence
+(anchored on the peak-dissipation snapshot), and into the decay. Shows either a
+velocity component (`field ∈ (:x, :y, :z)`) or the out-of-plane vorticity
+`ω_z = ∂_x u_y - ∂_y u_x` (`field = :vortz`, default; it sharply marks the roll-up).
+In 3D a `z = zslice` section is taken. A shared, zero-centered color range makes the
+amplitude decay legible. Reads [`fieldsfile`](@ref) `inputs` + [`dnsmetafile`](@ref).
 """
-function plot_field_evolution_tgv(setup; field = :vortz, ntime = 5, zslice = 1)
-    (; D, l, n_les, backend, V0) = setup
+function plot_field_evolution_tgv(case, tgv, Δf; field = :vortz, ntime = 5, zslice = 1)
+    (; D, l, n_les, backend) = case
 
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    inputs = load(fieldsfile(case, tgv, Δf), "inputs")
+    times, statistics_dns, V0 = load(dnsmetafile(case, tgv), "times", "statistics_dns", "V0")
     # Dimensionless convective time t* = t·V₀/L (L = 1), matching the rest of the
-    # TGV pipeline (e.g. `plot_dissipation_tgv`) and comparable across the Re sweep.
-    times = (data.times .- data.times[1]) .* V0
+    # TGV pipeline (e.g. `plot_dissipation_tgv`).
+    times = (times .- times[1]) .* V0
     nt = length(times)
 
     # Sample the IC, the peak-dissipation snapshot (transition into turbulence),
     # and evenly spaced snapshots through the post-peak decay.
-    diss = [s.diss for s in data.statistics_dns]
+    diss = [s.diss for s in statistics_dns]
     ipk = argmax(diss)
     inds = round.(Int, [1; ipk; range(ipk, nt; length = ntime - 1)[2:end]])
     inds = sort(unique(clamp.(inds, 1, nt)))
@@ -708,7 +688,7 @@ function plot_field_evolution_tgv(setup; field = :vortz, ntime = 5, zslice = 1)
     # First pass: build the physical-space sections and a shared symmetric range.
     slices = map(inds) do t
         for c in keys(ubar)
-            copyto!(ubar[c], data.inputs[t][c])
+            copyto!(ubar[c], inputs[t][c])
         end
         spec = if field === :vortz
             apply!(vorticity_z!, g, (ω, ubar, g))
@@ -746,7 +726,7 @@ function plot_field_evolution_tgv(setup; field = :vortz, ntime = 5, zslice = 1)
     rowgap!(fig.layout, 10)
     colgap!(fig.layout, 10)
 
-    save("$(setup.plotdir)/field-evolution-$(field).png", fig; backend = CairoMakie)
+    save(joinpath(figdir(case, tgv, Δf), "field-evolution-$(field).png"), fig; backend = CairoMakie)
 
     return fig
 end

@@ -54,8 +54,9 @@ for `:ref`/`:nomo`. With `savefields`, the dealiased LES field series is also
 written to `apostfieldsfile` (reserved for the single showcase case).
 """
 function solve_les(case, m, dns, Δf, getmodel = () -> nothing; force = false, savefields = false)
-    (; D, l, n_les, backend, cfl, forced) = case
+    (; D, l, n_les, backend, cfl) = case
     visc = dns.visc
+    forced = case.forced && dns.role !== :tgv   # the decaying TGV is unforced
     file = apostfile(case, dns, Δf, m)
     skip_if_cached(file; force, label = "a-posteriori for $(modelname(m))") && return
 
