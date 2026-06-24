@@ -105,7 +105,7 @@ Models span the trainpool, so this is one figure for the whole sweep.
 """
 function plot_training(case, models)
     curves = [
-        (m, load_object(psfile(case, m)).losses_valid)
+        (m, load(psfile(case, m), "losses_valid"))
             for m in models if m isa NamedTuple && isfile(psfile(case, m))
     ]
     isempty(curves) && return nothing
