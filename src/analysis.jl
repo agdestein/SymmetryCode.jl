@@ -209,21 +209,21 @@ normalized stress, i.e. a *positive* across-flow slope). Opposite or flat ⇒
 Simpson confound ⇒ pivot to a *global* Re_Δ feature + a viscosity sweep before
 spending any DNS hours.
 
-Operates on the existing forced-HIT `data.jld2` (filtered-DNS reference stress,
-`data.outputs`); needs no trained model. `subsample` strides the per-snapshot
-points to cap memory. Persists `redelta_binning.jld2`; returns nothing.
+Operates on the per-(ν, Δ) `fieldsfile` (filtered-DNS reference stress); needs no
+trained model. `subsample` strides the per-snapshot points to cap memory. Persists
+`redeltabinningfile(case, dns, Δf)`; returns nothing.
 """
 function compute_redelta_binning(
-        setup;
+        case, dns, Δf;
         force = false, nbin = 30, quantiles = (0.005, 0.995), subsample = 1,
     )
-    (; outdir, D, l, n_les, backend, Δ, visc) = setup
-    file = "$(outdir)/redelta_binning.jld2"
+    (; D, l, n_les, backend) = case
+    visc = dns.visc
+    Δ = Δf * l / n_les
+    file = redeltabinningfile(case, dns, Δf)
     skip_if_cached(file; force, label = "Re_Δ binning") && return
 
-    data = joinpath(outdir, "data.jld2") |> load_object
-    inputs_eval = data.inputs[data_ranges(setup).eval]
-    outputs_eval = data.outputs[data_ranges(setup).eval]
+    inputs_eval, outputs_eval = load(fieldsfile(case, dns, Δf), "inputs", "outputs")
 
     g = Grid{D}(; l, n = n_les, backend)
     u = vectorfield(g)
@@ -330,22 +330,21 @@ function compute_redelta_binning(
 end
 
 """
-A-priori equivariance error for a single closure: compares `R(model(G))`
-with `model(R(G))` for every octahedral group element. Persists to
-`equi-errors-prior-<key>.jld2`; load all keys back with
-[`load_equivariance_errors`](@ref) for plotting.
+A-priori equivariance error for closure `m` on test dataset (dns, Δf): compares
+`R(model(G))` with `model(R(G))` for every octahedral group element on the first
+filtered-DNS snapshot. Persists to `equipriorfile(case, dns, Δf, m)`; load all
+closures back with [`load_equivariance_errors`](@ref) for plotting.
 """
-function apriori_equivariance_error(setup, key, getmodel; force = false)
-    file = "$(setup.outdir)/equi-errors-prior-$(key).jld2"
-    return cached(file; force, label = "a-priori equi errors ($(key))") do
+function apriori_equivariance_error(case, m, dns, Δf, getmodel; force = false)
+    file = equipriorfile(case, dns, Δf, m)
+    return cached(file; force, label = "a-priori equi errors ($(modelname(m)))") do
         model = getmodel()
-        (; D, l, n_les, backend) = setup
+        (; D, l, n_les, backend) = case
         (; elements, permutations, signs) = group_stuff(D)
         g = Grid{D}(; l, n = n_les, backend)
-        data = joinpath(setup.outdir, "data.jld2") |> load_object
-        u = map(copy, data.inputs[data_ranges(setup).eval[1]]) |> adapt(setup.backend)
+        u = map(copy, load(fieldsfile(case, dns, Δf), "inputs")[1]) |> adapt(backend)
         G = getgradient(u, g)
-        @info "Computing a-priori equi errors for $(key)"
+        @info "Computing a-priori equi errors for $(modelname(m))"
         flush(stderr)
         # Copy: dynamic Smagorinsky reuses an internal τ buffer across calls.
         mG = copy(model(u, G))
@@ -369,134 +368,22 @@ function apriori_equivariance_error(setup, key, getmodel; force = false)
     end
 end
 
-@kernel function qr_kernel!(q, r, GG, g::Grid{3})
-    T = eltype(q)
-    I = @index(Global, Cartesian)
-    G = SMatrix{3, 3, T, 9}(
-        GG.xx[I],
-        GG.yx[I],
-        GG.zx[I],
-        GG.xy[I],
-        GG.yy[I],
-        GG.zy[I],
-        GG.xz[I],
-        GG.yz[I],
-        GG.zz[I],
-    )
-    q[I] = -tr(G * G) / 2
-    r[I] = -tr(G * G * G) / 3
-end
-
 """
-Compute Q-R invariant KDEs from post-processed velocity-gradient fields.
-
-The saved samples are nondimensionalized by the mean Kolmogorov time of the
-LES-filtered reference data before density estimation.
+Load the per-closure a-priori equivariance error series persisted by
+[`apriori_equivariance_error`](@ref) on (dns, Δf), keyed by [`modelname`](@ref)
+for [`plot_equivariance_errors`](@ref).
 """
-function compute_qr(setup, modelkeys; force = false)
-    (; D, l, n_les, backend) = setup
-
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    eval_range = data_ranges(setup).eval
-
-    g = Grid{D}(; l, n = n_les, backend)
-    Ghat = scalarfield(g)
-    G = spacetensorfield_nonsym(g)
-    q = spacescalarfield(g)
-    r = spacescalarfield(g)
-    u = vectorfield(g)
-    plan = plan_rfft(G.xx)
-
-    # Kolmogorov time from the eval window — the q,r nondimensionalization
-    # then matches the window being plotted.
-    t_kol = mean(x -> x.t_kol, data.statistics_les[eval_range])
-
-    for k in modelkeys
-        file = "$(setup.outdir)/qr_$(k).jld2"
-        skip_if_cached(file; force, label = "Q-R for $(k)") && continue
-        @info "Computing Q-R for $(k)"
-        u_series = if k == :ref
-            data.inputs[eval_range]
-        else
-            load_object(upostfile(setup, k)).u
-        end
-
-        qr = map(u_series) do ucpu
-            foreach(copyto!, u, ucpu)
-            for j in 1:D, i in 1:D
-                s = [:x, :y, :z]
-                ij = Symbol(s[i], s[j])
-                apply!(derivative!, g, (Ghat, u[i], j, g))
-                apply!(twothirds!, g, (Ghat, g))
-                to_phys!(G[ij], Ghat, plan, g)
-            end
-            apply!(qr_kernel!, g, (q, r, G, g); ndrange = space_ndrange(g))
-            qvec = q |> cpu_device() |> vec
-            rvec = r |> cpu_device() |> vec
-            qvec .*= t_kol^2
-            rvec .*= t_kol^3
-            qvec, rvec
-        end
-        qstack = stack(qr -> qr[1], qr) |> vec
-        rstack = stack(qr -> qr[2], qr) |> vec
-        dens = kde(
-            (rstack, qstack);
-            npoints = (1000, 1000),
-        )
-        @info "Saving Q-R density to $(file)"
-        save_object_atomic(file, (; dens.x, dens.y, dens.density))
-    end
-    return nothing
-end
-
-"""
-A-posteriori equivariance error for a single closure: integrates the LES
-forward in time from a filtered-DNS IC under each octahedral group element
-and compares against the inverse-rotated reference trajectory. Persists to
-`equi-errors-post-<key>.jld2`; load all keys back with
-[`load_equivariance_errors`](@ref) for plotting.
-"""
-function apost_equivariance_error(setup, key, getmodel; force = false, tstop = 1.0e-1)
-    file = "$(setup.outdir)/equi-errors-post-$(key).jld2"
-    return cached(file; force, label = "a-posteriori equi errors ($(key))") do
-        model = getmodel()
-        data = joinpath(setup.outdir, "data.jld2") |> load_object
-        ustart = data.inputs[end] |> adapt(setup.backend)
-        (; indices) = group_stuff(setup.D)
-        @info "Computing a-posteriori equi errors for $(key)"
-        flush(stderr)
-        err = map(indices) do i
-            @info "Element $(i) of $(length(indices))"
-            flush(stderr)
-            test_equivariance_post(
-                setup, ustart, model;
-                groupindex = i, tstop, dolog = false,
-            )
-        end
-        save_object_atomic(file, err)
-        err
-    end
-end
-
-"""
-Load per-key equivariance error series persisted by
-[`apriori_equivariance_error`](@ref) / [`apost_equivariance_error`](@ref)
-into a NamedTuple suitable for [`plot_equivariance_errors`](@ref).
-
-`tag` is `:prior` or `:post`.
-"""
-load_equivariance_errors(setup, keys, tag::Symbol) = NamedTuple(
-    k => load_object("$(setup.outdir)/equi-errors-$(tag)-$(k).jld2") for k in keys
+load_equivariance_errors(case, models, dns, Δf) = NamedTuple(
+    modelname(m) => load_object(equipriorfile(case, dns, Δf, m)) for m in models
 )
 
 """
-Aggregate the seed-sweep scalar metrics for the learned closures.
-
-For each `key` in `mkeys` and each seed in `seeds`, reads the per-seed
-artifacts produced by the `:seeds` stage (`sfs_stats_<skey>.jld2`,
-`equi-errors-prior-<skey>.jld2`, `u-post-<skey>.jld2`, where `skey` is
-[`seed_key`](@ref); the canonical seed reuses the plain-key artifacts) and
-collects, per model, vectors over seeds of:
+Aggregate the netseed spread of the scalar closure metrics at evaluation point
+(dns, Δf), for each learned-model family in `families` (each `(; arch, tier,
+use_redelta)`). For every family and every seed in `netseeds`, reads the per-seed
+a-priori stats ([`sfsstatsfile`](@ref)), a-priori equivariance error
+([`equipriorfile`](@ref)) and a-posteriori rollout ([`apostfile`](@ref)), and
+collects, per family (keyed by [`familyname`](@ref)), vectors over seeds of:
 
 - `relerr`, `crosscor` — a-priori SFS tensor error / cross-correlation;
 - `diss_median` — median pointwise SFS dissipation normalized by `:ref`;
@@ -505,36 +392,28 @@ collects, per model, vectors over seeds of:
 - `e_post` — time-mean a-posteriori solution error (`missing` if no rollout);
 - `e_post_series` — the full error-vs-time series per seed (for spread bands).
 
-Persists the aggregate to `seed_stats.jld2`. Missing artifacts are skipped
-with a warning, so a partially completed sweep still aggregates; rerun with
-`force = true` once more seeds have landed.
+Persists the aggregate to [`seedstatsfile`](@ref)`(case, dns, Δf)`. Missing
+artifacts are skipped with a warning, so a partially completed sweep still
+aggregates; rerun with `force = true` once more seeds have landed.
 """
-function get_seed_statistics_cached(setup, mkeys, seeds; force = false)
-    file = "$(setup.outdir)/seed_stats.jld2"
-    return cached(file; force, label = "seed statistics") do
-        refmed = load_object("$(setup.outdir)/sfs_stats_ref.jld2").diss.median
+function get_seed_statistics(case, families, dns, Δf, netseeds; force = false)
+    file = seedstatsfile(case, dns, Δf)
+    return cached(file; force, label = "seed statistics (Δ=$(Δf))") do
+        refmed = load_object(sfsstatsfile(case, dns, Δf, :ref)).diss.median
 
-        # One get_les_statistics pass for every seed key with a rollout, so
-        # the (large) data.jld2 is loaded once rather than per key.
-        rolled = [
-            sk for key in mkeys
-                for sk in (seed_key(setup, key, s) for s in seeds)
-                if isfile(upostfile(setup, sk))
-        ]
-        les = isempty(rolled) ? (;) : get_les_statistics(setup, Tuple(rolled))
-
-        stat = map(collect(mkeys)) do key
-            rows = map(collect(seeds)) do s
-                skey = seed_key(setup, key, s)
-                f = "$(setup.outdir)/sfs_stats_$(skey).jld2"
-                if !isfile(f)
-                    @warn "Missing $(f); skipping seed $(s) for $(key)"
+        stat = map(collect(families)) do fam
+            rows = map(collect(netseeds)) do s
+                m = (; fam..., netseed = s)
+                fst = sfsstatsfile(case, dns, Δf, m)
+                if !isfile(fst)
+                    @warn "Missing $(fst); skipping seed $(s) for $(familyname(fam))"
                     return nothing
                 end
-                st = load_object(f)
-                fe = "$(setup.outdir)/equi-errors-prior-$(skey).jld2"
+                st = load_object(fst)
+                fe = equipriorfile(case, dns, Δf, m)
                 equi = isfile(fe) ? mean(load_object(fe)) : missing
-                eser = haskey(les, skey) ? les[skey].e_post : missing
+                fa = apostfile(case, dns, Δf, m)
+                eser = isfile(fa) ? load_object(fa).e_post : missing
                 (;
                     seed = s,
                     relerr = st.apriori.relerr,
@@ -547,7 +426,7 @@ function get_seed_statistics_cached(setup, mkeys, seeds; force = false)
                 )
             end
             rows = filter(!isnothing, rows)
-            key => (;
+            familyname(fam) => (;
                 seeds = [r.seed for r in rows],
                 relerr = [r.relerr for r in rows],
                 crosscor = [r.crosscor for r in rows],
