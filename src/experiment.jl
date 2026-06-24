@@ -153,3 +153,14 @@ modelkey(m) = Symbol(m.arch, :_, m.tier, m.use_redelta ? :_re : Symbol(), :_seed
 
 "Trained-parameter file for a learned-model coordinate (models span the trainpool, so they live at the root)."
 psfile(case, m) = joinpath(case.rootdir |> mkpath, "ps-$(modelkey(m)).jld2")
+
+"Artifact name for a closure: the model-coordinate key, or the classical symbol itself."
+modelname(m::NamedTuple) = modelkey(m)
+modelname(m::Symbol) = m
+
+"A-priori SFS prediction series for closure `m` on test dataset (dns, Δ)."
+sfsfile(case, dns, Δf, m) = joinpath(datadir(case, dns, Δf) |> mkpath, "sfs-$(modelname(m)).jld2")
+
+"Aggregated a-priori SFS statistics for closure `m` on (dns, Δ)."
+sfsstatsfile(case, dns, Δf, m) =
+    joinpath(datadir(case, dns, Δf) |> mkpath, "sfsstats-$(modelname(m)).jld2")
