@@ -3,12 +3,6 @@
 # and Q-R invariant joint distributions.
 
 """
-Predict the SFS stress series for a single closure keyed under `key` by applying
-it to every eval-window filtered-DNS snapshot. `getmodel` is a zero-arg thunk
-that builds the closure; it is only invoked on a cache miss. Persists the
-resulting `Vector{NamedTuple}` to `sfs_<key>.jld2`; returns nothing.
-"""
-"""
 Predict the a-priori SFS stress series for closure `m` on test dataset (dns, Δf):
 apply `getmodel()` to every filtered-DNS snapshot in `fieldsfile`, persisting the
 `Vector{NamedTuple}` to `sfsfile(case, dns, Δf, m)`. `m` names the artifact (a
