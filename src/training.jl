@@ -12,12 +12,13 @@ create_loss_tbnn(g) = function loss(net, ps, st, (x, y))
     D = dim(g)
     nx = size(x)[1:D]
     nt = tensordim(g)
-    ni = ninvariant(g)
     nb = nbasis(g)
 
-    # Destructure invariants and basis
-    i = selectdim(x, D + 1, 1:ni)
-    b = selectdim(x, D + 1, (ni + 1):size(x, D + 1))
+    # Destructure invariants and basis. Split from the *end*: the basis is the
+    # last nt·nb channels, so the invariant block absorbs the optional Re_Δ row.
+    ninv = size(x, D + 1) - nt * nb
+    i = selectdim(x, D + 1, 1:ninv)
+    b = selectdim(x, D + 1, (ninv + 1):size(x, D + 1))
 
     # Compute coefficients
     w = net(i, ps, st) |> first
@@ -127,9 +128,9 @@ Untrained net + initial parameters/states for a learned closure `arch`
 compact pre-synthesis basis and `project` is the synthesis operator; for
 `:tbnn`/`:conv` `project = identity`.
 """
-function build_net_stuff(netsetup, arch, layers; same_as_equi = false)
+function build_net_stuff(netsetup, arch, layers; same_as_equi = false, use_redelta = false)
     if arch === :tbnn
-        net = tbnn_net(netsetup, layers)
+        net = tbnn_net(netsetup, layers; use_redelta)
         net |> display
         flush(stdout)
         f = netsetup.train_setup.precision === Float32 ? f32 : f64
@@ -137,9 +138,9 @@ function build_net_stuff(netsetup, arch, layers; same_as_equi = false)
             Lux.setup(Xoshiro(netsetup.train_setup.seed), net) |> f |> adapt(netsetup.backend)
         return (; net, ps, st, project = identity)
     elseif arch === :equi
-        return equivariant_net(netsetup, layers)
+        return equivariant_net(netsetup, layers; use_redelta)
     elseif arch === :conv
-        return mlp(netsetup, layers; same_as_equi)
+        return mlp(netsetup, layers; same_as_equi, use_redelta)
     else
         error("not a learned closure: $(arch)")
     end
@@ -151,13 +152,16 @@ wrapping `psfile(case, m)` for evaluation at `setup` (which supplies the filter
 width Δ). (Re_Δ-augmented inference is wired in a later increment.)
 """
 function build_model(case, m, setup)
-    ns = build_net_stuff(make_netsetup(case, m.netseed), m.arch, case.tiers[m.tier][m.arch])
+    layers = case.tiers[m.tier][m.arch]
+    ns = build_net_stuff(make_netsetup(case, m.netseed), m.arch, layers; m.use_redelta)
     d = load(psfile(case, m))
     ps = d["ps"] |> f64 |> adapt(case.backend)
     st = d["st"]
+    redelta_norm = d["redelta_norm"]
     g = Grid{case.D}(; case.l, n = case.n_les, case.backend)
-    return m.arch === :tbnn ? tbnn(ns.net, ps, st, setup.Δ, g) :
-        fullchain(setup, ns.net, ns.project, ps, st, setup.Δ)
+    return m.arch === :tbnn ?
+        tbnn(ns.net, ps, st, setup.Δ, g; m.use_redelta, redelta_norm, setup.visc) :
+        fullchain(setup, ns.net, ns.project, ps, st, setup.Δ; m.use_redelta, redelta_norm)
 end
 
 """
@@ -196,7 +200,7 @@ function train_model(case, m, trainpool; force = false)
     end
     g = Grid{case.D}(; case.l, n = case.n_les, case.backend)
     layers = case.tiers[m.tier][m.arch]
-    net_stuff = build_net_stuff(make_netsetup(case, m.netseed), m.arch, layers)
+    net_stuff = build_net_stuff(make_netsetup(case, m.netseed), m.arch, layers; m.use_redelta)
     redelta_norm = m.use_redelta ? compute_redelta_norm(case, trainpool) : nothing
     trainloader, valloader = make_loaders(case, m, trainpool, redelta_norm)
     loss = m.arch === :tbnn ? create_loss_tbnn(g) : create_loss(net_stuff.project)

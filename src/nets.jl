@@ -99,13 +99,14 @@ matrices having entries in `{0, ±1/√|G|}`, makes the weights *bit-exactly*
 equivariant. Pass `synthesis = false` to fall back to the
 representation-agnostic eigendecomposition.
 """
-function equivariant_net(setup, nchan; synthesis = true)
+function equivariant_net(setup, nchan; synthesis = true, use_redelta = false)
     (; D, backend, train_setup) = setup
     dev = adapt(backend)
     # dev = identity
     rng = Xoshiro(train_setup.seed)
     T = train_setup.precision
     nten = D^2
+    nin = nten + (use_redelta ? 1 : 0)   # + trivial-rep (group-invariant) Re_Δ channel
     (; elements) = group_stuff(D)
     nreg = length(elements)
     # Bases mapping the compact learnables to a full weight block. The closed
@@ -138,7 +139,16 @@ function equivariant_net(setup, nchan; synthesis = true)
         w = s_lift * w
         w = reshape(w, nreg, nten, c_out)
         w = permutedims(w, (2, 1, 3))
-        weight = reshape(w, kern..., nten, nreg * c_out)
+        w = reshape(w, nten, nreg * c_out)
+        if use_redelta
+            # Trivial-rep Re_Δ channel: one learnable scalar per output channel,
+            # broadcast equally to all |G| regular-rep copies (the trivial→regular
+            # intertwiner). Output index k = r + nreg·(j-1) (copy r fastest), so
+            # `repeat(…, inner = nreg)` places w_re[j] in every copy of channel j.
+            wre = reshape(repeat(vec(ps.weight_re), inner = nreg), 1, nreg * c_out)
+            w = vcat(w, wre)   # (nten+1, nreg·c_out)
+        end
+        weight = reshape(w, kern..., size(w, 1), nreg * c_out)
         bias = reshape(repeat(reshape(b, 1, :), nreg), :)
         return (; weight, bias)
     end
@@ -172,7 +182,7 @@ function equivariant_net(setup, nchan; synthesis = true)
         )
     end
     net = Chain(;
-        lift = PointwiseConv(D, nten => nreg * nchan[1], gelu),
+        lift = PointwiseConv(D, nin => nreg * nchan[1], gelu),
         map(
             i ->
             Symbol(:mid_, i) =>
@@ -207,6 +217,9 @@ function equivariant_net(setup, nchan; synthesis = true)
         lift = (;
             weight = glorot_uniform(rng, T, nten, nchan[1]),
             bias = zeros(T, nchan[1]),
+            # Compact trivial-rep Re_Δ weight (one per output channel); project_lift
+            # broadcasts it across the |G| copies. Omitted when use_redelta = false.
+            (use_redelta ? (; weight_re = glorot_uniform(rng, T, 1, nchan[1])) : (;))...,
         ),
         map(
             i ->
@@ -230,7 +243,7 @@ free to learn arbitrary mixing across channels. With `same_as_equi=true`,
 the hidden widths are multiplied by |G| so the parameter count matches and
 the comparison isolates the effect of equivariance from raw capacity.
 """
-function mlp(setup, nchan; same_as_equi)
+function mlp(setup, nchan; same_as_equi, use_redelta = false)
     (; D, backend, train_setup) = setup
     dev = adapt(backend)
     # dev = identity
@@ -238,6 +251,7 @@ function mlp(setup, nchan; same_as_equi)
     f = train_setup.precision === Float32 ? f32 : f64
     nt_nonsym = D^2
     nt = D == 2 ? 3 : 6
+    nin = nt_nonsym + (use_redelta ? 1 : 0)   # + standardized log Re_Δ channel
     (; elements) = group_stuff(D)
     nreg = if same_as_equi
         length(elements)
@@ -248,7 +262,7 @@ function mlp(setup, nchan; same_as_equi)
     # shape matches equivariant_net exactly — only the weight projection
     # is missing here.
     net = Chain(;
-        lift = PointwiseConv(D, nt_nonsym => nreg * nchan[1], gelu),
+        lift = PointwiseConv(D, nin => nreg * nchan[1], gelu),
         map(
             i ->
             Symbol(:mid_, i) =>
@@ -290,9 +304,12 @@ closure with solver-facing units.
 The dataloader trained the network on normalized gradients and normalized
 stress. This wrapper repeats that normalization at inference and scales the
 prediction back to physical `τ` before `les!` transforms it to spectral space.
+With `use_redelta`, the standardized `log Re_Δ` channel (Re_Δ = Δ²·√⟨|∇ū|²⟩/ν,
+the global value of the live field, reusing the pointwise `|∇ū|²` already formed
+here) is appended as an extra input, exactly as the dataloader did.
 """
-function fullchain(setup, net, project, ps, st, Δ)
-    (; D) = setup
+function fullchain(setup, net, project, ps, st, Δ; use_redelta = false, redelta_norm = nothing)
+    (; D, visc) = setup
     ps = project(ps)
 
     # x is the VGT
@@ -300,8 +317,12 @@ function fullchain(setup, net, project, ps, st, Δ)
         x = stack(x) # Convert named tuple to array
         s = size(x)
         x = reshape(x, s..., 1) # Add singleton sample dimension
-        A2 = sum(abs2, x; dims = D + 1) # VGT squared norm
+        A2 = sum(abs2, x; dims = D + 1) # VGT squared norm (pointwise)
         @. x /= (sqrt(A2) + eps(eltype(x))) # Normalize input gradient
+        if use_redelta
+            re = Δ^2 * sqrt(mean(A2)) / visc            # global filter-scale Re_Δ
+            x = append_redelta(x, re, use_redelta, redelta_norm, D)
+        end
         y = net(x, ps, st) |> first
         @. y *= Δ^2 * A2 # Scale output with dimensional stuff
         return reshape(y, s[1:D]..., :) # Remove singleton sample dimension
@@ -519,12 +540,13 @@ Build the TBNN coefficient network from a vector of hidden-layer widths
 invariants to `nchan[1]`, middle layers map `nchan[i] => nchan[i+1]`, and
 the (bias-free) output layer maps `nchan[end]` to the basis coefficients.
 """
-function tbnn_net(setup, nchan)
+function tbnn_net(setup, nchan; use_redelta = false)
     g = Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
     # Pointwise MLP via `PointwiseConv`, same convention as `equivariant_net` / `mlp`.
     D = setup.D
+    nin = ninvariant(g) + (use_redelta ? 1 : 0)   # + standardized log Re_Δ invariant
     return Chain(
-        PointwiseConv(D, ninvariant(g) => nchan[1], gelu),
+        PointwiseConv(D, nin => nchan[1], gelu),
         map(
             i -> PointwiseConv(D, nchan[i] => nchan[i + 1], gelu),
             1:(length(nchan) - 1),
@@ -533,7 +555,9 @@ function tbnn_net(setup, nchan)
     )
 end
 
-tbnn(net, ps, st, Δ, g) = function model(u, A)
+tbnn(net, ps, st, Δ, g; use_redelta = false, redelta_norm = nothing, visc = nothing) =
+function model(u, A)
+    D = dim(g)
     nx = space_ndrange(g)
     nt = tensordim(g)
     nb = nbasis(g)
@@ -542,6 +566,10 @@ tbnn(net, ps, st, Δ, g) = function model(u, A)
     # net weights are upcast to Float64 in build_model, so the forward pass
     # runs uniformly in Float64.
     invariants, basis, a2 = build_tensorbasis(A, g)
+    if use_redelta
+        re = Δ^2 * sqrt(mean(a2)) / visc                 # global filter-scale Re_Δ
+        invariants = append_redelta(invariants, re, use_redelta, redelta_norm, D)
+    end
     invariants = reshape(invariants, size(invariants)..., 1) # One sample
     w = net(invariants, ps, st) |> first
 
@@ -579,19 +607,20 @@ function paramcount(case, m)
     D = case.D
     g = Grid{D}(; case.l, n = case.n_les, case.backend)
     c = case.tiers[m.tier][m.arch]
+    re = m.use_redelta ? 1 : 0                     # extra standardized log Re_Δ input
     # Parameters of a single pointwise Conv(c_in => c_out).
     convparams(c_in, c_out; bias = true) = c_in * c_out + (bias ? c_out : 0)
     if m.arch === :tbnn
-        widths = [ninvariant(g); c]                # invariants in, then hidden widths
+        widths = [ninvariant(g) + re; c]           # invariants (+Re_Δ) in, then hidden widths
         return sum(convparams(widths[i], widths[i + 1]) for i in eachindex(c)) +
             convparams(c[end], nbasis(g); bias = false)
     elseif m.arch === :conv
-        widths = [D^2; c]                          # gradient tensor in, then hidden widths
+        widths = [D^2 + re; c]                      # gradient tensor (+Re_Δ) in, then hidden widths
         return sum(convparams(widths[i], widths[i + 1]) for i in eachindex(c)) +
             convparams(c[end], tensordim(g); bias = false)
     elseif m.arch === :equi
         nreg, nten = length(group_stuff(D).elements), D^2  # |G| = 8 (2D) / 48 (3D)
-        lift = convparams(nten, c[1])
+        lift = convparams(nten, c[1]) + re * c[1]  # +weight_re: one scalar per output channel
         mids = sum(nreg * c[i] * c[i + 1] + c[i + 1] for i in 1:(length(c) - 1); init = 0)
         sink = nten * c[end]                       # bias-free
         return lift + mids + sink
