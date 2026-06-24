@@ -193,3 +193,10 @@ familyname(m) = Symbol(m.arch, :_, m.tier, m.use_redelta ? :_re : Symbol())
 
 "Netseed-aggregated scalar metrics for all model families at evaluation point (dns, Δ)."
 seedstatsfile(case, dns, Δf) = joinpath(datadir(case, dns, Δf) |> mkpath, "seedstats.jld2")
+
+"""
+Per-(dns, Δ) figure directory under `case.plotdir`, encoding the evaluation point
+so the same figure name from different (ν, seed, Δ) points never clobbers.
+"""
+figdir(case, dns, Δf) =
+    joinpath(case.plotdir, "$(dns.role)_visc=$(dns.visc)_seed=$(dns.seed)_delta=$(Δf)") |> mkpath
