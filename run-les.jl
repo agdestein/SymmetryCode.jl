@@ -22,9 +22,11 @@ get_case() = S.case_snellius()
 get_config() = (;
     # Learned-model sweep axes (Cartesian product → families × seeds).
     archs = (:conv, :equi, :tbnn),
-    tiers = (:saturated,),
+    tiers = (:small,
+             # :medium,
+             :saturated),
     use_redelta = (false, true),
-    netseeds = 0:0,
+    netseeds = 0:1,
 
     # Classical baselines in every per-eval-point comparison (no Re_Δ / seeds).
     classical = [:nomo, :clar],
@@ -42,7 +44,7 @@ get_config() = (;
         :plots,            # per-eval-point figures
         :trend,            # plot_trend_vs_redelta (the H2 figure)
         :tables,           # write_errors_table
-        # :showcase,       # savefields rollout + velocity/SFS field montages
+        :showcase,       # savefields rollout + velocity/SFS field montages
     ],
 
     # Stages whose cache is invalidated this run.

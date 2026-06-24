@@ -42,9 +42,9 @@ placeholders pending the Phase-0b capacity sweep; use `paramcount(case, m)` to
 check the match across the three architectures.
 """
 default_tiers() = (;
-    small = (; tbnn = [10, 16, 32], equi = [4, 4, 8], conv = [8, 16, 32]),
-    medium = (; tbnn = [12, 24, 64], equi = [4, 8, 8], conv = [12, 24, 64]),
-    saturated = (; tbnn = [46, 64, 64], equi = [4, 8, 16], conv = [44, 64, 64]),
+    small     = (; conv = [8, 16, 32] , equi = [4, 4, 8] , tbnn = [10, 16, 32]),
+    medium    = (; conv = [12, 24, 64], equi = [4, 8, 8] , tbnn = [12, 24, 64]),
+    saturated = (; conv = [44, 64, 64], equi = [4, 8, 16], tbnn = [46, 64, 64]),
 )
 
 """
@@ -70,8 +70,10 @@ function case_snellius(;
         forced = true,
         totalenergy = 0.2,
         warmup_tstop = 0.05,
+        # train_sampling = (; nsnap = 8, nturnover = 2),
         train_sampling = (; nsnap = 8, nturnover = 0.05),
-        test_sampling = (; nsnap = 40, nturnover = 1),
+        # test_sampling = (; nsnap = 40, nturnover = 1),
+        test_sampling = (; nsnap = 40, nturnover = 0.05),
         tgv_sampling = (; nsnap = 100, tconv = 20),   # decaying TGV: span tconv convective times
         filters_train = [2.0, 3.0, 4.0],          # Δ/h; window [2, 5] (ReExperiment.md §B)
         filters_test = [2.5, 3.5, 5.0],           # interp {2.5, 3.5} + extrap {5}
