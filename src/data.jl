@@ -388,14 +388,17 @@ function split_loaders(snaps, D, batchsize; rng = nothing, val_fraction = 0.2, p
 end
 
 """
-Append a constant standardized `log Re_Δ` channel along the channel axis (the
-group-invariant Re_Δ input feature); a no-op unless `use_redelta`. `redelta_norm`
-is `(; μ, σ)` from the trainpool.
+Append a constant standardized `log Re_Δ` channel along the channel axis `D+1`
+(the group-invariant Re_Δ input feature); a no-op unless `use_redelta`.
+`redelta_norm` is `(; μ, σ)` from the trainpool. Works for both the dataloader
+layout `(spatial…, channel)` and the inference layout `(spatial…, channel, batch)`
+— the new channel matches every non-channel axis.
 """
 function append_redelta(x, re, use_redelta, redelta_norm, D)
     use_redelta || return x
     z = (log(re) - redelta_norm.μ) / redelta_norm.σ
-    chan = fill!(similar(x, size(x)[1:D]..., 1), z)
+    chansize = (size(x)[1:D]..., 1, size(x)[(D + 2):end]...)
+    chan = fill!(similar(x, chansize), z)
     return cat(x, chan; dims = D + 1)
 end
 
@@ -456,8 +459,10 @@ end
 """
 (train, val) `DataLoader`s for the TBNN from a `trainpool`. Same per-dataset Δ
 normalization as [`create_dataloader`](@ref); the input packs the gradient
-invariants followed by the (O(1)) basis tensors. (Re_Δ as an extra invariant is
-wired in a later increment.)
+invariants (with the standardized `log Re_Δ` appended as an extra invariant when
+`use_redelta`) followed by the (O(1)) basis tensors. The loss splits the two
+blocks from the *end* (the basis is the last `tensordim·nbasis` channels), so the
+extra invariant needs no change there.
 """
 function create_dataloader_tbnn(
         case, trainpool;
@@ -473,7 +478,8 @@ function create_dataloader_tbnn(
     fac = get_fft_fac(g)
     T = typeof(case.l)
     snaps = mapreduce(vcat, trainpool) do (dns, Δf)
-        inputs, outputs, Δ = load(fieldsfile(case, dns, Δf), "inputs", "outputs", "Δ")
+        inputs, outputs, Δ, redelta =
+            load(fieldsfile(case, dns, Δf), "inputs", "outputs", "Δ", "redelta")
         map(eachindex(inputs)) do j
             foreach(copyto!, u, inputs[j])
             G = getgradient(u, g)
@@ -488,6 +494,7 @@ function create_dataloader_tbnn(
             a2 = reshape(a2, nx..., 1)
             @. y = y / (Δ^2 * a2 + eps(T))
             i = i |> cpu_device()
+            i = append_redelta(i, redelta[j], use_redelta, redelta_norm, D) # extra invariant
             b = reshape(b, nx..., :) |> cpu_device()
             x = cat(i, b; dims = D + 1)
             x, y |> cpu_device()
