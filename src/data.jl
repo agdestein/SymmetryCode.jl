@@ -22,44 +22,31 @@ function forced_rhs!(du, u, grid, cache; forceval, visc)
     return nothing
 end
 
-function create_dns(setup; force = false)
-    (; outdir, l, visc, D, n_dns, cfl, backend, warmup) = setup
-    (; totalenergy, tstop, seed) = warmup
+"""
+DNS warm-up for one run `dns = (; visc, seed, role)`: integrate forced HIT to a
+statistically stationary state and save the warmed velocity field (plus the
+warm-up `times`/`statistics`) to `dnsfile(case, dns)`. Coordinate-driven — ν and
+seed come from `dns`, everything else from `case`.
+"""
+function create_dns(case, dns; force = false)
+    (; D, l, n_dns, cfl, backend, totalenergy, warmup_tstop) = case
+    visc = dns.visc
 
-    filename = joinpath(outdir, "dns.jld2")
-    skip_if_cached(filename; force, label = "DNS warm-up") && return nothing
+    file = dnsfile(case, dns)
+    skip_if_cached(file; force, label = "DNS warm-up (visc=$(visc), seed=$(dns.seed))") &&
+        return nothing
 
-    rng = Xoshiro(seed)
-
+    rng = Xoshiro(dns.seed)
     g = Grid{D}(; l, n = n_dns, backend)
 
-    @info "Creating initial conditions"
+    @info "Creating initial conditions (visc=$(visc), seed=$(dns.seed))"
     flush(stderr)
     clean()
-    # profile = D == 2 ? peak_profile : linear_profile_3D
-    # args = D == 2 ? (; kpeak = 10) : (;)
     profile = D == 2 ? linear_profile_2D : linear_profile_3D
-    args = (;)
-    u = randomfield(profile, g; rng, totalenergy, args...)
+    u = randomfield(profile, g; rng, totalenergy)
     clean()
 
-    # # Load previous DNS state
-    # u = load("$(outdir)/dns.jld2", "u") |> adapt(backend)
-    # times, energies, dissipations =
-    #     load("$(outdir)/dns.jld2", "times", "energies", "dissipations")
-    # t = times[end]
-
-    # # Band stuff
-    # b = getband(g, 3)
-    # band = (;
-    #     inds = b.inds |> adapt(backend),
-    #     energyinds = vcat(b.inds, b.conjinds) |> adapt(backend),
-    # )
-    # eband_ref = sum(u -> sum(abs2, view(u, band.energyinds)), u) / 2
-
     shells = energy_shells(g, [1, 2], u)
-
-    # Allocate arrays
     cache = getcache(g)
     sc = statscache(g)
 
@@ -67,184 +54,150 @@ function create_dns(setup; force = false)
     times = [t]
     statistics = [turbulence_statistics(u, visc, g, sc)]
 
-    @info "Running DNS simulation"
+    @info "Running DNS warm-up to t = $(warmup_tstop)"
     flush(stderr)
-    k = 0
     walltime = time()
-    while t < tstop
+    while t < warmup_tstop
         Δt = cfl * propose_timestep(u, g, visc, cache)
-        Δt = min(Δt, tstop - t)
+        Δt = min(Δt, warmup_tstop - t)
         t += Δt
-        k += 1
-
-        # Step
         wray3!(convectiondiffusion!, u, Δt, g, cache; visc)
-        # wray3!(forced_rhs!, u, Δt, g, cache; forceval = nothing, visc)
-
-        # # Maintain energy
-        # eband = sum(u -> sum(abs2, view(u, band.energyinds)), u) / 2
-        # foreach(u -> (view(u, band.inds) .*= sqrt(eband_ref / eband)), u)
-
         maintain_shell_energy!(u, shells)
-
-        if k % 1 == 0
-            push!(times, t)
-            s = turbulence_statistics(u, visc, g, sc)
-            push!(statistics, s)
-            @info join(
-                [
-                    "t = $(round(t; sigdigits = 4))",
-                    "Δt = $(round(Δt; sigdigits = 4))",
-                    "energy = $(round(s.e; sigdigits = 4))",
-                ],
-                ",\t",
-            )
-            flush(stderr)
-        end
+        push!(times, t)
+        s = turbulence_statistics(u, visc, g, sc)
+        push!(statistics, s)
+        @info join(
+            [
+                "t = $(round(t; sigdigits = 4))",
+                "Δt = $(round(Δt; sigdigits = 4))",
+                "energy = $(round(s.e; sigdigits = 4))",
+            ],
+            ",\t",
+        )
+        flush(stderr)
     end
     walltime = time() - walltime
 
-    # Save results
-    @info "Saving final DNS snapshot to $(filename)"
+    @info "Saving warmed DNS field to $(file)"
     flush(stderr)
-    jldsave_atomic(
-        filename;
-        u = u |> cpu_device(),
-        times,
-        statistics,
-        walltime,
-    )
-
+    jldsave_atomic(file; u = u |> cpu_device(), times, statistics, walltime)
     return nothing
 end
 
-function create_data(setup; force = false)
-    (; l, visc, D, n_dns, n_les, cfl, backend, outdir, datagen, Δ) = setup
-    (; nstep, tstop) = datagen
+"""
+Generate the LES-resolution `(ūbar, τ)` data for one DNS run `dns`, at **every**
+filter ratio in the role's list, in a *single* time-stepping pass (the DNS field
+is in memory at each save time, so filtering at all Δ is near-free). Heavy fields
+and light metadata go to *separate* files so plot iteration never reloads the
+fields (Notes/ReExperiment.md):
 
-    filename = joinpath(outdir, "data.jld2")
-    skip_if_cached(filename; force, label = "data") && return nothing
+- `dnsmetafile` (once): `times`, `spectra_dns`, `statistics_dns`, `t_int` — Δ-independent.
+- `fieldsfile` (per Δ): `inputs` (ūbar), `outputs` (τ), `redelta` (per-snapshot
+  global Re_Δ), plus `Δ`, `Δ_factor`, `visc`.
+- `lesmetafile` (per Δ): `spectra_les`. (Filtered-field turbulence statistics are
+  *not* stored — they are meaningless for the filtered field.)
 
-    @info "Creating data"
+Train runs sample a few snapshots over ~2 turnovers (a-priori diversity); test
+runs a denser series over ~1 turnover (a-posteriori reference). The window length
+is set from the *measured* integral turnover `t_int`.
+"""
+function create_data(case, dns; force = false)
+    (; D, l, n_dns, n_les, cfl, backend) = case
+    visc = dns.visc
+    filters = dns.role === :train ? case.filters_train : case.filters_test
+    sampling = dns.role === :train ? case.train_sampling : case.test_sampling
+
+    outfiles = [dnsmetafile(case, dns); [fieldsfile(case, dns, Δf) for Δf in filters]]
+    if !force && all(isfile, outfiles)
+        @info "data cached (visc=$(visc), seed=$(dns.seed))"
+        flush(stderr)
+        return nothing
+    end
+
+    @info "Creating data (visc=$(visc), seed=$(dns.seed), role=$(dns.role), filters=$(filters))"
     flush(stderr)
 
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
+    u = load(dnsfile(case, dns), "u") |> adapt(backend)
 
-    # Load DNS state from warm-up simulation
-    u = load(joinpath(outdir, "dns.jld2"), "u") |> adapt(backend)
+    c_dns = getcache(g_dns)
+    c_les = getcache(g_les)
+    sc_dns = statscache(g_dns)
+    stuff_dns = spectral_stuff(g_dns)
+    stuff_les = spectral_stuff(g_les)
 
-    # Allocate arrays
+    # LES scratch buffers, reused across filters and time.
     ubar = vectorfield(g_les)
     σbar1 = tensorfield(g_les)
     σbar2 = tensorfield(g_les)
     τ = tensorfield(g_les)
-    inputs = fill(map(Array, ubar), 0)
-    outputs = fill(map(Array, τ), 0)
-    c_dns = getcache(g_dns)
-    c_les = getcache(g_les)
-    sc_dns = statscache(g_dns)
-    sc_les = statscache(g_les)
 
-    # Spectra
-    stuff_dns = spectral_stuff(g_dns)
-    stuff_les = spectral_stuff(g_les)
-    spectra_dns = fill(zeros(0), 0)
-    spectra_les = fill(zeros(0), 0)
+    # DNS-side metadata accumulators (Δ-independent).
+    stat0 = turbulence_statistics(u, visc, g_dns, sc_dns)
+    times = Float64[]
+    spectra_dns = Vector{Float64}[]
+    statistics_dns = typeof(stat0)[]
 
-    # Compute turbulence statistics
-    statistics_dns = fill(turbulence_statistics(u, visc, g_dns, sc_dns), 0)
-    statistics_les = fill(turbulence_statistics(ubar, visc, g_les, sc_les), 0)
+    # Per-filter accumulators (heavy fields + light spectra).
+    inputs = [typeof(map(Array, ubar))[] for _ in filters]
+    outputs = [typeof(map(Array, τ))[] for _ in filters]
+    redelta = [Float64[] for _ in filters]
+    spectra_les = [Vector{Float64}[] for _ in filters]
 
-    # Keep track of adaptive time stepping
-    times = zeros(0)
+    # Sampling window from the measured turnover.
+    tstop = sampling.nturnover * stat0.t_int
+    savetimes = range(0.0, tstop, length = sampling.nsnap)
 
     shells = energy_shells(g_dns, [1, 2], u)
-
-    # # Compute force factor from DNS
-    # forceval = get_forcing_constant(g_dns, u, dissfield_dns, visc)
-
-    @info "Starting time stepping"
-    flush(stderr)
-
-    # Time stepping
-    savetimes = range(0.0, tstop, length = nstep)
-    t = savetimes[1]
-    timing = time()
+    walltime = time()
+    t = 0.0
     for (i, tnext) in enumerate(savetimes)
-        # Step until the next save point.
-        # Skip the first step to capture the initial statistics.
+        # March the DNS to the save time (skip on the first, captured at t=0).
         i == 1 || while t < tnext
-            # Time step
             Δt = cfl * propose_timestep(u, g_dns, visc, c_dns)
             Δt = min(Δt, tnext - t)
             t += Δt
-
-            # Evolve DNS
             wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
-            # wray3!(forced_rhs!, u, Δt, g_dns, c_dns; forceval, visc)
-
             maintain_shell_energy!(u, shells)
-
-            # Log
-            if i % 1 == 0
-                e = energy(u)
-                @info join(
-                    [
-                        "i = $i",
-                        "t = $(round(t; sigdigits = 4))",
-                        "Δt = $(round(Δt; sigdigits = 4))",
-                        "energy = $(round(e; sigdigits = 4))",
-                    ],
-                    ",\t",
-                )
-                flush(stderr)
-            end
         end
 
-        # Compute ubar and sub-filter stress
-        sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
-
-        # Save current (ubar,tau)-pair
-        push!(inputs, map(Array, ubar))
-        push!(outputs, map(Array, τ))
-
-        # Compute spectra
-        s_dns = spectrum(u, g_dns, stuff_dns)
-        s_les = spectrum(ubar, g_les, stuff_les)
-        push!(spectra_dns, s_dns.s)
-        push!(spectra_les, s_les.s)
-
-        # Compute turbulence statistics
-        stat_dns = turbulence_statistics(u, visc, g_dns, sc_dns)
-        stat_les = turbulence_statistics(ubar, visc, g_les, sc_les)
-        push!(statistics_dns, stat_dns)
-        push!(statistics_les, stat_les)
-
-        # Keep track of times
+        # DNS-side metadata at this save time.
         push!(times, t)
+        push!(spectra_dns, spectrum(u, g_dns, stuff_dns).s)
+        push!(statistics_dns, turbulence_statistics(u, visc, g_dns, sc_dns))
+
+        # Filter at every Δ — the DNS field is already in memory here.
+        for (k, Δf) in enumerate(filters)
+            Δ = Δf * l / n_les
+            sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
+            push!(inputs[k], map(Array, ubar))
+            push!(outputs[k], map(Array, τ))
+            push!(redelta[k], filter_reynolds(ubar, g_les, visc, Δ))
+            push!(spectra_les[k], spectrum(ubar, g_les, stuff_les).s)
+        end
+
+        @info "saved snapshot $(i)/$(sampling.nsnap) at t = $(round(t; sigdigits = 4))"
+        flush(stderr)
+    end
+    walltime = time() - walltime
+
+    jldsave_atomic(
+        dnsmetafile(case, dns);
+        times, spectra_dns, statistics_dns, t_int = stat0.t_int, walltime,
+    )
+    for (k, Δf) in enumerate(filters)
+        Δ = Δf * l / n_les
+        jldsave_atomic(
+            fieldsfile(case, dns, Δf);
+            inputs = inputs[k], outputs = outputs[k], redelta = redelta[k],
+            Δ, Δ_factor = Δf, visc,
+        )
+        jldsave_atomic(lesmetafile(case, dns, Δf); spectra_les = spectra_les[k])
     end
 
-    timing = time() - timing
-
-    # Save results
-    save_object_atomic(
-        filename,
-        (;
-            inputs,
-            outputs,
-            times,
-            spectra_dns,
-            spectra_les,
-            statistics_dns,
-            statistics_les,
-            timing,
-        ),
-    )
-
-    @info "Finished data generation after $(timing) seconds"
+    @info "Finished data generation after $(round(walltime; sigdigits = 4)) s"
     flush(stderr)
-
     return nothing
 end
 

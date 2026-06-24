@@ -757,6 +757,21 @@ contract_dissipation(τ, S, ::Grid{3}) =
     τ.zz * S.zz +
     2 * (τ.xy * S.xy + τ.yz * S.yz + τ.zx * S.zx)
 
+"""
+Global filter-scale Reynolds number `Re_Δ = Δ² √⟨|∇ū|²⟩ / ν`, with
+`|∇ū|² = Σ_ij (∂ūᵢ/∂xⱼ)²` (the resolved velocity-gradient Frobenius norm — the
+same `|Ā|` as the pointwise Re_Δ diagnostic). One scalar per filtered snapshot,
+the regime label fed to the Re_Δ-augmented closures. `ubar` is the spectral
+filtered velocity on the LES grid `g`; `⟨·⟩` is the (Parseval) field mean.
+"""
+function filter_reynolds(ubar, g, visc, Δ)
+    A = tensorfield_nonsym(g)
+    apply!(vectorgradient!, g, (A, ubar, g))
+    foreach(a -> apply!(twothirds!, g, (a, g)), A)
+    a2 = sum(getenergy, A)        # ⟨|∇ū|²⟩ via getenergy (rfft-accounted Σ_k|·|²)
+    return Δ^2 * sqrt(a2) / visc
+end
+
 @kernel function strainrate!(S, u, g::Grid{2})
     I = @index(Global, Cartesian)
     kx, ky = wavenumber_full(g, I)
