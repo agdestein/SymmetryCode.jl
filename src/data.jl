@@ -202,139 +202,115 @@ function create_data(case, dns; force = false)
 end
 
 """
-Generate the `(ubar, τ)` data for a decaying Taylor-Green vortex.
+Generate the decaying Taylor-Green `(ūbar, τ)` data for one TGV run `tgv`
+(`(; visc, seed, role=:tgv, Re_target)`), at every test filter ratio, in a single
+DNS pass — the same two-file schema as [`create_data`](@ref) so the whole post-hoc
+pipeline applies unchanged on the `(tgv, Δf)` eval points.
 
-Same `data.jld2` schema as [`create_data`](@ref) — `inputs` (filtered DNS),
-`outputs` (reference deviatoric SFS stress `τ`), `times`, `spectra_dns/les`,
-`statistics_dns/les` — so the entire post-hoc pipeline runs unchanged. The
-differences from the forced case: the DNS is initialized from the analytic
-Taylor-Green field [`taylorgreen`](@ref) at amplitude `setup.V0` (no warm-up,
-so no `dns.jld2` is read), there is **no** `maintain_shell_energy!` (the flow
-decays freely), and `savetimes` spans the full `[0, tstop]` so the snapshots
-cover the laminar → transitional → turbulent-decay trajectory.
+The DNS starts from the analytic [`taylorgreen`](@ref) field at amplitude
+`V0 = Re_target·visc` (no warm-up, so no `dnsfile`), decays freely (no
+`maintain_shell_energy!`), and the save times span `tconv` convective times
+`t_c = L/V0` so the snapshots cover the laminar → transition → decay trajectory.
+`dnsmetafile` additionally stores `V0`/`Re_target` for the dissipation benchmark
+([`plot_dissipation_tgv`](@ref)).
 """
-function create_data_tgv(setup)
-    (; l, visc, D, n_dns, n_les, cfl, backend, outdir, datagen, Δ, V0) = setup
-    (; nstep, tstop) = datagen
+function create_data_tgv(case, tgv; force = false)
+    (; D, l, n_dns, n_les, cfl, backend) = case
+    @assert D == 3 "create_data_tgv expects a 3D case"
+    @assert tgv.role === :tgv "create_data_tgv expects a :tgv run"
+    visc = tgv.visc
+    V0 = tgv.Re_target * visc
+    filters = case.filters_test
+    (; nsnap, tconv) = case.tgv_sampling
+    tstop = tconv / V0
 
-    @assert D == 3 "create_data_tgv expects a 3D setup"
+    outfiles = [dnsmetafile(case, tgv); [fieldsfile(case, tgv, Δf) for Δf in filters]]
+    if !force && all(isfile, outfiles)
+        @info "TGV data cached (Re=$(tgv.Re_target))"
+        flush(stderr)
+        return nothing
+    end
 
-    filename = joinpath(outdir, "data.jld2")
-    skip_if_cached(filename; label = "Taylor-Green data") && return nothing
-
-    @info "Creating Taylor-Green data (V0 = $(V0), Re = $(V0 / visc))"
+    @info "Creating Taylor-Green data (Re=$(tgv.Re_target), V0=$(V0), filters=$(filters))"
     flush(stderr)
 
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
-
     c_dns = getcache(g_dns)
     c_les = getcache(g_les)
+    sc_dns = statscache(g_dns)
+    stuff_dns = spectral_stuff(g_dns)
+    stuff_les = spectral_stuff(g_les)
 
     # Analytic Taylor-Green initial condition (no warm-up, no forcing).
     u = taylorgreen(g_dns, c_dns.plan; V0)
 
-    # Allocate arrays
+    # LES scratch, reused across filters and time.
     ubar = vectorfield(g_les)
     σbar1 = tensorfield(g_les)
     σbar2 = tensorfield(g_les)
     τ = tensorfield(g_les)
-    inputs = fill(map(Array, ubar), 0)
-    outputs = fill(map(Array, τ), 0)
-    sc_dns = statscache(g_dns)
-    sc_les = statscache(g_les)
 
-    # Spectra
-    stuff_dns = spectral_stuff(g_dns)
-    stuff_les = spectral_stuff(g_les)
-    spectra_dns = fill(zeros(0), 0)
-    spectra_les = fill(zeros(0), 0)
+    # DNS-side metadata accumulators (Δ-independent).
+    stat0 = turbulence_statistics(u, visc, g_dns, sc_dns)
+    times = Float64[]
+    spectra_dns = Vector{Float64}[]
+    statistics_dns = typeof(stat0)[]
 
-    # Compute turbulence statistics
-    statistics_dns = fill(turbulence_statistics(u, visc, g_dns, sc_dns), 0)
-    statistics_les = fill(turbulence_statistics(ubar, visc, g_les, sc_les), 0)
+    # Per-filter accumulators (heavy fields + light spectra).
+    inputs = [typeof(map(Array, ubar))[] for _ in filters]
+    outputs = [typeof(map(Array, τ))[] for _ in filters]
+    redelta = [Float64[] for _ in filters]
+    spectra_les = [Vector{Float64}[] for _ in filters]
 
-    # Keep track of adaptive time stepping
-    times = zeros(0)
-
-    @info "Starting time stepping"
-    flush(stderr)
-
-    # Time stepping
-    savetimes = range(0.0, tstop, length = nstep)
-    t = savetimes[1]
-    timing = time()
+    # Span the full transition→decay trajectory (no measured turnover here).
+    savetimes = range(0.0, tstop, length = nsnap)
+    walltime = time()
+    t = 0.0
     for (i, tnext) in enumerate(savetimes)
-        # Step until the next save point.
-        # Skip the first step to capture the initial statistics.
+        # March the decaying DNS to the save time (skip on the first, t = 0).
         i == 1 || while t < tnext
-            # Time step
             Δt = cfl * propose_timestep(u, g_dns, visc, c_dns)
             Δt = min(Δt, tnext - t)
             t += Δt
-
-            # Evolve DNS (decaying, no forcing)
-            wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)
-
-            # Log
-            if i % 1 == 0
-                e = energy(u)
-                @info join(
-                    [
-                        "i = $i",
-                        "t = $(round(t; sigdigits = 4))",
-                        "Δt = $(round(Δt; sigdigits = 4))",
-                        "energy = $(round(e; sigdigits = 4))",
-                    ],
-                    ",\t",
-                )
-                flush(stderr)
-            end
+            wray3!(convectiondiffusion!, u, Δt, g_dns, c_dns; visc)   # decaying, no forcing
         end
 
-        # Compute ubar and sub-filter stress
-        sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
-
-        # Save current (ubar,tau)-pair
-        push!(inputs, map(Array, ubar))
-        push!(outputs, map(Array, τ))
-
-        # Compute spectra
-        s_dns = spectrum(u, g_dns, stuff_dns)
-        s_les = spectrum(ubar, g_les, stuff_les)
-        push!(spectra_dns, s_dns.s)
-        push!(spectra_les, s_les.s)
-
-        # Compute turbulence statistics
-        stat_dns = turbulence_statistics(u, visc, g_dns, sc_dns)
-        stat_les = turbulence_statistics(ubar, visc, g_les, sc_les)
-        push!(statistics_dns, stat_dns)
-        push!(statistics_les, stat_les)
-
-        # Keep track of times
         push!(times, t)
+        push!(spectra_dns, spectrum(u, g_dns, stuff_dns).s)
+        push!(statistics_dns, turbulence_statistics(u, visc, g_dns, sc_dns))
+
+        for (k, Δf) in enumerate(filters)
+            Δ = Δf * l / n_les
+            sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
+            push!(inputs[k], map(Array, ubar))
+            push!(outputs[k], map(Array, τ))
+            push!(redelta[k], filter_reynolds(ubar, g_les, visc, Δ))
+            push!(spectra_les[k], spectrum(ubar, g_les, stuff_les).s)
+        end
+
+        @info "saved TGV snapshot $(i)/$(nsnap) at t = $(round(t; sigdigits = 4))"
+        flush(stderr)
+    end
+    walltime = time() - walltime
+
+    jldsave_atomic(
+        dnsmetafile(case, tgv);
+        times, spectra_dns, statistics_dns,
+        t_int = stat0.t_int, V0, Re_target = tgv.Re_target, walltime,
+    )
+    for (k, Δf) in enumerate(filters)
+        Δ = Δf * l / n_les
+        jldsave_atomic(
+            fieldsfile(case, tgv, Δf);
+            inputs = inputs[k], outputs = outputs[k], redelta = redelta[k],
+            Δ, Δ_factor = Δf, visc,
+        )
+        jldsave_atomic(lesmetafile(case, tgv, Δf); spectra_les = spectra_les[k])
     end
 
-    timing = time() - timing
-
-    # Save results
-    save_object_atomic(
-        filename,
-        (;
-            inputs,
-            outputs,
-            times,
-            spectra_dns,
-            spectra_les,
-            statistics_dns,
-            statistics_les,
-            timing,
-        ),
-    )
-
-    @info "Finished Taylor-Green data generation after $(timing) seconds"
+    @info "Finished TGV data generation after $(round(walltime; sigdigits = 4)) s"
     flush(stderr)
-
     return nothing
 end
 
