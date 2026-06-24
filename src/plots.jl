@@ -434,163 +434,109 @@ function plot_dissipation_tgv(
 end
 
 """
-Cross-Reynolds aggregation for the Taylor-Green generalization sweep.
-
-`setups` is a vector of per-Re Taylor-Green setups (each carrying `Re_target`
-and its own `outdir` with `sfs_stats_<k>.jld2` artifacts). For each model in
-`keys` (excluding `:ref`/`:nomo`) we plot two a-priori trends against the
-integral Reynolds number:
-- left: the **over-dissipation ratio** `median(τ:S) / median(τ:S)_ref`, the
-  diagnostic that exposes regime mis-calibration (ratio → 1 = correctly
-  dissipative; the learned closures, trained on forced HIT, drift above 1 as
-  the test flow becomes less turbulent);
-- right: the a-priori relative SFS tensor error, to show that the tensor
-  *structure* stays accurate even where the dissipation *magnitude* drifts.
-
-The Reynolds number on the axis is the *measured* integral-scale `Re_int` from
-[`turbulence_statistics`](@ref), computed identically for the test flows and
-the anchor so they share one axis. Each non-stationary TGV setup is summarized
-by its **peak-dissipation** instant (the most turbulent state, where ε is
-well-defined — `Re_int = u'⁴/(εν)` diverges in the laminar/decay phases — and
-which dominates the SFS dissipation the ratio measures), read from that
-setup's `data.jld2`.
-
-`train_anchor`, if given, is the forced *training setup*; its **eval-window
-mean** `Re_int` (the stationary value) positions the star markers overlaying
-the training regime's ratios/errors (from `train_anchor.outdir`'s `sfs_stats`)
-— the point the trends should extrapolate toward. Missing artifacts are
-skipped with a warning so the plot still renders from whatever is present.
-
-The dissipation ratio is drawn on a log axis so over- (2×) and
-under-dissipation (0.5×) sit symmetrically about the reference line. With
-`seeds`, per-point whiskers show ± one std over the training seeds whose
-`sfs_stats_<seed_key>.jld2` are present in each setup's outdir.
+Classical-closure metric at one eval point (no seed spread): `:diss_median` is the
+median SFS dissipation normalized by the `:ref` median, `:relerr` the a-priori
+tensor error, `:e_post` the time-mean a-posteriori solution error.
 """
-function plot_dissipation_vs_re(
-        setups, keys;
-        train_anchor = nothing,
-        plotdir = last(setups).plotdir,
-        Re_key = :Re_int,
-        seeds = nothing,
+function classical_metric(case, dns, Δf, c, metric)
+    if metric === :diss_median
+        ref = load_object(sfsstatsfile(case, dns, Δf, :ref)).diss.median
+        return load_object(sfsstatsfile(case, dns, Δf, c)).diss.median / ref
+    elseif metric === :relerr
+        return load_object(sfsstatsfile(case, dns, Δf, c)).apriori.relerr
+    else # :e_post
+        return mean(load_object(apostfile(case, dns, Δf, c)).e_post)
+    end
+end
+
+"""
+The H2 deliverable: three trends against the global filter-scale Reynolds number
+`Re_Δ` (per eval point = the mean over the test series of the `redelta` stored in
+[`fieldsfile`](@ref)) — median SFS dissipation ratio (→ 1 ideal, log axis), the
+a-priori relative SFS tensor error, and the time-mean a-posteriori solution error.
+
+`evalpoints` is a list of `(dns, Δf)` evaluation points; `families` a list of
+learned-model coordinates `(; arch, tier, use_redelta)`, each drawn in its
+architecture's color, solid for `use_redelta = false` and dashed for `true`, so
+the on/off pair shows whether the Re_Δ feature buys generalization. Per-point
+whiskers are ± one std over `netseeds` (from the cached [`get_seed_statistics`](@ref)
+aggregate). `classical` closures are overlaid as single-value reference trends. If
+`trainpoints` is given, the training Re_Δ span is shaded so the OOD region reads.
+"""
+function plot_trend_vs_redelta(
+        case, evalpoints, families;
+        netseeds = 0:0, classical = (:clar,), trainpoints = nothing,
     )
-    labels = getlabels()
-    styles = getstyles()
-    plot_keys = filter(k -> k ∉ (:ref, :nomo), collect(keys))
+    redelta_of(dns, Δf) = mean(load(fieldsfile(case, dns, Δf), "redelta"))
+    re = [redelta_of(dns, Δf) for (dns, Δf) in evalpoints]
+    agg = [get_seed_statistics(case, families, dns, Δf, netseeds) for (dns, Δf) in evalpoints]
+    order = sortperm(re)
+    re, agg, evalpoints = re[order], agg[order], evalpoints[order]
 
-    Re_labels = (;
-        Re_int = "Integral Reynolds number",
-        Re_tay = "Taylor Reynolds number",
-    )
-
-    # Per-setup loader: (ratio, relerr) for one model key, or `nothing` if its
-    # stats (or the :ref baseline) are missing in that setup's outdir.
-    load_metrics(outdir, k) = let
-        f, fref = "$(outdir)/sfs_stats_$(k).jld2", "$(outdir)/sfs_stats_ref.jld2"
-        if !isfile(f) || !isfile(fref)
-            @warn "Missing SFS stats for $(k) in $(outdir); skipping point"
-            nothing
-        else
-            s = load_object(f)
-            (; ratio = s.diss.median / load_object(fref).diss.median, relerr = s.apriori.relerr)
-        end
-    end
-
-    # Per-setup seed spread (std over seeds) of the same two metrics, or
-    # `nothing` when fewer than two seed artifacts are present.
-    seed_spread(s, k) = let
-        isnothing(seeds) && return nothing
-        m = filter(
-            !isnothing,
-            [load_metrics(s.outdir, seed_key(s, k, sd)) for sd in seeds],
-        )
-        length(m) < 2 ? nothing :
-            (; ratio = std(x.ratio for x in m), relerr = std(x.relerr for x in m))
-    end
-
-    # Measured integral Reynolds number per flow (one definition for both the
-    # axis points and the anchor). The TGV is non-stationary, so each setup is
-    # summarized by its peak-dissipation instant; loading the (large) data.jld2
-    # is acceptable since the sweep plot is produced once.
-    peak_re_int(outdir) = let
-        d = load_object("$(outdir)/data.jld2")
-        re = argmax(s -> s.diss, d.statistics_dns)[Re_key]
-        d = nothing
-        GC.gc()
-        re
-    end
-
-    fig = Figure(; size = (820, 360))
-    ax_d = Axis(
+    xlab = "Filter-scale Reynolds number"
+    fig = Figure(; size = (1100, 380))
+    ax_diss = Axis(
         fig[1, 1];
-        xlabel = Re_labels[Re_key],
+        xscale = log10, yscale = log10, xlabel = xlab,
         ylabel = "Median SFS dissipation / reference",
-        yscale = log10,
-        yticks = ([0.5, 1.0, 1.5, 2.0, 2.5], ["0.5", "1", "1.5", "2", "2.5"]),
     )
-    ax_e = Axis(fig[1, 2]; xlabel = Re_labels[Re_key], ylabel = "A-priori relative SFS error")
+    ax_re = Axis(fig[1, 2]; xscale = log10, xlabel = xlab, ylabel = "A-priori relative SFS error")
+    ax_post = Axis(fig[1, 3]; xscale = log10, xlabel = xlab, ylabel = "A-posteriori solution error")
+    axs = (ax_diss, ax_re, ax_post)
+    metrics = (:diss_median, :relerr, :e_post)
 
-    re_all = [peak_re_int(s.outdir) for s in setups]
-    order = sortperm(re_all)
-    sorted = setups[order]
-    res = re_all[order]
-    for k in plot_keys
-        m = [load_metrics(s.outdir, k) for s in sorted]
-        keep = .!isnothing.(m)
-        any(keep) || continue
-        kw = (; label = labels[k], color = styles[k].color, marker = styles[k].marker)
-        scatterlines!(ax_d, res[keep], [x.ratio for x in m[keep]]; kw...)
-        scatterlines!(ax_e, res[keep], [x.relerr for x in m[keep]]; kw...)
-        sp = [seed_spread(s, k) for s in sorted]
-        keepsp = keep .& .!isnothing.(sp)
-        if any(keepsp)
-            errorbars!(
-                ax_d, res[keepsp], [x.ratio for x in m[keepsp]],
-                [x.ratio for x in sp[keepsp]];
-                whiskerwidth = 6, color = styles[k].color,
+    # Shade the training Re_Δ span so in-distribution vs OOD is legible.
+    if !isnothing(trainpoints)
+        tre = [redelta_of(dns, Δf) for (dns, Δf) in trainpoints]
+        for ax in axs
+            vspan!(ax, minimum(tre), maximum(tre); color = (:gray, 0.12))
+        end
+    end
+
+    for fam in families
+        fname = familyname(fam)
+        st = plotstyle(fam)
+        for (ax, metric) in zip(axs, metrics)
+            xs, yc, ys = Float64[], Float64[], Float64[]
+            for (i, a) in enumerate(agg)
+                haskey(a, fname) || continue
+                v = collect(skipmissing(getproperty(a[fname], metric)))
+                isempty(v) && continue
+                push!(xs, re[i])
+                push!(yc, mean(v))
+                push!(ys, length(v) > 1 ? std(v) : 0.0)
+            end
+            isempty(xs) && continue
+            scatterlines!(
+                ax, xs, yc;
+                label = plotlabel(fam), color = st.color, marker = st.marker, linestyle = st.linestyle,
             )
-            errorbars!(
-                ax_e, res[keepsp], [x.relerr for x in m[keepsp]],
-                [x.relerr for x in sp[keepsp]];
-                whiskerwidth = 6, color = styles[k].color,
+            isp = findall(>(0), ys)
+            isempty(isp) ||
+                errorbars!(ax, xs[isp], yc[isp], ys[isp]; whiskerwidth = 6, color = st.color)
+        end
+    end
+
+    for c in classical
+        st = plotstyle(c)
+        for (ax, metric) in zip(axs, metrics)
+            ys = [classical_metric(case, dns, Δf, c, metric) for (dns, Δf) in evalpoints]
+            scatterlines!(
+                ax, re, ys;
+                label = plotlabel(c), color = st.color, marker = st.marker, linestyle = st.linestyle,
             )
         end
     end
 
-    # Forced-training anchor: the regime the learned closures were fit to, drawn
-    # as star markers (one shared legend entry) colored to match each model — the
-    # point the per-model trends should extrapolate toward. All stars sit at the
-    # forced case's eval-window mean Re_int (its stationary integral Reynolds
-    # number), the like-for-like counterpart of the TGV peak Re_int.
-    if !isnothing(train_anchor)
-        anchor = [
-            (k, m) for (k, m) in
-                ((k, load_metrics(train_anchor.outdir, k)) for k in plot_keys)
-                if !isnothing(m)
-        ]
-        if !isempty(anchor)
-            d = load_object("$(train_anchor.outdir)/data.jld2")
-            anchor_re = mean(s -> s[Re_key], d.statistics_dns[data_ranges(train_anchor).eval])
-            d = nothing
-            GC.gc()
-            re = fill(anchor_re, length(anchor))
-            label = "Training (Re=$(round(Int, anchor_re)))"
-            color = [styles[k].color for (k, _) in anchor]
-            scatter!(ax_d, re, [m.ratio for (_, m) in anchor]; marker = :star5, markersize = 14, color, label)
-            scatter!(ax_e, re, [m.relerr for (_, m) in anchor]; marker = :star5, markersize = 14, color)
-        end
-    end
-
-    hlines!(ax_d, [1.0]; color = :black, linestyle = :dash, label = "Reference")
+    hlines!(ax_diss, [1.0]; color = :black, linestyle = :dash, label = "Reference")
     Legend(
-        fig[0, :], ax_d;
+        fig[0, :], ax_diss;
         tellwidth = false, tellheight = true, framevisible = false,
-        horizontal = true,
-        nbanks = 7,
+        orientation = :horizontal, nbanks = 3,
     )
     rowgap!(fig.layout, 5)
-
-    file = "$(plotdir)/dissipation-vs-$(Re_key).pdf"
-    @info "Saving Taylor-Green Reynolds-sweep plot to $(file)"
+    file = "$(case.plotdir)/trend-vs-redelta.pdf"
+    @info "Saving Re_Δ trend figure to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
     return fig
@@ -639,18 +585,21 @@ function plot_spectral_transfer(case, dns, Δf, models)
     return fig
 end
 
-function plot_velocities(setup, comp, modelkeys)
-    (; D, l, n_les, backend) = setup
+"""
+Velocity (or out-of-plane vorticity, `comp = :vortz`) slices over the rollout for
+the **showcase** eval point (dns, Δf): `:ref` uses the filtered-DNS series
+([`fieldsfile`](@ref) `inputs`), every other model its [`apostfieldsfile`](@ref)
+field series (so the model must have been run with `savefields = true`). Each
+column is a closure, each row a snapshot.
+"""
+function plot_velocities(case, dns, Δf, models, comp)
+    (; D, l, n_les, backend) = case
 
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-
-    # Both reference (filtered DNS) and model rollouts live on the eval window.
-    eval_range = data_ranges(setup).eval
-    times_eval = data.times[eval_range]
-    inputs_eval = data.inputs[eval_range]
+    times_eval = load(dnsmetafile(case, dns), "times")
+    inputs_eval = load(fieldsfile(case, dns, Δf), "inputs")
 
     # Width scales with the number of model columns (ref + closures).
-    fig = Figure(; size = (115 * length(modelkeys), 470))
+    fig = Figure(; size = (115 * length(models), 470))
     g = Grid{D}(; l, n = n_les, backend)
     # `comp = :vortz` plots the out-of-plane vorticity ω_z = ∂_x u_y - ∂_y u_x
     # (the in-plane swirl on the shown z-slice) instead of a velocity component.
@@ -659,23 +608,17 @@ function plot_velocities(setup, comp, modelkeys)
     ui = scalarfield(g)
     ui_space = spacescalarfield(g)
     plan = plan_rfft(ui_space)
-    labels = getlabels()
     nrow = 4
     ntime = length(times_eval)
     time_inds = map(x -> round(Int, x), range(1, ntime, nrow + 1))[2:end]
 
     # Loop over figure columns
-    for (k, key) in enumerate(modelkeys)
-        @info "Plotting velocity for $(key)"
+    for (k, m) in enumerate(models)
+        @info "Plotting velocity for $(modelname(m))"
         flush(stderr)
 
-        title = labels[key]
-        useries = if key == :ref
-            inputs_eval
-        else
-            upost = load_object(upostfile(setup, key))
-            upost.u
-        end
+        title = plotlabel(m)
+        useries = m === :ref ? inputs_eval : load_object(apostfieldsfile(case, dns, Δf, m)).u
 
         # Make all plots in current column
         for (i, t) in enumerate(time_inds)
@@ -722,7 +665,7 @@ function plot_velocities(setup, comp, modelkeys)
     rowgap!(fig.layout, 10)
     colgap!(fig.layout, 10)
 
-    save("$(setup.plotdir)/velocities-$(comp).png", fig; backend = CairoMakie)
+    save(joinpath(figdir(case, dns, Δf), "velocities-$(comp).png"), fig; backend = CairoMakie)
 
     return fig
 end
@@ -842,43 +785,42 @@ function plot_equivariance_errors(case, dns, Δf, models)
     return fig
 end
 
-function plot_sfs(setup, modelkeys)
-    (; D, l, n_les, backend) = setup
+"""
+SFS tensor-component slices (τ₁₁, τ₁₂, τ₃₁, τ₃₃) at one snapshot: the filtered-DNS
+reference ([`fieldsfile`](@ref) `outputs`) beside each model's a-priori prediction
+([`sfsfile`](@ref)), on a shared per-component color range. 3D only.
+"""
+function plot_sfs(case, dns, Δf, models)
+    (; D, l, n_les, backend) = case
 
     @assert D == 3 "TODO: Make this plot 2D compatible"
 
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-    eval_range = data_ranges(setup).eval
-
+    outputs = load(fieldsfile(case, dns, Δf), "outputs")
     g = Grid{D}(; l, n = n_les, backend)
 
     τ = spacetensorfield(g)
     τhat = scalarfield(g)
     plan = plan_rfft(τ.xx)
 
-    # Snapshot index inside the eval window (sfs_*.jld2 is eval-only).
-    t = min(30, length(eval_range))
-
-    τcpu = data.outputs[eval_range[t]]
-    for (τ, τcpu) in zip(τ, τcpu)
-        copyto!(τhat, τcpu)
+    t = min(30, length(outputs))   # snapshot index into the test series
+    for (τ, τc) in zip(τ, outputs[t])
+        copyto!(τhat, τc)
         apply!(twothirds!, g, (τhat, g))
         to_phys!(τ, τhat, plan, g)
     end
     τ_ref = τ |> cpu_device()
 
-    τ_les = map(modelkeys) do key
-        τles = load_object("$(setup.outdir)/sfs_$(key).jld2")[t]
+    # Columns: filtered-DNS reference first, then each model's a-priori prediction.
+    cols = Tuple{String, Any}[("Filtered DNS", τ_ref)]
+    for m in models
+        τles = load_object(sfsfile(case, dns, Δf, m))[t]
         make_tracefree!(τles, g)
-        key => τles
-    end |> NamedTuple
+        push!(cols, (plotlabel(m), τles))
+    end
 
-    τ_all = (; ref = τ_ref, τ_les...)
-    labels = getlabels()
     fig = Figure(; size = (800, 550))
     for (i, comp) in enumerate([:xx, :xy, :zx, :zz])
-        for (j, key) in τ_all |> keys |> enumerate
-            title = labels[key]
+        for (j, (title, τfield)) in enumerate(cols)
             ax = Axis(
                 fig[i, j];
                 xlabelvisible = false,
@@ -898,12 +840,11 @@ function plot_sfs(setup, modelkeys)
                 title,
                 titlevisible = i == 1,
             )
-            slice = τ_all[key][comp][:, :, end]
             image!(
                 ax,
-                slice;
+                τfield[comp][:, :, end];
                 colormap = :RdBu,
-                colorrange = extrema(τ_all.ref[comp][:, :, end]),
+                colorrange = extrema(τ_ref[comp][:, :, end]),
                 interpolate = false,
             )
         end
@@ -911,7 +852,7 @@ function plot_sfs(setup, modelkeys)
     rowgap!(fig.layout, 10)
     colgap!(fig.layout, 10)
 
-    save("$(setup.plotdir)/sfs.png", fig; backend = CairoMakie)
+    save(joinpath(figdir(case, dns, Δf), "sfs.png"), fig; backend = CairoMakie)
     return fig
 end
 
@@ -1294,96 +1235,87 @@ function format_sci(c, s)
 end
 
 """
-Write a paper-ready LaTeX `tabular` of the aggregate per-model metrics to
-`<plotdir>/<filename>`, with mean ± std over training seeds for every model
-that `seed_stat` (from [`get_seed_statistics_cached`](@ref)) covers.
+Write a paper-ready LaTeX `tabular` of the aggregate per-model metrics at
+evaluation point (dns, Δf) to `<plotdir>/<filename>`. Learned-model coordinates in
+`models` are summarized as mean ± std over `netseeds` (from the cached
+[`get_seed_statistics`](@ref) aggregate); classical symbols are single values.
 
 Columns: a-priori SFS tensor error, a-priori cross-correlation, time-mean
 a-posteriori solution error, mean a-priori equivariance error (skipped with
-`include_equi = false`, e.g. for the Taylor-Green case where it is not
-computed), median pointwise SFS dissipation normalized by the reference, and
-the local backscatter fraction. Cells whose artifact is missing print `--`.
+`include_equi = false`), median pointwise SFS dissipation normalized by the
+reference, and the local backscatter fraction. Cells whose artifact is missing
+print `--`.
 
 Each column is printed at a *uniform* decimal precision: a per-column floor,
 widened so the cell with the smallest (seed std / value) still shows its leading
 significant figure, so seeded and non-seeded rows line up and nothing is rounded
-away to `0.000`. Values too small for that (the O(1e-15) equivariance errors)
-fall back to shared-exponent `\\e{n}` scientific notation per cell.
+away to `0.000`. Values too small for that (the O(1e-15) equivariance errors) fall
+back to shared-exponent `\\e{n}` scientific notation per cell.
 
-Reads `sfs_stats_<key>.jld2`, `les_stat.jld2`, and
-`equi-errors-prior-<key>.jld2` for the canonical values. Copy the output over
-the corresponding `tables/*.tex` in the paper repository (the reference
-backscatter fraction, needed in the caption, is written as a comment).
+Reads [`sfsstatsfile`](@ref), [`apostfile`](@ref) (e_post), [`equipriorfile`](@ref)
+(via the seed aggregate). Copy the output over the corresponding `tables/*.tex` in
+the paper repo (the reference backscatter fraction, needed in the caption, is a
+comment).
 """
 function write_errors_table(
-        setup, mkeys;
-        seed_stat = nothing, include_equi = true, filename = "errors.tex",
+        case, dns, Δf, models;
+        netseeds = 0:0, include_equi = true, filename = "errors.tex",
     )
-    (; outdir, plotdir) = setup
-    labels = getlabels()
-    refstats = load_object("$(outdir)/sfs_stats_ref.jld2")
+    refstats = load_object(sfsstatsfile(case, dns, Δf, :ref))
     refmed = refstats.diss.median
-    lesfile = "$(outdir)/les_stat.jld2"
-    les_stat = isfile(lesfile) ? load_object(lesfile) : (;)
+    families = [m for m in models if m isa NamedTuple]
+    seed = get_seed_statistics(case, families, dns, Δf, netseeds)
 
     # Values below this many fixed-point decimals print in `\e{}` scientific
-    # notation instead of widening a whole column to show them (keeps the
-    # O(1e-15) equivariance errors out of the decimal columns).
+    # notation instead of widening a whole column (keeps O(1e-15) equi errors out).
     maxdec = 6
 
-    seedvals(k, metric) =
-    if !isnothing(seed_stat) && haskey(seed_stat, k)
-        v = seed_stat[k][metric]
-        any(!ismissing, v) ? v : nothing
-    else
-        nothing
+    # Cell descriptor: `nothing` (→ "--"), "--" for an undefined (NaN) entry, or
+    # `(; c, s)` with central value `c` and spread `s` (`nothing` for a single
+    # value / exact reproducibility).
+    function aggcell(v)
+        vv = collect(skipmissing(v))
+        isempty(vv) && return nothing
+        c = mean(vv)
+        isnan(c) && return "--"
+        s = length(vv) > 1 && std(vv) > 0 ? std(vv) : nothing
+        return (; c = float(c), s)
     end
-    # Raw cell descriptor: `nothing` (→ "--"), a passthrough LaTeX string
-    # (`N.A.` / `\mathrm{NaN}`), or `(; c, s)` with central value `c` and seed
-    # std `s` (`nothing` for a single seed / exact reproducibility) — from the
-    # seed sweep if present, else the canonical `fallback` artifact (a thunk so
-    # missing files are only probed once).
-    function cellval(k, metric, fallback)
-        v = seedvals(k, metric)
-        if isnothing(v)
-            c = fallback()
-            isnothing(c) && return nothing
-            s = nothing
-        else
-            vv = collect(skipmissing(v))
-            isempty(vv) && return nothing
-            c = mean(vv)
-            s = length(vv) > 1 && std(vv) > 0 ? std(vv) : nothing
-        end
-        isnan(c) && return "--"  # undefined (e.g. 0/0 cross-corr when a model's predicted stress vanishes)
-        return (; c = float(c), s = isnothing(s) ? nothing : float(s))
+    function onecell(x)
+        isnothing(x) && return nothing
+        isnan(x) && return "--"
+        return (; c = float(x), s = nothing)
     end
 
-    # One descriptor per cell, in column order.
-    descs = map(collect(mkeys)) do k
-        f = "$(outdir)/sfs_stats_$(k).jld2"
-        stats = isfile(f) ? load_object(f) : nothing
-        fe = "$(outdir)/equi-errors-prior-$(k).jld2"
+    # One descriptor per cell, in column order, for a learned family or classical.
+    function rowdescs(m)
+        if m isa NamedTuple
+            s = seed[familyname(m)]
+            ds = Any[aggcell(s.relerr), aggcell(s.crosscor), aggcell(s.e_post)]
+            include_equi && push!(ds, aggcell(s.equi))
+            push!(ds, aggcell(s.diss_median))
+            push!(ds, aggcell(s.backscatter))
+            return ds
+        end
+        sf = sfsstatsfile(case, dns, Δf, m)
+        stats = isfile(sf) ? load_object(sf) : nothing
+        fa = apostfile(case, dns, Δf, m)
         ds = Any[
-            cellval(k, :relerr, () -> isnothing(stats) ? nothing : stats.apriori.relerr),
-            cellval(k, :crosscor, () -> isnothing(stats) ? nothing : stats.apriori.crosscor),
-            cellval(k, :e_post, () -> haskey(les_stat, k) ? mean(les_stat[k].e_post) : nothing),
+            onecell(isnothing(stats) ? nothing : stats.apriori.relerr),
+            onecell(isnothing(stats) ? nothing : stats.apriori.crosscor),
+            onecell(isfile(fa) ? mean(load_object(fa).e_post) : nothing),
         ]
-        include_equi && push!(
-            ds,
-            k == :nomo ? "N.A." :
-                cellval(k, :equi, () -> isfile(fe) ? mean(load_object(fe)) : nothing),
-        )
-        push!(ds, cellval(k, :diss_median, () -> isnothing(stats) ? nothing : stats.diss.median / refmed))
-        push!(ds, cellval(k, :backscatter, () -> isnothing(stats) ? nothing : stats.diss.backscatter))
-        ds
+        include_equi && push!(ds, m === :nomo ? "N.A." : nothing)   # classical: not equivariance-tested
+        push!(ds, onecell(isnothing(stats) ? nothing : stats.diss.median / refmed))
+        push!(ds, onecell(isnothing(stats) ? nothing : stats.diss.backscatter))
+        return ds
     end
+    descs = map(rowdescs, collect(models))
 
     # Per-column uniform precision: each numeric column floors at `bases[j]` and
     # widens to the most decimals any of its fixed-point cells needs to show its
-    # leading significant figure (the std's, when seeded). Sub-`maxdec` cells
-    # stay scientific and don't participate. Result: every fixed cell in a column
-    # prints at one shared decimal place and none collapses to `0.000`.
+    # leading significant figure (the std's, when seeded). Sub-`maxdec` cells stay
+    # scientific. Result: every fixed cell in a column shares one decimal place.
     bases = include_equi ? [4, 4, 4, 4, 3, 3] : [4, 4, 4, 3, 3]
     isfixed(d) = d isa NamedTuple && (d.c == 0 || sigdecimals(d.c) <= maxdec)
     coldigits = map(eachindex(bases)) do j
@@ -1403,9 +1335,9 @@ function write_errors_table(
     # `.tex` stays column-aligned (trailing pad on the last column is trimmed).
     cellrows = [[fmt(ds[j], coldigits[j]) for j in eachindex(bases)] for ds in descs]
     widths = [maximum(length(cr[j]) for cr in cellrows) for j in eachindex(bases)]
-    rows = map(zip(collect(mkeys), cellrows)) do (k, cells)
+    rows = map(zip(collect(models), cellrows)) do (m, cells)
         padded = join((rpad(cells[j], widths[j]) for j in eachindex(bases)), " & ")
-        rstrip("    $(rpad(labels[k], 11)) & " * padded) * " \\\\"
+        rstrip("    $(rpad(plotlabel(m), 11)) & " * padded) * " \\\\"
     end
 
     header = [
@@ -1424,7 +1356,7 @@ function write_errors_table(
     )
 
     ncol = include_equi ? 6 : 5
-    file = joinpath(plotdir, filename)
+    file = joinpath(case.plotdir, filename)
     open(file, "w") do io
         println(io, "% Generated by SymmetryCode write_errors_table; do not edit by hand.")
         println(io, "% Reference backscatter fraction: $(round(refstats.diss.backscatter; digits = 3)).")

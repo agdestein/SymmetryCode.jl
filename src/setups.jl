@@ -186,8 +186,7 @@ The initial amplitude is `V0 = Re_target * visc` so the case sits at the
 canonical `Re_target` benchmark (default 1600, with `L = 1`, so
 `Re = V0 L / visc = Re_target`). The DNS runs for `tconv` convective times
 `t_c = L / V0 = 1 / V0` (the vortex peaks near `t* = 9` and has largely decayed
-by `t* = 20`). `datagen.n_train = 1` makes the eval window
-(`data_ranges` → `eval = 2:nstep`) cover essentially the whole transition.
+by `t* = 20`). The saved snapshots cover essentially the whole transition.
 
 Models are built from `train` (which owns the `ps-*.jld2`); this setup only owns
 the Taylor-Green `data.jld2` and the post-hoc artifacts under its own `outdir`.
@@ -234,39 +233,6 @@ function setup_taylorgreen(
     )
     return (; base..., V0, Re_target)
 end
-
-"""
-Snapshot-index split of the `(ubar, τ)` series in `data.jld2`.
-
-The first `setup.datagen.n_train` snapshots form the training pool consumed by
-`create_dataloader` / `create_dataloader_tbnn`; the remainder is the held-out
-window used by the LES rollout (`solve_les`) and every post-hoc analysis
-function. Inside the training pool, `train_setup.val_fraction` still selects a
-time-based validation tail for best-params tracking — that is unrelated to this
-held-out window.
-"""
-data_ranges(setup) = let n = setup.datagen.nstep, nt = setup.datagen.n_train
-    @assert 1 ≤ nt < n "datagen.n_train must satisfy 1 ≤ n_train < nstep"
-    (; train = 1:nt, eval = (nt + 1):n)
-end
-
-"""
-Variant of `setup` whose learned closures train with a different `seed`
-(network initialization and batch shuffling; the data, solver, and DNS
-warm-up are unaffected). Together with [`seed_key`](@ref) this drives the
-seed sweep.
-"""
-with_seed(setup, seed) = (; setup..., train_setup = (; setup.train_setup..., seed))
-
-"""
-Artifact key for closure `key` trained with `seed`. The canonical seed (the
-one in `setup.train_setup` as defined by the setup constructor) keeps the
-plain key, so all pre-existing single-seed artifacts stay valid; other seeds
-get a `_seed<i>` suffix (`ps-tbnn_seed1.jld2`, `u-post-tbnn_seed1.jld2`, …).
-Call with the *base* setup, not a [`with_seed`](@ref) variant.
-"""
-seed_key(setup, key, seed) =
-    seed == setup.train_setup.seed ? key : Symbol(key, :_seed, seed)
 
 """
 Build the inference closures listed in `models` against eval `setup`, returned as
