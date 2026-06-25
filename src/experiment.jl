@@ -103,10 +103,12 @@ where the ~40η-wide filter keeps the saved ūbar/τ targets reliable). The trai
 §2, [[redelta-gate0-confound]]).
 """
 function dns_runs()
-    train = [(; visc, seed = 1, role = :train) for visc in (1.5e-4, 2.5e-4, 4.0e-4)]
+    train = map(enumerate([1.5e-4, 2.5e-4, 4.0e-4])) do (i, visc)
+        (; visc, seed = i, role = :train)
+    end
     test = [
-        (; visc = 2.5e-4, seed = 2, role = :test_indist),   # new seed, trained ν
-        (; visc = 1.0e-4, seed = 3, role = :test_ood),      # higher Re, held-out ν
+        (; visc = 2.5e-4, seed = 100, role = :test_indist),   # new seed, trained ν
+        (; visc = 1.0e-4, seed = 200, role = :test_ood),      # higher Re, held-out ν
     ]
     return (; train, test, all = [train; test])
 end
