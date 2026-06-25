@@ -52,7 +52,11 @@ function main()
     config = get_config()
     reset_tables(case)
 
-    for dns in S.dns_runs().all
+    slurm_id = get(ENV, "SLURM_ARRAY_TASK_ID", nothing)
+    task_id = isnothing(slurm_id) ? nothing : parse(Int, slurm_id)
+
+    for (i, dns) in enumerate(S.dns_runs().all)
+        isnothing(task_id) || i == task_id || continue
         @info "===== DNS run: visc=$(dns.visc), seed=$(dns.seed), role=$(dns.role) ====="
         flush(stderr)
         filters = dns.role === :train ? case.filters_train : case.filters_test
