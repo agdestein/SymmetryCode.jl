@@ -62,8 +62,17 @@ plotstyle(m::Symbol) = getstyles()[m]
 plotstyle(m::NamedTuple) =
     m.use_redelta ? (; getstyles()[m.arch]..., linestyle = :dash) : getstyles()[m.arch]
 
-"Short capacity-tier tag (`small→S`, `medium→M`, `saturated→L`) for compact labels."
-tierlabel(t::Symbol) = t === :small ? "S" : t === :medium ? "M" : t === :saturated ? "L" : string(t)
+"""
+Short capacity-tier tag for compact labels. The grid tiers are named `pN` for a
+target parameter count `N` ([`default_tiers`](@ref)); render as `~Nk` (e.g.
+`p8000 → ~8k`, `p120 → ~120`). Any other symbol prints verbatim.
+"""
+function tierlabel(t::Symbol)
+    s = string(t)
+    startswith(s, "p") && all(isdigit, s[2:end]) || return s
+    n = parse(Int, s[2:end])
+    return n ≥ 1000 ? "~$(n ÷ 1000)k" : "~$(n)"
+end
 
 """
 Bar-chart tick label: [`plotlabel`](@ref) plus the tier tag for a learned family
@@ -554,6 +563,72 @@ function plot_trend_vs_redelta(
     rowgap!(fig.layout, 5)
     file = "$(case.plotdir)/trend-vs-redelta.pdf"
     @info "Saving Re_Δ trend figure to $(file)"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
+    return fig
+end
+
+"""
+The saturation / parameter-efficiency figure: a-priori relative SFS error (left)
+and time-mean a-posteriori solution error (right) vs **parameter count** (log-x),
+one series per architecture, at evaluation point (dns, Δf). `families` is the size
+grid for each architecture (same Re_Δ setting); each `(arch, size)` is
+seed-aggregated over `netseeds` (marker = mean, whisker = ±std), read **straight
+from the per-model artifacts** so adding sizes later needs no aggregate rebuild.
+The story (Langford–Moser optimal closure): every architecture saturates to the
+same error floor, but the ones with more inductive bias reach it at far fewer
+parameters. `classical` closures are horizontal reference lines. Reads
+[`sfsstatsfile`](@ref) and [`apostfile`](@ref); `paramcount` sets the x-position.
+"""
+function plot_saturation(case, dns, Δf, families, netseeds; classical = (:clar,))
+    archs = unique(f.arch for f in families)
+    relerr(m) = isfile(sfsstatsfile(case, dns, Δf, m)) ?
+        load_object(sfsstatsfile(case, dns, Δf, m)).apriori.relerr : missing
+    epost(m) = isfile(apostfile(case, dns, Δf, m)) ?
+        mean(load_object(apostfile(case, dns, Δf, m)).e_post) : missing
+
+    # (params, seed-mean, seed-std) for family `fam`, or `nothing` if no seed landed.
+    function point(fam, read)
+        v = collect(skipmissing(read((; fam..., netseed = s)) for s in netseeds))
+        isempty(v) && return nothing
+        return (paramcount(case, fam), mean(v), length(v) > 1 ? std(v) : 0.0)
+    end
+
+    fig = Figure(; size = (820, 380))
+    ax_re = Axis(fig[1, 1]; xscale = log10, xlabel = "Parameters", ylabel = "A-priori relative SFS error")
+    ax_post = Axis(fig[1, 2]; xscale = log10, xlabel = "Parameters", ylabel = "A-posteriori solution error")
+
+    for (ax, read, metric, withlabel) in
+        ((ax_re, relerr, :relerr, true), (ax_post, epost, :e_post, false))
+        for arch in archs
+            style = getstyles()[arch]
+            pts = sort!(
+                filter(!isnothing, [point(f, read) for f in families if f.arch === arch]); by = first,
+            )
+            isempty(pts) && continue
+            xs, ys, es = first.(pts), getindex.(pts, 2), getindex.(pts, 3)
+            scatterlines!(
+                ax, xs, ys;
+                color = style.color, marker = style.marker, label = withlabel ? getlabels()[arch] : nothing,
+            )
+            pos = findall(>(0), es)
+            isempty(pos) ||
+                errorbars!(ax, xs[pos], ys[pos], es[pos]; whiskerwidth = 6, color = style.color)
+        end
+        for c in classical
+            hlines!(
+                ax, [classical_metric(case, dns, Δf, c, metric)];
+                color = plotstyle(c).color, linestyle = :dash, label = withlabel ? plotlabel(c) : nothing,
+            )
+        end
+    end
+    Legend(
+        fig[0, :], ax_re;
+        tellwidth = false, tellheight = true, framevisible = false, orientation = :horizontal,
+    )
+    rowgap!(fig.layout, 5)
+    file = "$(case.plotdir)/saturation.pdf"
+    @info "Saving saturation figure to $(file)"
     flush(stderr)
     save(file, fig; backend = CairoMakie)
     return fig
