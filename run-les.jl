@@ -193,6 +193,7 @@ function main()
     if :tables in config.experiments
         dns, Δf = first(testpoints)
         S.write_errors_table(case, dns, Δf, fams, config.netseeds; classical = config.classical)
+        S.write_timing_table(case, dns, Δf, fams, config.netseeds; classical = config.classical)
     end
 
     #######################
