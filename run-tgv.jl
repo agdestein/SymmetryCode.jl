@@ -32,7 +32,7 @@ get_config() = (;
 
     experiments = [
         :data,            # create_data_tgv -> dnsmetafile + fieldsfile/lesmeta per Δ
-        :apriori,         # predict_sfs + compute_sfs_stats
+        :apriori,         # compute_sfs_stats (reduce-on-the-fly a-priori)
         :aposteriori,     # solve_les (decaying rollout, reduce-on-the-fly)
         :plots,           # per-eval-point figures
         :dissipation,     # plot_dissipation_tgv (the benchmark)
@@ -67,7 +67,9 @@ function main()
             setup = S.make_setup(case, tgv, Δf)
             withref = [:ref; models]
 
-            # Reference a-posteriori budget (no model).
+            # Reference a-priori stats + a-posteriori budget (no model).
+            :apriori in config.experiments &&
+                S.compute_sfs_stats(case, :ref, tgv, Δf; force = :apriori in config.force)
             :aposteriori in config.experiments &&
                 S.solve_les(case, :ref, tgv, Δf; force = :aposteriori in config.force)
 
@@ -75,17 +77,14 @@ function main()
                 S.clean()
                 local built = nothing
                 getmodel() = (built === nothing && (built = buildone(case, setup, m)); built)
-                if :apriori in config.experiments && m !== :nomo
-                    S.predict_sfs(case, m, tgv, Δf, getmodel; force = :apriori in config.force)
+                if :apriori in config.experiments
+                    S.compute_sfs_stats(case, m, tgv, Δf, getmodel; force = :apriori in config.force)
                 end
                 :aposteriori in config.experiments &&
                     S.solve_les(case, m, tgv, Δf, getmodel; force = :aposteriori in config.force)
                 built = nothing
                 S.clean()
             end
-
-            :apriori in config.experiments &&
-                S.compute_sfs_stats(case, withref, tgv, Δf; force = :apriori in config.force)
 
             if :plots in config.experiments
                 S.plot_apriori_bar(case, tgv, Δf, models)

@@ -1,48 +1,6 @@
-# Post-hoc evaluation of LES closures: SFS prediction series, KDE densities,
-# a-priori errors, equivariance commutation errors, dissipation comparisons,
-# and Q-R invariant joint distributions.
-
-"""
-Predict the a-priori SFS stress series for closure `m` on test dataset (dns, Δf):
-apply `getmodel()` to every filtered-DNS snapshot in `fieldsfile`, persisting the
-`Vector{NamedTuple}` to `sfsfile(case, dns, Δf, m)`. `m` names the artifact (a
-learned coordinate or a classical symbol); `getmodel` is a zero-arg thunk that
-builds the closure, invoked only on a cache miss.
-"""
-function predict_sfs(case, m, dns, Δf, getmodel; force = false)
-    (; D, l, n_les, backend) = case
-    file = sfsfile(case, dns, Δf, m)
-    skip_if_cached(file; force, label = "SFS for $(modelname(m))") && return
-    model = getmodel()
-
-    inputs = load(fieldsfile(case, dns, Δf), "inputs")
-
-    g = Grid{D}(; l, n = n_les, backend)
-    u = vectorfield(g)
-    plan = plan_rfft(spacescalarfield(g))
-    A = tensorfield_nonsym(g)
-    AA = spacetensorfield_nonsym(g)
-
-    @info "Computing SFS for $(modelname(m))"
-    flush(stderr)
-    τ_series = map(inputs) do ucpu
-        GC.gc()
-        CUDA.reclaim()
-
-        # Velocity gradient in physical space
-        foreach(copyto!, u, ucpu)
-        apply!(vectorgradient!, g, (A, u, g))
-        for (AA, A) in zip(AA, A)
-            apply!(twothirds!, g, (A, g))
-            to_phys!(AA, A, plan, g)
-        end
-
-        # Prediction by LES model
-        unstack_symtensor(model(u, AA), g) |> cpu_device()
-    end
-    save_object_atomic(file, τ_series)
-    return
-end
+# Post-hoc evaluation of LES closures: a-priori SFS statistics (tensor error,
+# dissipation KDE / backscatter), equivariance commutation errors, the Phase-0
+# Re_Δ binning diagnostic, and the netseed aggregate.
 
 """
 Scalar moments of a sample vector: mean, median, std, and the third
@@ -60,10 +18,12 @@ function moments(x)
 end
 
 """
-Aggregate per-snapshot SFS samples into a single statistics artifact per key.
-
-For each closure `m` in `models`, on test dataset (dns, Δf), persists
-`sfsstatsfile(case, dns, Δf, m)` containing:
+A-priori statistics for one closure `m` on test dataset (dns, Δf), reduced **on
+the fly**: the closure is evaluated on every filtered-DNS snapshot and reduced to
+scalar metrics immediately, so the heavy predicted-SFS field series is never
+written to disk (mirrors the reduce-on-the-fly a-posteriori path in
+[`solve_les`](@ref); see Notes/ReExperiment.md). Persists the light
+`sfsstatsfile(case, dns, Δf, m)`:
 
 - `apriori` — `(; relerr, crosscor)` against the filtered-DNS reference over the
   full trace-free tensor. `(0.0, 1.0)` for `:ref`, `(1.0, 0.0)` for `:nomo`.
@@ -71,21 +31,17 @@ For each closure `m` in `models`, on test dataset (dns, Δf), persists
   dissipation `ε_sfs = -τᵢⱼSᵢⱼ`. `backscatter` is the fraction with `ε_sfs < 0`;
   exactly 0 for `τ = -2νₜS` with `νₜ ≥ 0` (e.g. Smagorinsky), ≈ 0.3–0.4 for
   filtered HIT. Convention: `ε_sfs > 0` drain, `< 0` backscatter.
-- `kde.diss` — KDE of `ε_sfs` (the backscatter evidence; the τ-component PDFs are
-  dropped — only the dissipation PDF is kept, per ReExperiment.md).
+- `kde.diss` — KDE of `ε_sfs` (the backscatter evidence; only the dissipation PDF
+  is kept, per ReExperiment.md).
 
-`:ref` uses the filtered-DNS `outputs` directly; `:nomo` is zero stress; other
-closures load `sfsfile` (from [`predict_sfs`](@ref)).
+`m === :ref` uses the filtered-DNS `outputs` directly; `m === :nomo` is zero
+stress; every other closure calls `getmodel()` — a zero-arg thunk built only on a
+cache miss and never for `:ref`/`:nomo` — and re-evaluates it per snapshot.
 """
-function compute_sfs_stats(case, models, dns, Δf; force = false)
+function compute_sfs_stats(case, m, dns, Δf, getmodel = () -> nothing; force = false)
     (; D, l, n_les, backend) = case
-
-    todo = filter(m -> force || !isfile(sfsstatsfile(case, dns, Δf, m)), models)
-    if isempty(todo)
-        @info "All SFS stats cached"
-        flush(stderr)
-        return
-    end
+    file = sfsstatsfile(case, dns, Δf, m)
+    skip_if_cached(file; force, label = "SFS stats for $(modelname(m))") && return
 
     inputs, outputs = load(fieldsfile(case, dns, Δf), "inputs", "outputs")
 
@@ -99,88 +55,84 @@ function compute_sfs_stats(case, models, dns, Δf; force = false)
     A = tensorfield_nonsym(g)
     AA = spacetensorfield_nonsym(g)
 
-    for m in todo
-        @info "Computing SFS stats for $(modelname(m))"
-        flush(stderr)
+    model = m in (:ref, :nomo) ? nothing : getmodel()
 
-        # Per-snapshot model source. :nomo has no file; :ref uses the
-        # spectral-space reference (re-IFFTed in the loop). Others load
-        # the cached physical-space prediction.
-        τ_series = m in (:nomo, :ref) ? nothing : load_object(sfsfile(case, dns, Δf, m))
+    @info "Computing SFS stats for $(modelname(m))"
+    flush(stderr)
 
-        diss_samples = Float64[]
-        relerrs = Float64[]
-        crosscors = Float64[]
+    diss_samples = Float64[]
+    relerrs = Float64[]
+    crosscors = Float64[]
 
-        for i in eachindex(inputs)
-            # Strain rate from ubar (model-independent; recomputed per model
-            # for memory simplicity — cheap compared to the model work).
-            foreach(copyto!, u, inputs[i])
-            apply!(vectorgradient!, g, (A, u, g))
-            for (AA, A) in zip(AA, A)
-                apply!(twothirds!, g, (A, g))
-                to_phys!(AA, A, plan, g)
-            end
-            S = strain_from_gradient(AA, g)
-
-            # Reference τ (spectral → physical, trace-free)
-            for (τ, τcpu) in zip(τ_ref, outputs[i])
-                copyto!(τhat, τcpu)
-                apply!(twothirds!, g, (τhat, g))
-                to_phys!(τ, τhat, plan, g)
-            end
-            make_tracefree!(τ_ref, g)
-
-            # Model τ
-            if m === :nomo
-                for t in τ_model
-                    fill!(t, 0)
-                end
-            elseif m === :ref
-                for (t, r) in zip(τ_model, τ_ref)
-                    copyto!(t, r)
-                end
-            else
-                foreach(copyto!, τ_model, τ_series[i])
-                for t in τ_model
-                    dealias_phys!(t, τhat, plan, g)
-                end
-                make_tracefree!(τ_model, g)
-            end
-
-            # ε_sfs = -τᵢⱼSᵢⱼ (positive = drain).
-            dissfield .= contract_dissipation(τ_model, S, g)
-            append!(diss_samples, .-vec(Array(dissfield)))
-
-            # A-priori metrics over the full trace-free tensor vs reference.
-            if m === :ref
-                push!(relerrs, 0.0)
-                push!(crosscors, 1.0)
-            elseif m === :nomo
-                push!(relerrs, 1.0)
-                push!(crosscors, 0.0)
-            else
-                a = Array(stack(τ_ref))
-                b = Array(stack(τ_model))
-                bb, aa = b .- mean(b), a .- mean(a)
-                push!(relerrs, norm(b - a) / norm(a))
-                push!(crosscors, dot(bb, aa) / sqrt(dot(bb, bb) * dot(aa, aa)))
-            end
+    for i in eachindex(inputs)
+        # Physical velocity gradient from ūbar — feeds both the strain rate and
+        # (for a learned/classical closure) the model input, in a single pass.
+        foreach(copyto!, u, inputs[i])
+        apply!(vectorgradient!, g, (A, u, g))
+        for (AA, A) in zip(AA, A)
+            apply!(twothirds!, g, (A, g))
+            to_phys!(AA, A, plan, g)
         end
+        S = strain_from_gradient(AA, g)
 
-        kdiss = if iszero(std(diss_samples))
-            (; x = Float64[], density = Float64[])
+        # Reference τ (spectral → physical, trace-free).
+        for (τ, τcpu) in zip(τ_ref, outputs[i])
+            copyto!(τhat, τcpu)
+            apply!(twothirds!, g, (τhat, g))
+            to_phys!(τ, τhat, plan, g)
+        end
+        make_tracefree!(τ_ref, g)
+
+        # Model τ, evaluated on the fly. A learned/classical closure is dealiased
+        # (it can excite harmonics above the 2/3 cutoff) and trace-freed.
+        if m === :nomo
+            for t in τ_model
+                fill!(t, 0)
+            end
+        elseif m === :ref
+            for (t, r) in zip(τ_model, τ_ref)
+                copyto!(t, r)
+            end
         else
-            e = kde(diss_samples)
-            (; x = collect(e.x), density = collect(e.density))
+            foreach(copyto!, τ_model, unstack_symtensor(model(u, AA), g))
+            for t in τ_model
+                dealias_phys!(t, τhat, plan, g)
+            end
+            make_tracefree!(τ_model, g)
         end
-        result = (;
-            kde = (; diss = kdiss),
-            diss = (; moments(diss_samples)..., backscatter = mean(<(0), diss_samples)),
-            apriori = (; relerr = mean(relerrs), crosscor = mean(crosscors)),
-        )
-        save_object_atomic(sfsstatsfile(case, dns, Δf, m), result)
+
+        # ε_sfs = -τᵢⱼSᵢⱼ (positive = drain).
+        dissfield .= contract_dissipation(τ_model, S, g)
+        append!(diss_samples, .-vec(Array(dissfield)))
+
+        # A-priori metrics over the full trace-free tensor vs reference.
+        if m === :ref
+            push!(relerrs, 0.0)
+            push!(crosscors, 1.0)
+        elseif m === :nomo
+            push!(relerrs, 1.0)
+            push!(crosscors, 0.0)
+        else
+            a = Array(stack(τ_ref))
+            b = Array(stack(τ_model))
+            bb, aa = b .- mean(b), a .- mean(a)
+            push!(relerrs, norm(b - a) / norm(a))
+            push!(crosscors, dot(bb, aa) / sqrt(dot(bb, bb) * dot(aa, aa)))
+        end
     end
+
+    kdiss = if iszero(std(diss_samples))
+        (; x = Float64[], density = Float64[])
+    else
+        e = kde(diss_samples)
+        (; x = collect(e.x), density = collect(e.density))
+    end
+    result = (;
+        kde = (; diss = kdiss),
+        diss = (; moments(diss_samples)..., backscatter = mean(<(0), diss_samples)),
+        apriori = (; relerr = mean(relerrs), crosscor = mean(crosscors)),
+    )
+    save_object_atomic(file, result)
     return
 end
 
@@ -242,7 +194,7 @@ function compute_redelta_binning(
     flush(stderr)
     for i in eachindex(inputs_eval)
         # Physical velocity gradient from the filtered DNS — same recipe as
-        # `compute_sfs_stats` / `predict_sfs`.
+        # `compute_sfs_stats`.
         foreach(copyto!, u, inputs_eval[i])
         apply!(vectorgradient!, g, (A, u, g))
         for (AA, A) in zip(AA, A)
