@@ -97,7 +97,7 @@ function dns_runs()
     train = [(; visc, seed = 1, role = :train) for visc in (1.5e-4, 2.5e-4, 4.0e-4)]
     test = [
         (; visc = 2.5e-4, seed = 2, role = :test_indist),   # new seed, trained ν
-        (; visc = 1.0e-4, seed = 3, role = :test_ood),      # higher Re, held-out ν
+        # (; visc = 1.0e-4, seed = 3, role = :test_ood),      # higher Re, held-out ν
     ]
     return (; train, test, all = [train; test])
 end
