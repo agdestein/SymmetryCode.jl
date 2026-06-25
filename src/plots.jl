@@ -197,7 +197,7 @@ function plot_densities(case, dns, Δf, models; dolog = true)
     dolog && ylims!(ax, 1.0e-4, nothing)
     Legend(
         fig[0, 1], ax;
-        tellwidth = false, tellheight = true, framevisible = false, orientation = :horizontal,
+        tellwidth = false, tellheight = true, framevisible = false, horizontal = true, nbanks = 4,
     )
     rowgap!(fig.layout, 5)
     file = joinpath(figdir(case, dns, Δf), "dissipation-density.pdf")
@@ -300,7 +300,8 @@ function plot_budget(case, dns, Δf, models)
     end
     Legend(
         fig[0, :], ax_ke;
-        tellwidth = false, tellheight = true, framevisible = false, orientation = :horizontal,
+        tellwidth = false, tellheight = true, framevisible = false,
+        orientation = :horizontal, nbanks = 5,
     )
     rowgap!(fig.layout, 5)
     file = joinpath(figdir(case, dns, Δf), "budget.pdf")
@@ -1112,7 +1113,8 @@ function plot_spectrum_les(case, dns, Δf, models)
     ylims!(ax_ratio, 0, 2)
     Legend(
         fig[0, :], ax;
-        tellwidth = false, tellheight = true, framevisible = false, orientation = :horizontal,
+        tellwidth = false, tellheight = true, framevisible = false,
+        orientation = :horizontal, nbanks = 5,
     )
     rowgap!(fig.layout, 5)
     file = joinpath(figdir(case, dns, Δf), "spectrum-les.pdf")
