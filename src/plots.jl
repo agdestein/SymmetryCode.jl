@@ -117,7 +117,7 @@ is visible. Reads `losses_valid` from each [`psfile`](@ref); classical symbols a
 models without a persisted artifact are skipped, so the same call works for any
 trained subset.
 """
-function plot_training(case, models)
+function plot_training(case, models; maxpoints = 1000)
     learned = [m for m in models if m isa NamedTuple && isfile(psfile(case, m))]
     isempty(learned) && return nothing
     archs = unique(m.arch for m in learned)
@@ -134,7 +134,14 @@ function plot_training(case, models)
         for m in learned
             m.arch === a || continue
             losses = load(psfile(case, m), "losses_valid")
-            lines!(ax, losses; color = tcolor[m.tier], linestyle = m.use_redelta ? :dash : :solid)
+            # Per-batch loss is ~thousands of points per curve; a vector PDF of all
+            # of them (× tiers × Re × seeds × panels) is huge and slow to render.
+            # Stride down to ~maxpoints — the convergence shape is preserved.
+            idx = 1:cld(length(losses), maxpoints):length(losses)
+            lines!(
+                ax, idx, losses[idx];
+                color = tcolor[m.tier], linestyle = m.use_redelta ? :dash : :solid,
+            )
         end
     end
 
