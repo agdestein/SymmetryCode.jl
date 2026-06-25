@@ -23,11 +23,11 @@ import SymmetryCode as S
 get_case() = S.case_snellius()
 
 get_config() = (;
-    # Must match the trained set in run-les.jl (these reuse those ps-*.jld2).
+    # Must match the trained set in run-les.jl (these reuse those ps-*.jld2): the
+    # top tier ±Re — sweep D applies sweep C's models to the decaying TGV.
     archs = (:conv, :equi, :tbnn),
-    tiers = (:saturated,),
-    use_redelta = (false, true),
-    netseeds = 0:0,
+    top = :p8000,
+    netseeds = 0:1,
     classical = [:nomo, :clar],
 
     experiments = [
@@ -41,24 +41,22 @@ get_config() = (;
     force = Set{Symbol}([]),
 )
 
-learned_models(c) = [
-    (; arch, tier, netseed, use_redelta = ur)
-        for arch in c.archs for tier in c.tiers
-        for ur in c.use_redelta for netseed in c.netseeds
+# Top tier ±Re (mirrors run-les.jl's ablation set, which trained these ps-*.jld2).
+eval_models(c) = [
+    c.classical;
+    [
+        (; arch, tier = c.top, netseed, use_redelta = ur)
+            for arch in c.archs for ur in (false, true) for netseed in c.netseeds
+    ]
 ]
-eval_models(c) = [c.classical; learned_models(c)]
-
-# Learned families (no seed) for the seed-aggregated bars; a curated saturated,
-# one-seed subset for the per-curve series plots (see run-les.jl for the rationale).
 families(c) = [
-    (; arch, tier, use_redelta = ur)
-        for arch in c.archs for tier in c.tiers for ur in c.use_redelta
+    (; arch, tier = c.top, use_redelta = ur) for arch in c.archs for ur in (false, true)
 ]
 series_models(c) = [
     c.classical;
     [
-        (; arch, tier = last(c.tiers), netseed = first(c.netseeds), use_redelta = ur)
-            for arch in c.archs for ur in c.use_redelta
+        (; arch, tier = c.top, netseed = first(c.netseeds), use_redelta = ur)
+            for arch in c.archs for ur in (false, true)
     ]
 ]
 buildone(case, setup, m) = S.build_models(case, setup, [m])[S.modelname(m)]

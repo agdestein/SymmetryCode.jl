@@ -36,15 +36,24 @@ default_schedule(;
 )
 
 """
-Per-size-tier network widths, **parameter-matched across the three models** so the
-capacity comparison isolates inductive bias rather than raw capacity. Widths are
-placeholders pending the Phase-0b capacity sweep; use `paramcount(case, m)` to
-check the match across the three architectures.
+The capacity grid for the saturation sweep: per-architecture hidden-layer widths
+(**fixed 3 hidden layers**, capacity varied by width only) at a sequence of target
+parameter counts. Within a target the three architectures are roughly
+parameter-matched (exactly so at the top, `p8000`); check with `paramcount(case,
+m)`. A G-CNN width entry counts *regular-representation* channels (each `|G|`
+feature maps after synthesis), so `[1,1,1]` is a valid minimal G-CNN (~120 params).
+Only `conv` extends to `p16000`: the equivariant rollout's `|G|·c·n³` activation
+OOMs past ~8k and the inductive-bias models saturate well before, so `equi`/`tbnn`
+stop at `p8000`. The grid is open-ended — add a point (e.g. a `p24000` conv), rerun,
+and the cache fills in only the new coordinates.
 """
 default_tiers() = (;
-    small     = (; conv = [8, 16, 32] , equi = [4, 4, 8] , tbnn = [10, 16, 32]),
-    medium    = (; conv = [12, 24, 64], equi = [4, 8, 8] , tbnn = [12, 24, 64]),
-    saturated = (; conv = [44, 64, 64], equi = [4, 8, 16], tbnn = [46, 64, 64]),
+    p120 = (; conv = [3, 5, 6], equi = [1, 1, 1], tbnn = [3, 5, 6]),
+    p400 = (; conv = [6, 10, 14], equi = [2, 2, 2], tbnn = [6, 10, 14]),
+    p1200 = (; conv = [10, 18, 32], equi = [2, 3, 5], tbnn = [10, 18, 32]),
+    p3000 = (; conv = [22, 36, 44], equi = [4, 5, 8], tbnn = [22, 36, 44]),
+    p8000 = (; conv = [44, 64, 64], equi = [4, 8, 16], tbnn = [46, 64, 64]),
+    p16000 = (; conv = [64, 96, 96]),
 )
 
 """
@@ -70,10 +79,10 @@ function case_snellius(;
         forced = true,
         totalenergy = 0.2,
         warmup_tstop = 0.05,
-        # train_sampling = (; nsnap = 8, nturnover = 2),
-        train_sampling = (; nsnap = 8, nturnover = 0.05),
-        # test_sampling = (; nsnap = 40, nturnover = 1),
-        test_sampling = (; nsnap = 40, nturnover = 0.05),
+        # Production sampling. For a quick structural smoke test, drop both
+        # nturnover to ~0.05 (short rollout, ~free).
+        train_sampling = (; nsnap = 8, nturnover = 2),
+        test_sampling = (; nsnap = 40, nturnover = 1),
         tgv_sampling = (; nsnap = 100, tconv = 20),   # decaying TGV: span tconv convective times
         filters_train = [2.0, 3.0, 4.0],          # Δ/h; window [2, 5] (ReExperiment.md §B)
         filters_test = [2.5, 3.5, 5.0],           # interp {2.5, 3.5} + extrap {5}
@@ -97,7 +106,7 @@ function dns_runs()
     train = [(; visc, seed = 1, role = :train) for visc in (1.5e-4, 2.5e-4, 4.0e-4)]
     test = [
         (; visc = 2.5e-4, seed = 2, role = :test_indist),   # new seed, trained ν
-        # (; visc = 1.0e-4, seed = 3, role = :test_ood),      # higher Re, held-out ν
+        (; visc = 1.0e-4, seed = 3, role = :test_ood),      # higher Re, held-out ν
     ]
     return (; train, test, all = [train; test])
 end

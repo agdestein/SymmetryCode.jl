@@ -37,7 +37,7 @@ This is the spine of the codebase (`src/experiment.jl`). The swept axes — visc
 - **`case`** (`case_snellius()`) — everything shared across the whole sweep: grid (`l`, `n_dns`, `n_les`), `cfl`, sampling schedules, train/test filter ratios, the size tiers, the training `schedule`, the artifact `rootdir` (cluster) and figure `plotdir`. Never holds a swept axis.
 - **Run coordinates** — `dns_runs()` returns `(; visc, seed, role)` for the forced HIT runs (`role ∈ {:train, :test_indist, :test_ood}`); `tgv_runs()` returns `(; visc, seed, role=:tgv, Re_target)` for the decaying Taylor-Green test. A run is identified by `(visc, seed)`.
 - **Filter ratio** — `Δ_factor` (filter width `Δ = Δ_factor · l / n_les`). Training uses `case.filters_train`, tests use `case.filters_test`.
-- **Model coordinate** — `(; arch, tier, netseed, use_redelta)` with `arch ∈ {:conv, :equi, :tbnn}`, `tier ∈ keys(case.tiers)`. A **family** is the same tuple minus `netseed` (`familyname`); the seed sweep aggregates over `netseed`. Classical closures are bare symbols (`:nomo`, `:clar`, `:smag`, `:dynsmag`, `:vers`, `:bard`).
+- **Model coordinate** — `(; arch, tier, netseed, use_redelta)` with `arch ∈ {:conv, :equi, :tbnn}`, `tier ∈ keys(case.tiers)`. The tiers form a **capacity grid** `pN` (target ≈ N parameters, fixed 3 hidden layers, width-only scaling; roughly parameter-matched across archs within a tier — check with `paramcount`). `conv` extends highest (`p16000`); `equi`/`tbnn` stop at `p8000` (the equivariant rollout's `|G|·c·n³` activation OOMs past ~8k, and they saturate earlier). A **family** is the tuple minus `netseed` (`familyname`); the seed sweep aggregates over `netseed`. Classical closures are bare symbols (`:nomo`, `:clar`, `:smag`, `:dynsmag`, `:vers`, `:bard`).
 
 `make_setup(case, dns, Δ_factor)` derives the per-`(ν, Δ)` `setup` view (the NamedTuple the rest of the pipeline destructures) **once**, from coordinates — never rebuilt from another setup. **Pure path functions** in `experiment.jl` locate every artifact from its coordinates, so no block destructures-and-rebuilds a setup to find its inputs:
 
@@ -64,17 +64,23 @@ case_snellius()  +  dns_runs() / tgv_runs()        (loose coordinates)
   create_dns(case, dns)            → dnsfile               (DNS warm-up; not for TGV)
   create_data(case, dns)           → dnsmetafile + per-Δ fieldsfile / lesmetafile
   create_data_tgv(case, tgv)       → same schema from a decaying analytic TGV
-  train_models(case; archs × tiers × use_redelta × netseeds)  → psfile
+  train_model(case, m, trainpool)  per m in the purposeful model lists  → psfile
   per (dns, Δf) eval point:
     compute_sfs_stats (reduce-on-the-fly)  → sfsstatsfile               (a-priori)
     solve_les (reduce-on-the-fly)          → apostfile (+ apostfieldsfile showcase)
     apriori_equivariance_error             → equipriorfile
     compute_redelta_binning                → redeltabinningfile
     get_seed_statistics                    → seedstatsfile             (netseed spread)
-  plot_*                                   → figdir / dnsfigdir / case.plotdir
+  plot_saturation / plot_trend_vs_redelta / plot_* → figdir / dnsfigdir / case.plotdir
 ```
 
-`run-les.jl` drives the forced grid (train once over `build_trainpool(case)`, then loop the test points with a lazy per-model build + `clean()` between models); `run-tgv.jl` reuses the same trained `psfile`s on the TGV `(tgv, Δf)` points. The H2 deliverable is `plot_trend_vs_redelta` — three trends (dissipation ratio, a-priori error, a-posteriori error) vs global Re_Δ across the test grid, `use_redelta` on/off.
+`run-les.jl` assembles the model coordinates into a few **purposeful lists** (never one Cartesian product), each broad along a single axis, and trains every distinct model once over `build_trainpool(case)`:
+
+- **A — Saturation** (`plot_saturation`, the headline): +Re, every architecture across its full size grid, evaluated at one in-distribution `(ν, Δ)`. Error vs **parameter count** → all archs saturate to the same floor, the inductive-bias models reach it at far fewer params (Langford–Moser optimal closure).
+- **B — Equal capacity / equivariance**: the matched top tier (`config.top`, `:p8000`) ±Re at the same in-distribution point — the bars, equivariance, errors + timing tables (reads A's artifacts).
+- **C — Re_Δ trend** (`plot_trend_vs_redelta`): top tier ±Re across the full `(ν, Δ)` test grid → dissipation ratio / a-priori error / a-posteriori error vs global Re_Δ.
+
+A is broad in *size* / narrow in *eval*; C is broad in *eval* / narrow in *size*; the +Re top models are shared (trained once, `all_models` dedupes). `run-tgv.jl` (**D**) reuses C's top-tier ±Re `psfile`s on the TGV `(tgv, Δf)` points. The suite is cache-guarded per coordinate, so adding a size or a seed later recomputes only the gaps.
 
 ## Architecture
 
@@ -91,7 +97,7 @@ case_snellius()  +  dns_runs() / tgv_runs()        (loose coordinates)
 - **`data.jl`** — DNS warm-up (`create_dns`), `(ūbar, τ)` generation (`create_data`, `create_data_tgv`; both call `sfs!`), the CPU dataloaders (`create_dataloader`, `create_dataloader_tbnn`), and `append_redelta` (the Re_Δ input channel).
 - **`les.jl`** — LES RHS with closure (`les!`) and `solve_les` / `solve_les!`: the a-posteriori rollout **reduces metrics on the fly and discards the heavy LES fields** (one rollout → one light `apostfile`; `savefields` keeps the field series for the single showcase case).
 - **`analysis.jl`** — `compute_sfs_stats` (a-priori stats, **reduced on the fly** — the closure is evaluated per snapshot and reduced immediately, never writing a predicted-SFS field series), `apriori_equivariance_error`, `compute_redelta_binning` (the Phase-0 diagnostic), and `get_seed_statistics` (netseed aggregate → `seedstatsfile`).
-- **`plots.jl`** — all `plot_*`, the coordinate-aware `plotlabel`/`plotstyle` (a model resolves to its arch's label/color; the `+Re` variant is dashed), `getlabels`/`getstyles` (the canonical style table — **every plot uses it**), `plot_trend_vs_redelta` (the H2 figure), and `write_errors_table` (the paper-ready LaTeX, from the seed aggregate + classical values).
+- **`plots.jl`** — all `plot_*`, the coordinate-aware `plotlabel`/`plotstyle` (a model resolves to its arch's label/color; the `+Re` variant is dashed; `tierlabel`/`famlabel` add the capacity tag where several sizes share an axis), `getlabels`/`getstyles` (the canonical style table — **every plot uses it**), `plot_saturation` (error vs parameter count — the headline), `plot_trend_vs_redelta` (the Re_Δ trend), and `write_errors_table` / `write_timing_table` (the paper-ready LaTeX, from the seed aggregate + classical values).
 - **`verify.jl`** — REPL-only sanity checks (`test_equivariant_*`, `dns_aid`). Not part of the pipeline.
 
 ## Conventions to know before editing
@@ -116,6 +122,6 @@ case_snellius()  +  dns_runs() / tgv_runs()        (loose coordinates)
 
 **Net vs. solver precision.** Networks train in `schedule.precision` (default `Float32`); the solver, data generation, and spectral fields stay `Float64`. `psfile` keeps the trained precision, but `build_model` upcasts `ps` to `Float64` at load, so the inference forward pass through `fullchain`/`tbnn` is uniformly `Float64` (otherwise the equivariance diagnostic would be pinned to Float32 eps).
 
-**Seed sweep.** `netseed` is a model coordinate (network init + batch shuffling only; the data is unaffected). `train_models` sweeps `archs × tiers × use_redelta × netseeds`; `get_seed_statistics` aggregates the per-`familyname` spread at each eval point into `seedstatsfile`, which the trend figure, the seed-aggregated bar plots (a-priori / dissipation / backscatter / equivariance, mean ± std whiskers), and `write_errors_table` all consume. The dense per-curve figures (densities, budget, spectra, error-vs-time) instead take a curated one-seed, single-tier model subset (`series_models` in the drivers), and only the bars/table/trend carry every family.
+**Seed sweep.** `netseed` is a model coordinate (network init + batch shuffling only; the data is unaffected). The driver uses more seeds for the cheap saturation curve (`netseeds_curve`, one eval point) than the expensive top-tier grid (`netseeds_grid`, full ν × Δ). `get_seed_statistics` aggregates the per-`familyname` spread at each eval point into `seedstatsfile`, which the trend figure, the seed-aggregated bar plots (a-priori / dissipation / backscatter / equivariance, mean ± std whiskers), and `write_errors_table` all consume; `plot_saturation` reads the per-model artifacts directly (no aggregate file) so adding sizes needs no rebuild. The dense per-curve figures (densities, budget, spectra, error-vs-time) take a curated one-seed, top-tier subset (`series_models` in the drivers).
 
 **Shell-clamp forcing.** Forced HIT maintains low-wavenumber shell energy at its initial value rather than an explicit body force (`shells = energy_shells(grid, [1,2], u)`; per-step `maintain_shell_energy!`). The decaying TGV is unforced — `solve_les` derives `forced = case.forced && dns.role !== :tgv`.
