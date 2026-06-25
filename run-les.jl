@@ -13,6 +13,16 @@
 # A is broad in *size* / narrow in *eval*; C is broad in *eval* / narrow in *size*;
 # B reads A/C's artifacts at the in-distribution point. Artifacts self-locate from
 # coordinates, so adding a size or a seed later recomputes only the gaps.
+#
+# SLURM array distribution (mirrors create-data.jl). The per-model work — train the
+# closure, then evaluate it at every point it appears in — is the distributable
+# unit. With SLURM_ARRAY_TASK_ID=i set this process handles only `worklist[i]`;
+# unset, it runs the whole list serially. Partitioning by *model* (not by eval
+# point) gives every psfile exactly one writer, so trainings never race. The
+# model-independent references, the Phase-0 binning, and every cross-model
+# figure/table run only in the serial pass — so after an array run, rerun once
+# without the array env to aggregate (the per-model loop is then all cache hits).
+# Submit with `--array=1-N`, N = the worklist length logged at startup.
 
 @info "Loading packages"
 flush(stderr)
@@ -98,51 +108,113 @@ reset_tables(case; kwargs...) = S.reset_tables(case; filename = tablefile(), kwa
 tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile(), kwargs...)
 
 """
-Evaluate `models` at eval point (dns, Δf): the reference once, then each model
-(lazy build, GPU reclaimed between models). `equi = true` also computes the
-a-priori equivariance error (only worthwhile where the equal-capacity figures read
-it — the in-distribution point).
+Compute the model-independent reference artifacts at eval point (dns, Δf): the
+a-priori SFS reference and the no-closure a-posteriori rollout. Shared by every
+figure, so it runs in the serial aggregation pass (not per array task).
 """
-function evaluate!(case, config, models, dns, Δf; equi = false)
-    setup = S.make_setup(case, dns, Δf)
+function eval_ref!(case, config, dns, Δf)
     :apriori in config.experiments &&
         S.compute_sfs_stats(case, :ref, dns, Δf; force = :apriori in config.force)
     :aposteriori in config.experiments &&
         S.solve_les(case, :ref, dns, Δf; force = :aposteriori in config.force)
-    for m in models
-        S.clean()
-        local built = nothing
-        getmodel() = (built === nothing && (built = buildone(case, setup, m)); built)
-        :apriori in config.experiments &&
-            S.compute_sfs_stats(case, m, dns, Δf, getmodel; force = :apriori in config.force)
-        :aposteriori in config.experiments &&
-            S.solve_les(case, m, dns, Δf, getmodel; force = :aposteriori in config.force)
-        equi && :equivariance in config.experiments && m isa NamedTuple &&
-            S.apriori_equivariance_error(case, m, dns, Δf, getmodel; force = :equivariance in config.force)
-        built = nothing
-        S.clean()
-    end
+    return
+end
+
+"""
+Evaluate a single closure `m` at eval point (dns, Δf): a-priori SFS stats and the
+a-posteriori rollout (lazy build, GPU reclaimed around it). `equi = true` also
+computes the a-priori equivariance error (only worthwhile at the equal-capacity
+point, where the equivariance figure reads it).
+"""
+function eval_model!(case, config, m, dns, Δf; equi = false)
+    setup = S.make_setup(case, dns, Δf)
+    S.clean()
+    local built = nothing
+    getmodel() = (built === nothing && (built = buildone(case, setup, m)); built)
+    :apriori in config.experiments &&
+        S.compute_sfs_stats(case, m, dns, Δf, getmodel; force = :apriori in config.force)
+    :aposteriori in config.experiments &&
+        S.solve_les(case, m, dns, Δf, getmodel; force = :aposteriori in config.force)
+    equi && :equivariance in config.experiments && m isa NamedTuple &&
+        S.apriori_equivariance_error(case, m, dns, Δf, getmodel; force = :equivariance in config.force)
+    built = nothing
+    S.clean()
     return
 end
 
 function main()
     case = get_case()
     config = get_config()
-    reset_tables(case)
-    trainpool = S.build_trainpool(case)
+
+    slurm_id = get(ENV, "SLURM_ARRAY_TASK_ID", nothing)
+    task_id = isnothing(slurm_id) ? nothing : parse(Int, slurm_id)
+    serial = isnothing(task_id)
+
+    serial && reset_tables(case)
+
+    # Trainpool load is heavy; build it lazily so eval-only / already-trained tasks
+    # and the serial aggregation rerun (all cache hits) never pay for it.
+    local trainpool = nothing
+    gettrainpool() = (isnothing(trainpool) && (trainpool = S.build_trainpool(case)); trainpool)
 
     indist = first(S.dns_runs().test)        # in-distribution test run (A/B eval point)
     Δ_ab = first(case.filters_test)          # representative filter for A/B
     gridpoints = [(dns, Δf) for dns in S.dns_runs().test for Δf in case.filters_test]
 
+    # The distributable unit: one closure handled end-to-end. Everyone is evaluated
+    # at the A/B in-distribution point; the classical baselines and the ±Re ablation
+    # models additionally span the full C grid (the A/B point is itself one of the
+    # grid points, hence the dedup below).
+    worklist = [config.classical; all_models(config)]
+    cgrid_closures = [config.classical; ablation_models(config)]
+    @info "LES worklist: $(length(worklist)) units (SLURM array range 1-$(length(worklist)))"
+    flush(stderr)
+
     #######################
-    # Train every distinct model once over the trainpool (explicit list, no product).
+    # Per-model work (distributed): train (learned only), then evaluate at every
+    # point the closure appears in. A/B is the only point that gets equivariance.
     #######################
-    if config.train
-        for m in all_models(config)
-            S.train_model(case, m, trainpool; force = :train in config.force)
-            S.clean()
+    for (i, m) in enumerate(worklist)
+        serial || i == task_id || continue
+        @info "===== unit $i/$(length(worklist)): $(S.modelname(m)) ====="
+        flush(stderr)
+
+        if config.train && m isa NamedTuple && (:train in config.force || !isfile(S.psfile(case, m)))
+            S.train_model(case, m, gettrainpool(); force = :train in config.force)
         end
+        S.clean()
+
+        points = [(indist, Δ_ab)]
+        m in cgrid_closures && append!(points, [p for p in gridpoints if p != (indist, Δ_ab)])
+        for (dns, Δf) in points
+            eval_model!(case, config, m, dns, Δf; equi = (dns, Δf) == (indist, Δ_ab))
+        end
+    end
+
+    # An array task is done after its slice; everything below is the serial pass.
+    if !serial
+        @info "Done (array task $(task_id))."
+        flush(stderr)
+        return
+    end
+
+    #######################
+    # Serial aggregation. Model-independent references at every eval point + the
+    # Phase-0 Re_Δ binning per grid point, then the training timing/curves and every
+    # cross-model figure/table. After an array run, rerun once without the array env:
+    # the per-model loop above is all cache hits, so only this section does work.
+    #######################
+    for (dns, Δf) in unique([(indist, Δ_ab); gridpoints])
+        eval_ref!(case, config, dns, Δf)
+    end
+    if :redelta_binning in config.experiments
+        for (dns, Δf) in gridpoints
+            S.compute_redelta_binning(case, dns, Δf; force = :redelta_binning in config.force)
+            S.plot_redelta_binning(case, dns, Δf)
+        end
+    end
+
+    if config.train
         timings = NamedTuple(
             S.modelkey(m) => (isfile(S.psfile(case, m)) ? load(S.psfile(case, m), "timing") : :missing)
                 for m in all_models(config)
@@ -151,30 +223,6 @@ function main()
     end
     :plots in config.experiments && S.plot_training(case, all_models(config))
 
-    #######################
-    # A + B: every model at the in-distribution point (saturation sizes + top ±Re),
-    # with equivariance — the saturation curve and the equal-capacity figures.
-    #######################
-    @info "===== A/B: in-distribution point (visc=$(indist.visc), Δ=$(Δ_ab)) ====="
-    flush(stderr)
-    evaluate!(case, config, [config.classical; all_models(config)], indist, Δ_ab; equi = true)
-
-    #######################
-    # C: top tier ±Re across the full (ν, Δ) test grid — the Re_Δ generalization trend.
-    #######################
-    for (dns, Δf) in gridpoints
-        @info "===== C: grid point (role=$(dns.role), visc=$(dns.visc), Δ=$(Δf)) ====="
-        flush(stderr)
-        evaluate!(case, config, [config.classical; ablation_models(config)], dns, Δf)
-        if :redelta_binning in config.experiments
-            S.compute_redelta_binning(case, dns, Δf; force = :redelta_binning in config.force)
-            S.plot_redelta_binning(case, dns, Δf)
-        end
-    end
-
-    #######################
-    # Figures + tables
-    #######################
     :saturation in config.experiments &&
         S.plot_saturation(case, indist, Δ_ab, saturation_families(config), config.netseeds_curve)
 
