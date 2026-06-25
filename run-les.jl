@@ -113,6 +113,10 @@ function main()
         tabulate(case, "Training wall-time (s) per learned coordinate", timings; digits = 1)
     end
 
+    # Sweep-global training-convergence diagnostic (one figure, all coordinates).
+    :plots in config.experiments &&
+        S.plot_training(case, learned_models(config))
+
     #######################
     # Per-eval-point evaluation across the (ν, Δ) test grid
     #######################
