@@ -94,6 +94,12 @@ function main()
         end
     end
 
+    # Cross-dataset DNS-stats table (paper-ready). Only when this process owns all
+    # runs (not a single SLURM-array task — else parallel tasks race on the file);
+    # rerun without the array env once the data exists to emit it. Skips any run
+    # whose dnsmetafile isn't generated yet.
+    isnothing(task_id) && S.write_dns_table(case, S.dns_runs().all)
+
     @info "Done."
     flush(stderr)
     return
