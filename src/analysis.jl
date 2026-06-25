@@ -284,8 +284,9 @@ end
 """
 A-priori equivariance error for closure `m` on test dataset (dns, Δf): compares
 `R(model(G))` with `model(R(G))` for every octahedral group element on the first
-filtered-DNS snapshot. Persists to `equipriorfile(case, dns, Δf, m)`; load all
-closures back with [`load_equivariance_errors`](@ref) for plotting.
+filtered-DNS snapshot. Persists the per-element error series to
+`equipriorfile(case, dns, Δf, m)`; [`get_seed_statistics`](@ref) reduces it to the
+per-family mean that [`plot_equivariance_bar`](@ref) and the errors table consume.
 """
 function apriori_equivariance_error(case, m, dns, Δf, getmodel; force = false)
     file = equipriorfile(case, dns, Δf, m)
@@ -319,15 +320,6 @@ function apriori_equivariance_error(case, m, dns, Δf, getmodel; force = false)
         err
     end
 end
-
-"""
-Load the per-closure a-priori equivariance error series persisted by
-[`apriori_equivariance_error`](@ref) on (dns, Δf), keyed by [`modelname`](@ref)
-for [`plot_equivariance_errors`](@ref).
-"""
-load_equivariance_errors(case, models, dns, Δf) = NamedTuple(
-    modelname(m) => load_object(equipriorfile(case, dns, Δf, m)) for m in models
-)
 
 """
 Aggregate the netseed spread of the scalar closure metrics at evaluation point

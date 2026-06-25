@@ -62,6 +62,17 @@ plotstyle(m::Symbol) = getstyles()[m]
 plotstyle(m::NamedTuple) =
     m.use_redelta ? (; getstyles()[m.arch]..., linestyle = :dash) : getstyles()[m.arch]
 
+"Short capacity-tier tag (`small→S`, `medium→M`, `saturated→L`) for compact labels."
+tierlabel(t::Symbol) = t === :small ? "S" : t === :medium ? "M" : t === :saturated ? "L" : string(t)
+
+"""
+Bar-chart tick label: [`plotlabel`](@ref) plus the tier tag for a learned family
+(the bar plots are the one place several tiers share an axis, so color = arch and
+linestyle = +Re no longer disambiguate); classical symbols are left unchanged.
+"""
+famlabel(m::Symbol) = plotlabel(m)
+famlabel(m::NamedTuple) = "$(plotlabel(m)) $(tierlabel(m.tier))"
+
 """
 Inertial-range reference spectrum and the normalization that collapses the
 data onto the universal `κ̃^{-p}` shape.
@@ -181,6 +192,9 @@ function plot_densities(case, dns, Δf, models; dolog = true)
             label = plotlabel(m), color = plotstyle(m).color, linestyle = plotstyle(m).linestyle,
         )
     end
+    # Clamp the log-y floor so the meaningless ~1e-15 KDE-tail noise is out of
+    # frame; the bulk + backscatter shoulder (down to ~1e-4) stay readable.
+    dolog && ylims!(ax, 1.0e-4, nothing)
     Legend(
         fig[0, 1], ax;
         tellwidth = false, tellheight = true, framevisible = false, orientation = :horizontal,
@@ -193,82 +207,48 @@ function plot_densities(case, dns, Δf, models; dolog = true)
 end
 
 """
-Bar plot of median pointwise SFS dissipation rate `ε_sfs = -τᵢⱼSᵢⱼ` per
-model, normalized by the filtered-DNS reference median. Bars above 1.0 are
-over-dissipative (smag/dynsmag); bars below 1.0 are under-dissipative
-(clark). The reference is shown as a horizontal dashed line at 1.0.
-
-Drain convention (positive = drain); same as [`compute_sfs_stats`](@ref).
-`models` must include `:ref` (the normalization baseline).
+Bar plot of the median pointwise SFS dissipation rate `ε_sfs = -τᵢⱼSᵢⱼ` per model,
+normalized by the filtered-DNS reference median (1.0 = reference, the dashed
+line). Learned `families` are aggregated over `netseeds` (whisker = ±std); the
+`classical` baselines are single bars. Below 1 ⇒ under-dissipative (Clark), above
+1 ⇒ over-dissipative. Same drain convention as [`compute_sfs_stats`](@ref).
 """
-function plot_dissipation_bar(case, dns, Δf, models)
-    refstats = load_object(sfsstatsfile(case, dns, Δf, :ref)).diss
-    plot_models = filter(!=(:ref), collect(models))
-    for (momkey, momlabel) in [(:median, "Median"), (:mean, "Mean")]
-        ref_med = refstats[momkey]
-        normalized = [
-            load_object(sfsstatsfile(case, dns, Δf, m)).diss[momkey] / ref_med
-                for m in plot_models
-        ]
-        fig = Figure(; size = (450, 340))
-        ax = Axis(
-            fig[1, 1];
-            xticks = (1:length(plot_models), [plotlabel(m) for m in plot_models]),
-            ylabel = "$(momlabel) dissipation",
-            xticklabelrotation = π / 6,
-        )
-        barplot!(
-            ax, 1:length(plot_models), normalized;
-            bar_labels = :y, color = [plotstyle(m).color for m in plot_models],
-        )
-        hlines!(ax, [1.0]; color = :black, linestyle = :dash, label = "Reference")
-        Legend(
-            fig[0, :], ax;
-            tellwidth = false, tellheight = true, framevisible = false, horizontal = true,
-        )
-        ylims!(ax, 0, maximum(normalized) + 0.15)
-        rowgap!(fig.layout, 5)
-        file = joinpath(figdir(case, dns, Δf), "dissipation-$(momkey)-bar.pdf")
-        @info "Saving dissipation bar plot to $(file)"
-        save(file, fig; backend = CairoMakie)
-    end
-    return
+function plot_dissipation_bar(case, dns, Δf, families, netseeds; classical = (:nomo, :clar))
+    agg = get_seed_statistics(case, families, dns, Δf, netseeds)
+    items = [collect(classical); collect(families)]
+    fig = Figure(; size = (max(520, 38 * length(items) + 150), 360))
+    ax = Axis(fig[1, 1]; ylabel = "Median SFS dissipation / reference")
+    vals = metric_bar!(ax, case, dns, Δf, items, agg, :diss_median)
+    hlines!(ax, [1.0]; color = :black, linestyle = :dash, label = "Reference")
+    ymax = maximum(v -> isnan(v.c) ? 0.0 : v.c + v.s, vals; init = 1.0)
+    ylims!(ax, 0, ymax + 0.15)
+    axislegend(ax; position = :rt, framevisible = false)
+    file = joinpath(figdir(case, dns, Δf), "dissipation-bar.pdf")
+    @info "Saving dissipation bar plot to $(file)"
+    save(file, fig; backend = CairoMakie)
+    return fig
 end
 
 """
-Bar plot of the local backscatter fraction per model — the fraction of
-points where the pointwise SFS dissipation rate `ε_sfs = -τᵢⱼSᵢⱼ` is
-negative (equivalently, `τᵢⱼSᵢⱼ > 0`). Smagorinsky-type closures of the
-form `τ = -2νₜS` with `νₜ ≥ 0` are mathematically pinned to zero; the
-filtered-DNS reference is shown as a horizontal dashed line at its
-absolute fraction.
-
-`models` must include `:ref` (drawn as the dashed baseline).
+Bar plot of the local backscatter fraction per model — the fraction of points with
+`ε_sfs = -τᵢⱼSᵢⱼ < 0`. Learned `families` aggregated over `netseeds` (whisker =
+±std), `classical` as single bars; the filtered-DNS reference is the dashed line
+at its absolute fraction. Smagorinsky-type `τ = -2νₜS` (νₜ ≥ 0) is pinned to zero.
 """
-function plot_backscatter_bar(case, dns, Δf, models)
+function plot_backscatter_bar(case, dns, Δf, families, netseeds; classical = (:nomo, :clar))
     ref_bs = load_object(sfsstatsfile(case, dns, Δf, :ref)).diss.backscatter
-    plot_models = filter(!=(:ref), collect(models))
-    bars = [load_object(sfsstatsfile(case, dns, Δf, m)).diss.backscatter for m in plot_models]
-
-    fig = Figure(; size = (520, 340))
-    ax = Axis(
-        fig[1, 1];
-        xticks = (1:length(plot_models), [plotlabel(m) for m in plot_models]),
-        ylabel = "Backscatter fraction",
-        xticklabelrotation = π / 6,
-    )
-    barplot!(
-        ax, 1:length(plot_models), bars;
-        bar_labels = :y, color = [plotstyle(m).color for m in plot_models],
-    )
+    agg = get_seed_statistics(case, families, dns, Δf, netseeds)
+    items = [collect(classical); collect(families)]
+    fig = Figure(; size = (max(520, 38 * length(items) + 150), 360))
+    ax = Axis(fig[1, 1]; ylabel = "Backscatter fraction")
+    vals = metric_bar!(ax, case, dns, Δf, items, agg, :backscatter)
     hlines!(
         ax, [ref_bs];
-        color = :black, linestyle = :dash,
-        label = "Reference ($(round(ref_bs * 100; digits = 1))%)",
+        color = :black, linestyle = :dash, label = "Reference ($(round(ref_bs * 100; digits = 1))%)",
     )
-    ylims!(ax, 0, max(maximum(bars; init = 0.0), ref_bs) * 1.15)
+    ymax = maximum(v -> isnan(v.c) ? 0.0 : v.c + v.s, vals; init = ref_bs)
+    ylims!(ax, 0, max(ymax, ref_bs) * 1.15)
     axislegend(ax; position = :rt, framevisible = false)
-
     file = joinpath(figdir(case, dns, Δf), "backscatter-bar.pdf")
     @info "Saving backscatter bar plot to $(file)"
     save(file, fig; backend = CairoMakie)
@@ -276,29 +256,21 @@ function plot_backscatter_bar(case, dns, Δf, models)
 end
 
 """
-Two-panel bar plot of a-priori predictive metrics per model:
-relative L² error of the predicted SFS tensor (left, lower is better) and
-cross-correlation with the filtered-DNS reference (right, higher is better).
-
-`models` should not include `:ref` (self-comparison is trivial).
+Two-panel a-priori bar plot: relative L² error of the predicted SFS tensor (left,
+lower is better) and cross-correlation with the filtered-DNS reference (right,
+higher is better). Learned `families` aggregated over `netseeds` (whisker = ±std),
+`classical` as single bars.
 """
-function plot_apriori_bar(case, dns, Δf, models)
-    plot_models = collect(models)
-    stats = [load_object(sfsstatsfile(case, dns, Δf, m)).apriori for m in plot_models]
-    re = [s.relerr for s in stats]
-    cc = [s.crosscor for s in stats]
-    barcolors = [plotstyle(m).color for m in plot_models]
-
-    fig = Figure(; size = (820, 340))
-    xtks = (1:length(plot_models), [plotlabel(m) for m in plot_models])
-    ax_re = Axis(fig[1, 1]; xticks = xtks, ylabel = "Relative error", xticklabelrotation = π / 6)
-    barplot!(ax_re, 1:length(plot_models), re; bar_labels = :y, color = barcolors)
-    ax_cc = Axis(fig[1, 2]; xticks = xtks, ylabel = "Cross-correlation", xticklabelrotation = π / 6)
-    barplot!(ax_cc, 1:length(plot_models), cc; bar_labels = :y, color = barcolors)
-
+function plot_apriori_bar(case, dns, Δf, families, netseeds; classical = (:nomo, :clar))
+    agg = get_seed_statistics(case, families, dns, Δf, netseeds)
+    items = [collect(classical); collect(families)]
+    fig = Figure(; size = (max(900, 70 * length(items) + 120), 360))
+    ax_re = Axis(fig[1, 1]; ylabel = "Relative error")
+    ax_cc = Axis(fig[1, 2]; ylabel = "Cross-correlation")
+    metric_bar!(ax_re, case, dns, Δf, items, agg, :relerr)
+    metric_bar!(ax_cc, case, dns, Δf, items, agg, :crosscor)
     ylims!(ax_re, 0.0, 1.1)
     ylims!(ax_cc, 0.0, 1.1)
-
     file = joinpath(figdir(case, dns, Δf), "apriori-bar.pdf")
     @info "Saving a-priori bar plot to $(file)"
     save(file, fig; backend = CairoMakie)
@@ -415,9 +387,10 @@ function plot_dissipation_tgv(
 end
 
 """
-Classical-closure metric at one eval point (no seed spread): `:diss_median` is the
-median SFS dissipation normalized by the `:ref` median, `:relerr` the a-priori
-tensor error, `:e_post` the time-mean a-posteriori solution error.
+Classical-closure metric at one eval point (no seed spread). `metric ∈`:
+`:diss_median` (median SFS dissipation normalized by the `:ref` median), `:relerr`
+/ `:crosscor` (a-priori tensor error / cross-correlation), `:backscatter` (local
+backscatter fraction), `:e_post` (time-mean a-posteriori solution error).
 """
 function classical_metric(case, dns, Δf, c, metric)
     if metric === :diss_median
@@ -425,9 +398,46 @@ function classical_metric(case, dns, Δf, c, metric)
         return load_object(sfsstatsfile(case, dns, Δf, c)).diss.median / ref
     elseif metric === :relerr
         return load_object(sfsstatsfile(case, dns, Δf, c)).apriori.relerr
+    elseif metric === :crosscor
+        return load_object(sfsstatsfile(case, dns, Δf, c)).apriori.crosscor
+    elseif metric === :backscatter
+        return load_object(sfsstatsfile(case, dns, Δf, c)).diss.backscatter
     else # :e_post
         return mean(load_object(apostfile(case, dns, Δf, c)).e_post)
     end
+end
+
+"""
+`(; c, s)` for `metric` at (dns, Δf): a learned *family* `(; arch, tier,
+use_redelta)` returns the seed mean/std from the `agg` aggregate (see
+[`get_seed_statistics`](@ref)); a classical symbol returns its single value
+([`classical_metric`](@ref), `s = 0`). `c = NaN` if a family has no surviving seed.
+"""
+function metric_value(case, dns, Δf, m, agg, metric)
+    if m isa NamedTuple
+        fam = get(agg, familyname(m), nothing)   # absent if the aggregate cached a subset
+        isnothing(fam) && return (; c = NaN, s = 0.0)
+        v = collect(skipmissing(getproperty(fam, metric)))
+        return (; c = isempty(v) ? NaN : mean(v), s = length(v) > 1 ? std(v) : 0.0)
+    end
+    return (; c = classical_metric(case, dns, Δf, m, metric), s = 0.0)
+end
+
+"""
+Draw `metric` as one bar per item in `items` (a mix of classical symbols and
+learned families) on `ax`, learned families whiskered by their seed ±std. Sets
+the x-ticks to [`famlabel`](@ref)s; returns the per-item `(; c, s)` values.
+"""
+function metric_bar!(ax, case, dns, Δf, items, agg, metric)
+    vals = [metric_value(case, dns, Δf, m, agg, metric) for m in items]
+    x = collect(1:length(items))
+    barplot!(ax, x, [v.c for v in vals]; color = [plotstyle(m).color for m in items])
+    pos = findall(v -> v.s > 0, vals)
+    isempty(pos) ||
+        errorbars!(ax, x[pos], [vals[i].c for i in pos], [vals[i].s for i in pos]; whiskerwidth = 6)
+    ax.xticks = (x, [famlabel(m) for m in items])
+    ax.xticklabelrotation = π / 6
+    return vals
 end
 
 """
@@ -732,36 +742,45 @@ function plot_field_evolution_tgv(case, tgv, Δf; field = :vortz, ntime = 5, zsl
 end
 
 """
-A-priori equivariance commutation error per octahedral group element, for each
-learned model in `models` with an [`equipriorfile`](@ref) on (dns, Δf). The
-equivariant closures sit at machine-eps; the non-equivariant MLP is visibly
-above. Reads the series persisted by [`apriori_equivariance_error`](@ref).
+A-priori equivariance commutation error per learned family at (dns, Δf): the mean
+over the 48 octahedral elements of `‖R(model(G)) − model(R(G))‖ / ‖model(R(G))‖`,
+aggregated over `netseeds` (whisker = ±std), as one marker per family on a log
+axis. The equivariant closures (G-CNN, TBNN) sit at machine-eps; the
+non-equivariant MLP is O(1). One bar per family replaces the dense per-element
+trace. Reads the aggregate from [`get_seed_statistics`](@ref).
 """
-function plot_equivariance_errors(case, dns, Δf, models)
-    fig = Figure(; size = (400, 340))
+function plot_equivariance_bar(case, dns, Δf, families, netseeds)
+    agg = get_seed_statistics(case, families, dns, Δf, netseeds)
+    items = collect(families)
+    vals = [metric_value(case, dns, Δf, m, agg, :equi) for m in items]
+    keep = findall(v -> isfinite(v.c) && v.c > 0, vals)
+    isempty(keep) && return nothing
+
+    fig = Figure(; size = (max(460, 55 * length(keep) + 120), 340))
     ax = Axis(
         fig[1, 1];
-        yscale = log10,
-        xlabel = "Group element",
-        ylabel = "Error",
-        xticks = [1, 8, 16, 24, 32, 40, 48],
+        yscale = log10, ylabel = "Mean equivariance error",
+        xticks = (1:length(keep), [famlabel(items[i]) for i in keep]),
+        xticklabelrotation = π / 6,
     )
-    ylims!(ax, 1.0e-17, 1)
-    for m in models
-        m isa NamedTuple || continue                       # learned closures only
-        isfile(equipriorfile(case, dns, Δf, m)) || continue
-        e = max.(load_object(equipriorfile(case, dns, Δf, m)), 1.0e-30)  # zeros → 1e-30
-        scatterlines!(
-            ax, eachindex(e), e;
-            label = plotlabel(m), marker = plotstyle(m).marker, color = plotstyle(m).color,
-        )
+    scatter!(
+        ax, 1:length(keep), [vals[i].c for i in keep];
+        color = [plotstyle(items[i]).color for i in keep], markersize = 13,
+    )
+    # Whiskers only where the spread stays positive on the log axis.
+    wx, wc, ws = Float64[], Float64[], Float64[]
+    for (p, i) in enumerate(keep)
+        v = vals[i]
+        v.s > 0 && v.c > v.s || continue
+        push!(wx, p)
+        push!(wc, v.c)
+        push!(ws, v.s)
     end
-    Legend(
-        fig[0, 1], ax;
-        tellwidth = false, tellheight = true, framevisible = false, horizontal = true, nbanks = 3,
-    )
-    rowgap!(fig.layout, 5)
-    save(joinpath(figdir(case, dns, Δf), "equi-errors.pdf"), fig; backend = CairoMakie)
+    isempty(wx) || errorbars!(ax, wx, wc, ws; whiskerwidth = 8)
+    ylims!(ax, 1.0e-17, 5.0)
+    file = joinpath(figdir(case, dns, Δf), "equi-errors.pdf")
+    @info "Saving equivariance bar plot to $(file)"
+    save(file, fig; backend = CairoMakie)
     return fig
 end
 
@@ -1158,9 +1177,11 @@ end
 
 """
 Write a paper-ready LaTeX `tabular` of the aggregate per-model metrics at
-evaluation point (dns, Δf) to `<plotdir>/<filename>`. Learned-model coordinates in
-`models` are summarized as mean ± std over `netseeds` (from the cached
-[`get_seed_statistics`](@ref) aggregate); classical symbols are single values.
+evaluation point (dns, Δf) to `<plotdir>/<filename>`. One row per learned *family*
+`(; arch, tier, use_redelta)` in `families` — summarized as mean ± std over
+`netseeds` (from the cached [`get_seed_statistics`](@ref) aggregate), the seed
+sweep collapsed — plus one row per `classical` symbol (single values). A `Tier`
+column carries the capacity tier (`--` for classical).
 
 Columns: a-priori SFS tensor error, a-priori cross-correlation, time-mean
 a-posteriori solution error, mean a-priori equivariance error (skipped with
@@ -1180,13 +1201,13 @@ the paper repo (the reference backscatter fraction, needed in the caption, is a
 comment).
 """
 function write_errors_table(
-        case, dns, Δf, models;
-        netseeds = 0:0, include_equi = true, filename = "errors.tex",
+        case, dns, Δf, families, netseeds;
+        classical = (:nomo, :clar), include_equi = true, filename = "errors.tex",
     )
     refstats = load_object(sfsstatsfile(case, dns, Δf, :ref))
     refmed = refstats.diss.median
-    families = [m for m in models if m isa NamedTuple]
     seed = get_seed_statistics(case, families, dns, Δf, netseeds)
+    items = [collect(classical); collect(families)]
 
     # Values below this many fixed-point decimals print in `\e{}` scientific
     # notation instead of widening a whole column (keeps O(1e-15) equi errors out).
@@ -1212,7 +1233,8 @@ function write_errors_table(
     # One descriptor per cell, in column order, for a learned family or classical.
     function rowdescs(m)
         if m isa NamedTuple
-            s = seed[familyname(m)]
+            s = get(seed, familyname(m), nothing)   # absent if the aggregate cached a subset
+            isnothing(s) && return Any[nothing for _ in 1:(include_equi ? 6 : 5)]
             ds = Any[aggcell(s.relerr), aggcell(s.crosscor), aggcell(s.e_post)]
             include_equi && push!(ds, aggcell(s.equi))
             push!(ds, aggcell(s.diss_median))
@@ -1232,7 +1254,7 @@ function write_errors_table(
         push!(ds, onecell(isnothing(stats) ? nothing : stats.diss.backscatter))
         return ds
     end
-    descs = map(rowdescs, collect(models))
+    descs = map(rowdescs, items)
 
     # Per-column uniform precision: each numeric column floors at `bases[j]` and
     # widens to the most decimals any of its fixed-point cells needs to show its
@@ -1255,15 +1277,18 @@ function write_errors_table(
 
     # Format every cell, then pad each column to its widest entry so the source
     # `.tex` stays column-aligned (trailing pad on the last column is trimmed).
+    tiercell(m) = m isa NamedTuple ? string(m.tier) : "--"
     cellrows = [[fmt(ds[j], coldigits[j]) for j in eachindex(bases)] for ds in descs]
     widths = [maximum(length(cr[j]) for cr in cellrows) for j in eachindex(bases)]
-    rows = map(zip(collect(models), cellrows)) do (m, cells)
+    twidth = maximum(length(tiercell(m)) for m in items)
+    rows = map(zip(items, cellrows)) do (m, cells)
         padded = join((rpad(cells[j], widths[j]) for j in eachindex(bases)), " & ")
-        rstrip("    $(rpad(plotlabel(m), 11)) & " * padded) * " \\\\"
+        rstrip("    $(rpad(plotlabel(m), 11)) & $(rpad(tiercell(m), twidth)) & " * padded) * " \\\\"
     end
 
     header = [
         "Model",
+        "            & Tier",
         "            & Closure \\eqref{eq:tensor-error-prior}",
         "            & Cross-corr.",
         "            & Solution \\eqref{eq:tensor-error-post}",
@@ -1282,7 +1307,7 @@ function write_errors_table(
     open(file, "w") do io
         println(io, "% Generated by SymmetryCode write_errors_table; do not edit by hand.")
         println(io, "% Reference backscatter fraction: $(round(refstats.diss.backscatter; digits = 3)).")
-        println(io, "\\begin{tabular}{l $(join(fill("r", ncol), " "))}")
+        println(io, "\\begin{tabular}{l l $(join(fill("r", ncol), " "))}")
         println(io, "    \\toprule")
         foreach(h -> println(io, "    ", h), header)
         println(io, "    \\midrule")

@@ -63,6 +63,22 @@ learned_models(c) = [
 ]
 eval_models(c) = [c.classical; learned_models(c)]
 
+# Curated subsets for the *dense* figures: a single capacity tier (the largest,
+# `last(c.tiers)`) so the per-arch ±Re pairs read apart. The trend uses the
+# saturated families (seed-aggregated); the per-eval series plots use one seed,
+# classical baselines + the saturated learned models.
+trend_families(c) = [
+    (; arch, tier = last(c.tiers), use_redelta = ur)
+        for arch in c.archs for ur in c.use_redelta
+]
+series_models(c) = [
+    c.classical;
+    [
+        (; arch, tier = last(c.tiers), netseed = first(c.netseeds), use_redelta = ur)
+            for arch in c.archs for ur in c.use_redelta
+    ]
+]
+
 # Build a single closure (classical symbol or learned coordinate) against `setup`.
 buildone(case, setup, m) = S.build_models(case, setup, [m])[S.modelname(m)]
 
@@ -104,7 +120,6 @@ function main()
         @info "===== eval point: role=$(dns.role), visc=$(dns.visc), Δ=$(Δf) ====="
         flush(stderr)
         setup = S.make_setup(case, dns, Δf)
-        withref = [:ref; models]
 
         # Reference a-priori stats + a-posteriori budget/transfer (no model).
         :apriori in config.experiments &&
@@ -143,15 +158,18 @@ function main()
             S.get_seed_statistics(case, fams, dns, Δf, config.netseeds; force = :seeds in config.force)
 
         if :plots in config.experiments
-            S.plot_apriori_bar(case, dns, Δf, models)
-            S.plot_dissipation_bar(case, dns, Δf, withref)
-            S.plot_backscatter_bar(case, dns, Δf, withref)
-            S.plot_densities(case, dns, Δf, [:ref; filter(!=(:nomo), models)])
-            S.plot_error_post(case, dns, Δf, models)
-            S.plot_budget(case, dns, Δf, withref)
-            S.plot_spectral_transfer(case, dns, Δf, withref)
-            S.plot_spectrum_les(case, dns, Δf, withref)
-            S.plot_equivariance_errors(case, dns, Δf, models)
+            series = series_models(config)
+            # Seed-aggregated bars over every family (the capacity comparison).
+            S.plot_apriori_bar(case, dns, Δf, fams, config.netseeds; classical = config.classical)
+            S.plot_dissipation_bar(case, dns, Δf, fams, config.netseeds; classical = config.classical)
+            S.plot_backscatter_bar(case, dns, Δf, fams, config.netseeds; classical = config.classical)
+            S.plot_equivariance_bar(case, dns, Δf, fams, config.netseeds)
+            # Per-curve series over the curated saturated, one-seed subset.
+            S.plot_densities(case, dns, Δf, [:ref; series])
+            S.plot_error_post(case, dns, Δf, series)
+            S.plot_budget(case, dns, Δf, [:ref; series])
+            S.plot_spectral_transfer(case, dns, Δf, [:ref; series])
+            S.plot_spectrum_les(case, dns, Δf, [:ref; series])
         end
     end
 
@@ -161,7 +179,7 @@ function main()
     if :trend in config.experiments
         trainpoints = [(dns, Δf) for dns in S.dns_runs().train for Δf in case.filters_train]
         S.plot_trend_vs_redelta(
-            case, testpoints, fams;
+            case, testpoints, trend_families(config);   # saturated only → per-arch ±Re read apart
             netseeds = config.netseeds,
             classical = Tuple(filter(!=(:nomo), config.classical)),  # :nomo diss-ratio = 0 (log axis)
             trainpoints,
@@ -170,7 +188,7 @@ function main()
 
     if :tables in config.experiments
         dns, Δf = first(testpoints)
-        S.write_errors_table(case, dns, Δf, models; netseeds = config.netseeds)
+        S.write_errors_table(case, dns, Δf, fams, config.netseeds; classical = config.classical)
     end
 
     #######################
