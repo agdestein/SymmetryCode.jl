@@ -148,6 +148,11 @@ function create_data(case, dns; force = false)
     # Sampling window from the measured turnover.
     tstop = sampling.nturnover * stat0.t_int
     savetimes = range(0.0, tstop, length = sampling.nsnap)
+    @info "Sampling $(sampling.nsnap) snapshots over $(sampling.nturnover) turnover(s) = " *
+        "$(round(tstop; sigdigits = 4)) time units " *
+        "(post-warmup t_int = $(round(stat0.t_int; sigdigits = 4)), " *
+        "Δt_save ≈ $(round(tstop / (sampling.nsnap - 1); sigdigits = 3)))"
+    flush(stderr)
 
     shells = energy_shells(g_dns, [1, 2], u)
     walltime = time()
@@ -265,6 +270,9 @@ function create_data_tgv(case, tgv; force = false)
 
     # Span the full transition→decay trajectory (no measured turnover here).
     savetimes = range(0.0, tstop, length = nsnap)
+    @info "Sampling $(nsnap) snapshots over $(tconv) convective times = " *
+        "$(round(tstop; sigdigits = 4)) time units (t_c = L/V0 = $(round(1 / V0; sigdigits = 4)))"
+    flush(stderr)
     walltime = time()
     t = 0.0
     for (i, tnext) in enumerate(savetimes)
