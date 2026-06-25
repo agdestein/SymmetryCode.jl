@@ -50,22 +50,27 @@ end
 function main()
     case = get_case()
     config = get_config()
-    reset_tables(case)
 
     slurm_id = get(ENV, "SLURM_ARRAY_TASK_ID", nothing)
     task_id = isnothing(slurm_id) ? nothing : parse(Int, slurm_id)
+    serial = isnothing(task_id)
+
+    # The shared text-table file is written only in the serial pass; an array task
+    # owns one run, so resetting/appending here would race the other tasks.
+    serial && reset_tables(case)
 
     for (i, dns) in enumerate(S.dns_runs().all)
-        isnothing(task_id) || i == task_id || continue
+        serial || i == task_id || continue
         @info "===== DNS run: visc=$(dns.visc), seed=$(dns.seed), role=$(dns.role) ====="
         flush(stderr)
         filters = dns.role === :train ? case.filters_train : case.filters_test
 
         if :dns in config.experiments
             S.create_dns(case, dns; force = :dns in config.force)
-            let stats = load(S.dnsfile(case, dns), "statistics")
-                tabulate(case, "DNS stats after warm-up (visc=$(dns.visc), seed=$(dns.seed))", stats[end])
-            end
+            serial && tabulate(
+                case, "DNS stats after warm-up (visc=$(dns.visc), seed=$(dns.seed))",
+                load(S.dnsfile(case, dns), "statistics")[end],
+            )
         end
 
         :evolution_dns in config.experiments && S.plot_evolution_dns(case, dns)
@@ -77,13 +82,11 @@ function main()
 
         if :data in config.experiments
             S.create_data(case, dns; force = :data in config.force)
-            let stats = load(S.dnsmetafile(case, dns), "statistics_dns")
-                tabulate(
-                    case,
-                    "Time-averaged DNS stats, data window (visc=$(dns.visc), seed=$(dns.seed))",
-                    timemean(stats),
-                )
-            end
+            serial && tabulate(
+                case,
+                "Time-averaged DNS stats, data window (visc=$(dns.visc), seed=$(dns.seed))",
+                timemean(load(S.dnsmetafile(case, dns), "statistics_dns")),
+            )
         end
 
         :evolution_data in config.experiments && S.plot_evolution_data(case, dns)
@@ -94,11 +97,11 @@ function main()
         end
     end
 
-    # Cross-dataset DNS-stats table (paper-ready). Only when this process owns all
-    # runs (not a single SLURM-array task — else parallel tasks race on the file);
-    # rerun without the array env once the data exists to emit it. Skips any run
-    # whose dnsmetafile isn't generated yet.
-    isnothing(task_id) && S.write_dns_table(case, S.dns_runs().all)
+    # Cross-dataset DNS-stats table (paper-ready) — serial pass only (an array task
+    # owns one run, so writing here would race the shared file). After an array run,
+    # rerun without the array env to emit it; any run whose dnsmetafile isn't
+    # generated yet is skipped.
+    serial && S.write_dns_table(case, S.dns_runs().all)
 
     @info "Done."
     flush(stderr)
