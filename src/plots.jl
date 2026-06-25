@@ -109,34 +109,52 @@ function spectrum_reference(setup, stats)
 end
 
 """
-Plot validation-loss curves for every learned-model coordinate in `models` whose
-`psfile` is on disk. Classical symbols and models without a persisted artifact are
-silently skipped, so the same call works regardless of which subset was trained.
-Models span the trainpool, so this is one figure for the whole sweep.
+Validation-loss convergence curves for the learned closures — one panel per
+architecture (a single figure for the whole sweep; the models span the trainpool
+and are trained once). Within a panel the curves are colored by capacity tier and
+dashed for the Re_Δ variant, with the `netseeds` overlapping so run-to-run spread
+is visible. Reads `losses_valid` from each [`psfile`](@ref); classical symbols and
+models without a persisted artifact are skipped, so the same call works for any
+trained subset.
 """
 function plot_training(case, models)
-    curves = [
-        (m, load(psfile(case, m), "losses_valid"))
-            for m in models if m isa NamedTuple && isfile(psfile(case, m))
-    ]
-    isempty(curves) && return nothing
+    learned = [m for m in models if m isa NamedTuple && isfile(psfile(case, m))]
+    isempty(learned) && return nothing
+    archs = unique(m.arch for m in learned)
+    tiers = unique(m.tier for m in learned)
+    tcolor = Dict(t => c for (t, c) in zip(tiers, Makie.wong_colors()))
 
-    fig = Figure(; size = (400, 340))
-    ax = Axis(fig[1, 1]; xlabel = "Iteration", ylabel = "Loss")
-    for (m, c) in curves
-        lines!(ax, c; label = plotlabel(m), color = plotstyle(m).color)
+    fig = Figure(; size = (300 * length(archs) + 40, 360))
+    for (i, a) in enumerate(archs)
+        ax = Axis(
+            fig[1, i];
+            xlabel = "Iteration", ylabel = "Validation loss",
+            ylabelvisible = i == 1, yscale = log10, title = getlabels()[a],
+        )
+        for m in learned
+            m.arch === a || continue
+            losses = load(psfile(case, m), "losses_valid")
+            lines!(ax, losses; color = tcolor[m.tier], linestyle = m.use_redelta ? :dash : :solid)
+        end
     end
+
+    # Shared tier × Re legend (only the combinations actually present).
+    combos = [(t, ur) for t in tiers for ur in (false, true)]
+    filter!(c -> any(m -> m.tier === c[1] && m.use_redelta === c[2], learned), combos)
+    elements = [
+        Makie.LineElement(; color = tcolor[t], linestyle = ur ? :dash : :solid) for (t, ur) in combos
+    ]
+    labels = ["$(string(t))$(ur ? " +Re" : "")" for (t, ur) in combos]
     Legend(
-        fig[0, 1],
-        ax;
-        tellwidth = false,
-        tellheight = true,
-        framevisible = false,
-        horizontal = true,
-        nbanks = length(curves),
+        fig[0, :], elements, labels;
+        tellwidth = false, tellheight = true, framevisible = false,
+        orientation = :horizontal, nbanks = 1,
     )
     rowgap!(fig.layout, 5)
-    save("$(case.plotdir)/training.pdf", fig; backend = CairoMakie)
+    file = "$(case.plotdir)/training.pdf"
+    @info "Saving training-curve plot to $(file)"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
     return fig
 end
 
