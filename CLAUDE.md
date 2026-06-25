@@ -48,7 +48,7 @@ This is the spine of the codebase (`src/experiment.jl`). The swept axes — visc
 | `fieldsfile` | heavy `(ūbar, τ)` field series + per-snapshot `redelta` | `(case, dns, Δf)` |
 | `lesmetafile` | light LES-side spectra | `(case, dns, Δf)` |
 | `psfile` | trained params + states + loss curves + `redelta_norm` | `(case, m)` |
-| `sfsfile` / `sfsstatsfile` | a-priori SFS prediction series / aggregated stats | `(case, dns, Δf, m)` |
+| `sfsstatsfile` | aggregated a-priori SFS statistics (reduced on the fly) | `(case, dns, Δf, m)` |
 | `apostfile` | reduced a-posteriori metrics (one rollout) | `(case, dns, Δf, m)` |
 | `apostfieldsfile` | full LES field series (showcase only) | `(case, dns, Δf, m)` |
 | `equipriorfile` | a-priori equivariance error series | `(case, dns, Δf, m)` |
@@ -66,7 +66,7 @@ case_snellius()  +  dns_runs() / tgv_runs()        (loose coordinates)
   create_data_tgv(case, tgv)       → same schema from a decaying analytic TGV
   train_models(case; archs × tiers × use_redelta × netseeds)  → psfile
   per (dns, Δf) eval point:
-    predict_sfs / compute_sfs_stats        → sfsfile / sfsstatsfile   (a-priori)
+    compute_sfs_stats (reduce-on-the-fly)  → sfsstatsfile               (a-priori)
     solve_les (reduce-on-the-fly)          → apostfile (+ apostfieldsfile showcase)
     apriori_equivariance_error             → equipriorfile
     compute_redelta_binning                → redeltabinningfile
@@ -90,7 +90,7 @@ case_snellius()  +  dns_runs() / tgv_runs()        (loose coordinates)
 - **`training.jl`** — the fixed-budget `train` loop (Lux + Zygote + AdamW with `ClipNorm`, linear-warmup→cosine LR; **no early stopping, no checkpointing** — the nets are tiny; validation is monitoring-only), the losses, the netsetup/net builders (`make_netsetup`, `build_net_stuff`), `build_model` (inference), `compute_redelta_norm`, `build_trainpool`, and the orchestrators `train_model` / `train_models`.
 - **`data.jl`** — DNS warm-up (`create_dns`), `(ūbar, τ)` generation (`create_data`, `create_data_tgv`; both call `sfs!`), the CPU dataloaders (`create_dataloader`, `create_dataloader_tbnn`), and `append_redelta` (the Re_Δ input channel).
 - **`les.jl`** — LES RHS with closure (`les!`) and `solve_les` / `solve_les!`: the a-posteriori rollout **reduces metrics on the fly and discards the heavy LES fields** (one rollout → one light `apostfile`; `savefields` keeps the field series for the single showcase case).
-- **`analysis.jl`** — `predict_sfs`, `compute_sfs_stats`, `apriori_equivariance_error`, `compute_redelta_binning` (the Phase-0 diagnostic), and `get_seed_statistics` (netseed aggregate → `seedstatsfile`).
+- **`analysis.jl`** — `compute_sfs_stats` (a-priori stats, **reduced on the fly** — the closure is evaluated per snapshot and reduced immediately, never writing a predicted-SFS field series), `apriori_equivariance_error`, `compute_redelta_binning` (the Phase-0 diagnostic), and `get_seed_statistics` (netseed aggregate → `seedstatsfile`).
 - **`plots.jl`** — all `plot_*`, the coordinate-aware `plotlabel`/`plotstyle` (a model resolves to its arch's label/color; the `+Re` variant is dashed), `getlabels`/`getstyles` (the canonical style table — **every plot uses it**), `plot_trend_vs_redelta` (the H2 figure), and `write_errors_table` (the paper-ready LaTeX, from the seed aggregate + classical values).
 - **`verify.jl`** — REPL-only sanity checks (`test_equivariant_*`, `dns_aid`). Not part of the pipeline.
 

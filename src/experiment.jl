@@ -107,8 +107,8 @@ The decaying Taylor-Green vortex test run(s): the trained forced-HIT closures ar
 applied to a transitioning-then-decaying TGV at `Re_target` (initial amplitude
 `V0 = Re_target·ν`, with `L = 1` so `Re = Re_target`). The IC is deterministic, so
 `seed` only keeps the artifact path distinct from the forced runs. Reuses the case
-grid and test filters, so the whole `predict_sfs` / `solve_les` / plot pipeline
-applies unchanged on the `(tgv, Δf)` eval points.
+grid and test filters, so the whole `compute_sfs_stats` / `solve_les` / plot
+pipeline applies unchanged on the `(tgv, Δf)` eval points.
 """
 tgv_runs() = [(; visc = 2.5e-4, seed = 0, role = :tgv, Re_target = 1600)]
 
@@ -172,9 +172,6 @@ psfile(case, m) = joinpath(case.rootdir |> mkpath, "ps-$(modelkey(m)).jld2")
 "Artifact name for a closure: the model-coordinate key, or the classical symbol itself."
 modelname(m::NamedTuple) = modelkey(m)
 modelname(m::Symbol) = m
-
-"A-priori SFS prediction series for closure `m` on test dataset (dns, Δ)."
-sfsfile(case, dns, Δf, m) = joinpath(datadir(case, dns, Δf) |> mkpath, "sfs-$(modelname(m)).jld2")
 
 "Aggregated a-priori SFS statistics for closure `m` on (dns, Δ)."
 sfsstatsfile(case, dns, Δf, m) =

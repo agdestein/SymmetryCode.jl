@@ -36,7 +36,7 @@ get_config() = (;
 
     # Pipeline stages.
     experiments = [
-        :apriori,          # predict_sfs + compute_sfs_stats
+        :apriori,          # compute_sfs_stats (reduce-on-the-fly a-priori)
         :aposteriori,      # solve_les (reduce-on-the-fly)
         :equivariance,     # apriori_equivariance_error (learned only)
         :redelta_binning,  # Phase-0 pointwise-Re_Δ diagnostic
@@ -44,7 +44,7 @@ get_config() = (;
         :plots,            # per-eval-point figures
         :trend,            # plot_trend_vs_redelta (the H2 figure)
         :tables,           # write_errors_table
-        :showcase,       # savefields rollout + velocity/SFS field montages
+        :showcase,         # savefields rollout + velocity/SFS field montages
     ],
 
     # Stages whose cache is invalidated this run.
@@ -106,7 +106,9 @@ function main()
         setup = S.make_setup(case, dns, Δf)
         withref = [:ref; models]
 
-        # Reference a-posteriori budget/transfer (no model).
+        # Reference a-priori stats + a-posteriori budget/transfer (no model).
+        :apriori in config.experiments &&
+            S.compute_sfs_stats(case, :ref, dns, Δf; force = :apriori in config.force)
         :aposteriori in config.experiments &&
             S.solve_les(case, :ref, dns, Δf; force = :aposteriori in config.force)
 
@@ -116,8 +118,8 @@ function main()
             local built = nothing
             getmodel() = (built === nothing && (built = buildone(case, setup, m)); built)
 
-            if :apriori in config.experiments && m !== :nomo
-                S.predict_sfs(case, m, dns, Δf, getmodel; force = :apriori in config.force)
+            if :apriori in config.experiments
+                S.compute_sfs_stats(case, m, dns, Δf, getmodel; force = :apriori in config.force)
             end
             if :aposteriori in config.experiments
                 S.solve_les(case, m, dns, Δf, getmodel; force = :aposteriori in config.force)
@@ -131,9 +133,6 @@ function main()
             built = nothing
             S.clean()
         end
-
-        :apriori in config.experiments &&
-            S.compute_sfs_stats(case, withref, dns, Δf; force = :apriori in config.force)
 
         if :redelta_binning in config.experiments
             S.compute_redelta_binning(case, dns, Δf; force = :redelta_binning in config.force)
@@ -190,7 +189,6 @@ function main()
             S.solve_les(case, m, dns, Δf, getmodel; force = true, savefields = true)
         end
         S.plot_velocities(case, dns, Δf, [:ref; show_models], :vortz)
-        S.plot_sfs(case, dns, Δf, show_models)
     end
 
     @info "Done."
