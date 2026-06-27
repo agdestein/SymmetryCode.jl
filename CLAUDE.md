@@ -6,91 +6,122 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 Research code for the paper "Comparison of Data-Driven Symmetry-Preserving Closure Models for Large-Eddy Simulation" (Agdestein & Sanderse, 2026). It is a pseudo-spectral incompressible Navier–Stokes solver in 2D/3D with classical and learned LES closure models, plus the analysis and plotting pipeline used to generate the paper's figures.
 
-CI only runs CompatHelper. The repository is driven from the REPL via two scripts run in order: `create-data.jl` then `run-les.jl`.
+The current line of work is the **Re_Δ experiment**: train the closures across a grid of viscosities ν and filter ratios Δ, then test out-of-distribution (a held-out higher-Re ν, interpolated/extrapolated filter ratios, and a decaying Taylor-Green vortex), optionally feeding the closures the filter-scale Reynolds number `Re_Δ = Δ²·√⟨|∇ū|²⟩/ν` as an extra input. The pipeline is **coordinate-driven** (see below) — the whole sweep is built from plain Cartesian products of loose coordinates, not a monolithic config.
 
-**Companion paper & cross-repo sync.** The LaTeX source is at `../SymmetryPaper` (sibling under the `Symmetry/` umbrella).
+CI only runs CompatHelper. **Companion paper & cross-repo sync.** The LaTeX source is at `../SymmetryPaper` (sibling under the `Symmetry/` umbrella).
 
 ## Commands
 
 ```bash
 julia --project=. -e 'using SymmetryCode'   # precompile; cold-load smoke check
-julia --project=test test/runtests.jl       # run the test suite (subprocess)
-julia --project create-data.jl              # stage 1: DNS warmup + (ubar,τ) data generation
-julia --project run-les.jl                  # stage 2: closure training + LES rollout + analysis
+julia --project=test test/runtests.jl       # test suite (may lag the refactor — see note)
+julia --project create-data.jl              # stage 1: DNS warm-up + (ūbar,τ) data, all runs
+julia --project run-les.jl                  # stage 2: train + evaluate the (ν,Δ) grid + figures
+julia --project run-tgv.jl                  # stage 3: apply the trained closures to the TGV
 sbatch job.sh                               # SLURM submission on a single H100
 runic -i .                                  # format all code in place (run from repo root)
 ```
 
-**REPL workflow — prefer `julia-mcp` over `julia -e ...`.** A persistent Julia session is available via the `julia-mcp` MCP server (`mcp__julia__julia_eval`, `julia_list_sessions`, `julia_restart`). Use it for smoke checks (`using SymmetryCode`), iterative debugging, running pipeline sections, and anything else that benefits from a warm session. Pass `env_path="/home/syver/Projects/Symmetry/SymmetryCode"` so calls land in this project's session. Fall back to `julia --project=. -e '...'` via Bash only when a true cold-load check is needed (e.g., verifying precompilation from scratch).
+**REPL workflow — prefer `julia-mcp` over `julia -e ...`.** A persistent Julia session is available via the `julia-mcp` MCP server (`mcp__julia__julia_eval`, `julia_list_sessions`, `julia_restart`). Use it for smoke checks, iterative debugging, and running pipeline sections. **Revise** is loaded in every session, so source edits are picked up without restart (after *deleting* a function, `isdefined` may stay `true` while calls throw `MethodError` — expected). **TestEnv** is in the global env (`using TestEnv; TestEnv.activate()` makes the `test/` deps loadable in-process). Only `julia_restart` as a last resort (segfault, GPU stuck, native-code change Revise can't patch).
 
-- **Revise** is loaded automatically by julia-mcp in every session — source edits are picked up without restart. After *deleting* a function, `isdefined(M, :name)` may stay `true` while calls throw `MethodError`; that's expected (binding persists, method removed) and not a reason to restart.
-- **TestEnv** is available in the global env. `using TestEnv; TestEnv.activate()` (no args, with the SymmetryCode env active) makes `test/Project.toml` deps loadable in the live session, so `include("test/runtests.jl")` runs in-process — faster iteration than the subprocess form above.
-- Only call `julia_restart` as a last resort (segfault, GPU stuck, native-code change Revise can't patch). Restarts are slow and lose all warm state.
+The three drivers are run in order (`create-data` → `run-les` → `run-tgv`) and are structured as scripts meant to be evaluated section by section. Each stage is **cache-guarded**: a rerun short-circuits when the artifact for that coordinate already exists; `config.experiments` toggles which stages run and `config.force` invalidates a stage's cache. Format with [Runic.jl](https://github.com/fredrikekre/Runic.jl) (no per-repo config) before committing.
 
-The test environment is a separate project under `test/` that uses `[sources] SymmetryCode = {path = ".."}` to depend on the dev checkout — `Pkg.instantiate` from `test/` is enough to set it up.
+> **Note on the test suite.** `test/runtests.jl` predates the coordinate refactor and may reference removed functions; treat a red test as "needs migrating", not as a regression in the new code. The package itself cold-loads and runs.
 
-`create-data.jl` and `run-les.jl` are the canonical pipeline drivers, run in that order. Each is structured as a script meant to be evaluated section by section in a REPL — sections create artifacts (`output/<name>/dns.jld2`, `data.jld2`, `ps-*.jld2`, `u-post-*.jld2`, `kde_*.jld2`, …) that downstream sections consume. Reruns short-circuit if the artifact already exists for that setup. `create-data.jl` covers DNS warmup (`create_dns`) and `(ubar,τ)` data generation (`create_data`) plus their plots, producing `dns.jld2` and `data.jld2`. `run-les.jl` consumes `data.jld2`: it defines and trains the closure models, runs the LES rollouts (`solve_les`), and does the post-hoc analysis and plotting.
+> **This worktree.** Work happens on the `redelta-refactor` branch in the `SymmetryCode-redelta` worktree, a sibling of `SymmetryCode`. Commit on this branch; it merges back into `SymmetryCode`'s `main` when the experiment lands. The clean-slate refactor deliberately discarded all back-compat — there is no migration path for old artifacts; regenerate from `create-data.jl`.
 
-Code is formatted with [Runic.jl](https://github.com/fredrikekre/Runic.jl) (no per-repo config); run `runic -i .` from the repo root before committing.
+## The coordinate design
 
-This is a single-developer repository: commit directly to `main`. No feature branch is needed even though `main` is the default branch.
+This is the spine of the codebase (`src/experiment.jl`). The swept axes — viscosity, DNS seed, filter ratio, network architecture/size/init-seed, Re_Δ on/off — are **loose coordinates**, never fused into one config. Sweeps are plain Cartesian products or zips. No code block ever "destructures a list of setups that carry redundant info and rebuilds them with one parameter changed".
+
+- **`case`** (`case_snellius()`) — everything shared across the whole sweep: grid (`l`, `n_dns`, `n_les`), `cfl`, sampling schedules, train/test filter ratios, the size tiers, the training `schedule`, the artifact `rootdir` (cluster) and figure `plotdir`. Never holds a swept axis.
+- **Run coordinates** — `dns_runs()` returns `(; visc, seed, role)` for the forced HIT runs (`role ∈ {:train, :test_indist, :test_ood}`); `tgv_runs()` returns `(; visc, seed, role=:tgv, Re_target)` for the decaying Taylor-Green test. A run is identified by `(visc, seed)`.
+- **Filter ratio** — `Δ_factor` (filter width `Δ = Δ_factor · l / n_les`). Training uses `case.filters_train`, tests use `case.filters_test`.
+- **Model coordinate** — `(; arch, tier, netseed, use_redelta)` with `arch ∈ {:conv, :equi, :tbnn}`, `tier ∈ keys(case.tiers)`. The tiers form a **capacity grid** `pN` (target ≈ N parameters, fixed 3 hidden layers, width-only scaling; roughly parameter-matched across archs within a tier — check with `paramcount`). `conv` extends highest (`p16000`); `equi`/`tbnn` stop at `p8000` (the equivariant rollout's `|G|·c·n³` activation OOMs past ~8k, and they saturate earlier). A **family** is the tuple minus `netseed` (`familyname`); the seed sweep aggregates over `netseed`. Classical closures are bare symbols (`:nomo`, `:clar`, `:smag`, `:dynsmag`, `:vers`, `:bard`).
+
+`make_setup(case, dns, Δ_factor)` derives the per-`(ν, Δ)` `setup` view (the NamedTuple the rest of the pipeline destructures) **once**, from coordinates — never rebuilt from another setup. **Pure path functions** in `experiment.jl` locate every artifact from its coordinates, so no block destructures-and-rebuilds a setup to find its inputs:
+
+| path fn | artifact | keyed by |
+|---|---|---|
+| `dnsfile` | DNS warm-up state | `(case, dns)` |
+| `dnsmetafile` | Δ-independent DNS metadata (times, spectra, stats, t_int) | `(case, dns)` |
+| `fieldsfile` | heavy `(ūbar, τ)` field series + per-snapshot `redelta` | `(case, dns, Δf)` |
+| `lesmetafile` | light LES-side spectra | `(case, dns, Δf)` |
+| `psfile` | trained params + states + loss curves + `redelta_norm` | `(case, m)` |
+| `sfsstatsfile` | aggregated a-priori SFS statistics (reduced on the fly) | `(case, dns, Δf, m)` |
+| `apostfile` | reduced a-posteriori metrics (one rollout) | `(case, dns, Δf, m)` |
+| `apostfieldsfile` | full LES field series (showcase only) | `(case, dns, Δf, m)` |
+| `equipriorfile` | a-priori equivariance error series | `(case, dns, Δf, m)` |
+| `redeltabinningfile` / `seedstatsfile` | Phase-0 binning / netseed aggregate | `(case, dns, Δf)` |
+| `figdir` / `dnsfigdir` | per-(ν,seed,Δ) / per-(ν,seed) figure dir | under `case.plotdir` |
+
+Heavy fields and light metadata live in **separate files** so plot iteration never reloads the heavy `fieldsfile`. `psfile`/`dns*`/`fields*`/`les*` are multi-key archives — read them with `load(file, "key")`; `sfs*`/`apost*`/`equiprior*`/`redeltabinning*`/`seedstats*` are single-object — read with `load_object(file)`.
 
 ## Pipeline
 
 ```
-setup_*()  →  create_dns       →  dns.jld2
-              create_data      →  data.jld2          (ubar,τ) pairs
-              create_{tbnn,equi,conv} (training)  →  ps-*.jld2
-              solve_les               →  u-post-*.jld2
-              predict_sfs / compute_densities / apriori_error / compute_qr / …
-              plot_*                  →  output/<setup>/plots/*.pdf|png
+case_snellius()  +  dns_runs() / tgv_runs()        (loose coordinates)
+  create_dns(case, dns)            → dnsfile               (DNS warm-up; not for TGV)
+  create_data(case, dns)           → dnsmetafile + per-Δ fieldsfile / lesmetafile
+  create_data_tgv(case, tgv)       → same schema from a decaying analytic TGV
+  train_model(case, m, trainpool)  per m in the purposeful model lists  → psfile
+  per (dns, Δf) eval point:
+    compute_sfs_stats (reduce-on-the-fly)  → sfsstatsfile               (a-priori)
+    solve_les (reduce-on-the-fly)          → apostfile (+ apostfieldsfile showcase)
+    apriori_equivariance_error             → equipriorfile
+    compute_redelta_binning                → redeltabinningfile
+    get_seed_statistics                    → seedstatsfile             (netseed spread)
+  plot_saturation / plot_trend_vs_redelta / plot_* → figdir / dnsfigdir / case.plotdir
 ```
 
-Three setups in `src/setups.jl`:
-- `setup_laptop` — 2D, small (`n_dns=512`). Quick prototyping only — the paper's experiments are 3D. Closure models that assume a 3D Kolmogorov inertial range (e.g. dynamic Smagorinsky) are not expected to perform well here, since the small-scale dynamics follow a 2D Kraichnan enstrophy cascade (`E(k)~k^{-3}`).
-- `setup_turbulator_{small,medium,large}` — 3D forced HIT, `n_dns ∈ {256, 384, 512}`. The three variants trade resolution against memory / wall time and are sized for a 24 GB consumer GPU; `medium` (n=384, ν=5e-4) is the recommended default for an RTX 4090, `large` (n=512, ν=3e-4) is tight on memory but closest to paper-quality.
-- `setup_snellius` — 3D, `n_dns=810`, writes to `/projects/prjs1757/...` (cluster path).
+`run-les.jl` assembles the model coordinates into a few **purposeful lists** (never one Cartesian product), each broad along a single axis, and trains every distinct model once over `build_trainpool(case)`:
 
-A "setup" is a NamedTuple — fields are destructured throughout the codebase (`(; D, l, n_les, backend, Δ, visc, cfl) = setup`). Per-model network widths live in `tbnn_setup`/`equi_setup`/`conv_setup` (`.layers`); all training hyperparameters live in one shared `train_setup` (`default_train_setup` in `setups.jl`: `nepoch`, `batchsize`, `nsample`, `learning_rate`, `seed`, `val_fraction`, `log_every`, `precision`, `grad_clip`, `patience`, `warmup_frac`, `checkpoint_every`).
+- **A — Saturation** (`plot_saturation`, the headline): +Re, every architecture across its full size grid, evaluated at one in-distribution `(ν, Δ)`. Error vs **parameter count** → all archs saturate to the same floor, the inductive-bias models reach it at far fewer params (Langford–Moser optimal closure).
+- **B — Equal capacity / equivariance**: the matched top tier (`config.top`, `:p8000`) ±Re at the same in-distribution point — the bars, equivariance, errors + timing tables (reads A's artifacts).
+- **C — Re_Δ trend** (`plot_trend_vs_redelta`): top tier ±Re across the full `(ν, Δ)` test grid → dissipation ratio / a-priori error / a-posteriori error vs global Re_Δ.
+
+A is broad in *size* / narrow in *eval*; C is broad in *eval* / narrow in *size*; the +Re top models are shared (trained once, `all_models` dedupes). `run-tgv.jl` (**D**) reuses C's top-tier ±Re `psfile`s on the TGV `(tgv, Δf)` points. The suite is cache-guarded per coordinate, so adding a size or a seed later recomputes only the gaps.
 
 ## Architecture
 
 `SymmetryCode.jl` includes a flat set of per-topic source files. The hierarchy is conceptual, not file-organizational:
 
-- **`solver.jl`** — the core. Defines `Grid{D}`, field allocators (`scalarfield` / `vectorfield` / `tensorfield` and their `space*` physical-space counterparts), kernels, time integrators (`forwardeuler!`, `abcn!`, `wray3!`), and the shared helpers everything else builds on. **When adding cross-cutting utilities, put them here.**
+- **`solver.jl`** — the core. `Grid{D}`, field allocators (`scalarfield`/`vectorfield`/`tensorfield` + `space*` physical-space counterparts), kernels, time integrators (`forwardeuler!`, `abcn!`, `wray3!`), `turbulence_statistics`, `spectrum`/`spectral_stuff`, `filter_reynolds` (the global Re_Δ), and `tabulate`/`reset_tables`. **Cross-cutting utilities go here.**
+- **`experiment.jl`** — the coordinate layer: `case_snellius`, `dns_runs`/`tgv_runs`, `make_setup`, the model keys (`modelkey`/`modelname`/`familyname`), and every path function. **The live configuration spine.**
+- **`setups.jl`** — just `build_models(case, setup, models)`: build the inference closures for a model list (classical via a small table, learned via `build_model`).
 - **`filtering.jl`** — `cutoff!` (spectral truncation) and `gaussianfilter!` (with a "don't filter forced shells" carve-out).
-- **`symmetry.jl`** — octahedral group machinery: `group_stuff`, `get_weight_projectors`, `transform_vector` / `transform_tensor` (used by the equivariant network and by `test_equivariance_post`).
-- **`closures.jl`** — classical models (Clark / Smagorinsky / dynamic Smagorinsky / Verstappen Q-R). Each kernel uses `tensorat` / `store_symtensor!`; each wrapper goes through `run_closure_kernel`.
-- **`nets.jl`** — Lux network architectures for the learned closures. All three are pointwise MLPs (no spatial mixing) implemented via 1×1 Conv: `equivariant_net` is a group convolution over the dihedral/octahedral symmetry group of the cube with weight-tying via the projectors from `symmetry.jl`; `mlp` is the non-equivariant baseline with identical architecture but no projection; `tbnn` is a Tensor Basis Neural Network using `ninvariant` / `nbasis` / `build_tensorbasis`. `fullchain` wraps a trained net + projection into a `(u, G) -> τ` closure usable by `les!`. `symmetrize_pointwise` wraps any *pointwise* closure into its octahedral group average (`m_sym(A) = 1/|G| Σ_g R_gᵀ m(R_g A R_gᵀ) R_g`, |G| forward passes, exactly equivariant) — model key `:convsym`, the "symmetrized MLP" baseline reusing `:conv`'s parameters.
-- **`training.jl`** — generic `train` loop (Lux + Zygote + AdamW with `ClipNorm`, linear-warmup→cosine LR schedule, held-out-validation best-param tracking, early stopping, periodic checkpoints), losses (`create_loss`, `create_loss_tbnn`), one shared orchestrator `create_model`, and the thin wrappers `create_tbnn` / `create_equi` / `create_conv` (which differ only in net/loss/loader/wrap). Each takes `mode` ∈ `:scratch` / `:resume` / `:skip` (a `Bool` maps `true→:resume`, `false→:skip`); they persist `ps-<key>.jld2` and, mid-run, a resumable `ps-<key>-checkpoint.jld2`.
-- **`data.jl`** — DNS warmup (`create_dns`), `(ubar,τ)` pair generation (`create_data`, calls `sfs!`), and CPU dataloaders.
-- **`les.jl`** — LES RHS with closure (`les!`) and the post-training rollout (`solve_les` / `solve_les!`).
-- **`analysis.jl`** — post-hoc evaluation: `predict_sfs`, `compute_sfs_stats`, `apriori_equivariance_error`, `compute_budget`, `compute_spectral_transfer`, `compute_qr`, and the seed-sweep aggregate `get_seed_statistics_cached` (→ `seed_stats.jld2`, vectors over training seeds of the scalar metrics).
-- **`plots.jl`** — all `plot_*` functions, plus `getlabels()` (canonical model key → display label) and `getstyles()` (canonical model key → color/linestyle/marker — **every plot must use it** so a model keeps one color across all figures; references are black, the filtered-DNS target dashed). `write_errors_table` emits the paper-ready LaTeX `errors*.tex` (mean ± std over seeds) into `plotdir`.
-- **`verify.jl`** — REPL-only sanity checks (`test_equivariant_*`, `dns_aid`, `test_equivariance_post`). Not part of the pipeline.
+- **`symmetry.jl`** — octahedral group machinery: `group_stuff`, `get_weight_synthesis`/`get_weight_projectors`, `transform_vector`/`transform_tensor`.
+- **`closures.jl`** — classical models (Clark / Smagorinsky / dynamic Smagorinsky / Verstappen / Bardina). Each kernel uses `tensorat` / `store_symtensor!`; each wrapper goes through `run_closure_kernel`.
+- **`nets.jl`** — Lux architectures, all pointwise MLPs (no spatial mixing) via `PointwiseConv` (1×1 channel matmul; avoids the cuDNN scratch blow-up — see the file header). `equivariant_net` is a group convolution with closed-form weight tying (`project_*`); `mlp` is the non-equivariant baseline; `tbnn_net` predicts trace-free tensor-basis coefficients from the gradient invariants. `fullchain` (equi/conv) and `tbnn` wrap a trained net into a `(u, ∇ū) -> τ` closure for `les!`. `paramcount(case, m)` is the closed-form param count. `symmetrize_pointwise` (the `:convsym` baseline) is available but not in the default sweep.
+- **`training.jl`** — the fixed-budget `train` loop (Lux + Zygote + AdamW with `ClipNorm`, linear-warmup→cosine LR; **no early stopping, no checkpointing** — the nets are tiny; validation is monitoring-only), the losses, the netsetup/net builders (`make_netsetup`, `build_net_stuff`), `build_model` (inference), `compute_redelta_norm`, `build_trainpool`, and the orchestrators `train_model` / `train_models`.
+- **`data.jl`** — DNS warm-up (`create_dns`), `(ūbar, τ)` generation (`create_data`, `create_data_tgv`; both call `sfs!`), the CPU dataloaders (`create_dataloader`, `create_dataloader_tbnn`), and `append_redelta` (the Re_Δ input channel).
+- **`les.jl`** — LES RHS with closure (`les!`) and `solve_les` / `solve_les!`: the a-posteriori rollout **reduces metrics on the fly and discards the heavy LES fields** (one rollout → one light `apostfile`; `savefields` keeps the field series for the single showcase case).
+- **`analysis.jl`** — `compute_sfs_stats` (a-priori stats, **reduced on the fly** — the closure is evaluated per snapshot and reduced immediately, never writing a predicted-SFS field series), `apriori_equivariance_error`, `compute_redelta_binning` (the Phase-0 diagnostic), and `get_seed_statistics` (netseed aggregate → `seedstatsfile`).
+- **`plots.jl`** — all `plot_*`, the coordinate-aware `plotlabel`/`plotstyle` (a model resolves to its arch's label/color; the `+Re` variant is dashed; `tierlabel`/`famlabel` add the capacity tag where several sizes share an axis), `getlabels`/`getstyles` (the canonical style table — **every plot uses it**), `plot_saturation` (error vs parameter count — the headline), `plot_trend_vs_redelta` (the Re_Δ trend), and `write_errors_table` / `write_timing_table` (the paper-ready LaTeX, from the seed aggregate + classical values).
+- **`verify.jl`** — REPL-only sanity checks (`test_equivariant_*`, `dns_aid`). Not part of the pipeline.
 
 ## Conventions to know before editing
 
-**FFT scaling.** Spectral fields use the convention `û_code = F[u_phys] / n^D` (the FFTW forward, divided by the total point count). With this normalization, `Σ_k |û_code|² = ⟨|u|²⟩_phys`, so `energy(u)` returns the physical mean KE `⟨½ u_i u_i⟩` and `get_dissipation!` returns physical dissipation ε directly — these can be plugged straight into textbook turbulence formulas. `to_spec!` divides by `n^D`, `to_phys!` multiplies by `n^D`. Both helpers live in `solver.jl`; prefer them over inline `mul!(...); ./= fac` / `ldiv!(...); .*= fac`.
+**FFT scaling.** Spectral fields use `û_code = F[u_phys] / n^D`. With this, `Σ_k |û_code|² = ⟨|u|²⟩_phys`, so `energy(u)` returns the physical mean KE `⟨½ uᵢuᵢ⟩` and `get_dissipation!` returns physical ε directly. `to_spec!` divides by `n^D`, `to_phys!` multiplies; prefer them over inline `mul!`/`ldiv!` + scaling.
 
-**RFFT energy accounting.** Real FFTs store only `kx ∈ 0:kmax`. Energy/dot-product sums must add the contribution of `kx ∈ 1:kmax-1` twice — see `getenergy`, `spectralsum`, `spectraldot` in `solver.jl`. The `shells` returned by `getshells` carry both the storage indices and the conjugate-pair "energy" indices for this reason.
+**RFFT energy accounting.** Real FFTs store only `kx ∈ 0:kmax`; energy/dot-product sums must double-count `kx ∈ 1:kmax-1` — see `getenergy`, `spectralsum`, `spectraldot` in `solver.jl`. The `shells` from `getshells` carry both the storage and conjugate-pair indices for this.
 
-**Field representation.** Vector and tensor fields are **NamedTuples of arrays**, not multi-dim arrays. Components are named (`u.x`, `u.y`, `u.z`; `τ.xx`, `τ.yy`, `τ.zz`, `τ.xy`, `τ.yz`, `τ.zx` for symmetric tensors; with `yx`, `zx`, `zy`, `xz` added for non-symmetric ones in `tensorfield_nonsym`). Allocators dispatch on `Grid{D}` for 2D vs 3D shape. NN-facing functions deal with **stacked** packed arrays (`(n,...,n, tensordim)`); `unstack_symtensor` converts back to the NamedTuple-of-views form expected by `strain_from_gradient`, `contract_dissipation`, etc.
+**Field representation.** Vector/tensor fields are **NamedTuples of arrays** (`u.x`, `τ.xx`, …; non-symmetric tensors add `yx`, `zx`, `zy`, `xz`). Allocators dispatch on `Grid{D}`. NN-facing code uses **stacked** packed arrays `(n,…,n, tensordim)`; `unstack_symtensor` converts back to the NamedTuple-of-views form.
 
-**Dimension dispatch.** 2D/3D variants are written as separate methods specialized on `Grid{2}` / `Grid{3}` rather than runtime branches. Kernels for solver primitives (`project!`, `twothirds!`, `wavenumber_*`, `viscosity!`, `tensordivergence!`, …) are deliberately duplicated 2D/3D for clarity; the user has opted **not** to unify these.
+**Dimension dispatch.** 2D/3D variants are separate methods on `Grid{2}`/`Grid{3}`, not runtime branches; solver kernels are deliberately duplicated 2D/3D — the user has opted **not** to unify them.
 
-**GPU dispatch.** Backends come from `KernelAbstractions` (`CPU()`, `CUDABackend()`). Use `apply!(kernel!, grid, args)` rather than calling kernels directly — it wraps the workgroup-size, ndrange, and `synchronize` boilerplate. Adapt CPU arrays to the backend with `adapt(backend)` / `cpu_device()`.
+**GPU dispatch.** Backends from `KernelAbstractions` (`CPU()`, `CUDABackend()`). Use `apply!(kernel!, grid, args)` (wraps workgroup/ndrange/synchronize). Adapt with `adapt(backend)` / `cpu_device()`. Bound the per-model GPU footprint with a lazy build + `clean()` between models (the drivers do this).
 
-**Cache structs.** Time integrators take a `cache = getcache(grid)` (or its extended forms with `dissfield`, `G`, etc.). The cache holds **all scratch buffers** used inside an RHS evaluation. When extending an RHS, add scratch to the cache rather than allocating inside the hot path.
+**Cache structs.** Time integrators take `cache = getcache(grid)` (or extended forms). The cache holds **all scratch buffers** for an RHS eval; extend it rather than allocating in the hot path.
 
-**Sub-grid stress convention.** The SFS stress is **deviatoric**: the DNS ground truth is made trace-free in `sfs!` (`make_tracefree!`), and all three learned closures produce a deviatoric stress *by construction* — TBNN via its `deviator(...)` tensor basis, the G-CNN/Conv nets via a trace-removing `symm` tail in `nets.jl`. The networks regress the **normalized** target `τ / (Δ²·‖∇u‖²)` (an O(1) target shared by all models; see `create_dataloader` / `create_dataloader_tbnn`); the inference wrappers `fullchain` (equi/conv) and `tbnn` multiply the prediction back by `Δ²·‖∇u‖²` to recover the physical stress. Keep these two consistent when changing either.
+**Sub-grid stress convention.** The SFS stress is **deviatoric**: the DNS target is made trace-free in `sfs!`, and all three learned closures produce a deviatoric stress by construction (TBNN via `deviator`, equi/conv via a trace-removing `symm` tail). The networks regress the **normalized** target `τ / (Δ²·‖∇ū‖²)` from the normalized gradient `∇ū/‖∇ū‖`; the inference wrappers (`fullchain`, `tbnn`) multiply back by `Δ²·‖∇ū‖²`. Keep the two consistent.
 
-**Train/val split.** The dataloaders return `(trainloader, valloader)` via `split_loaders` (in `data.jl`): a **time-based** holdout where the last `train_setup.val_fraction` of the time-ordered snapshots are the validation set. `train` selects the best parameters on this held-out set, so it must never be drawn from the training pool. `split_loaders` also folds the last spatial axis into the batch dimension (for 2D *and* 3D — the 1×1 models use no neighbor info) and casts arrays to `train_setup.precision`.
+**Re_Δ input feature.** `use_redelta=true` appends one standardized `log Re_Δ` channel to each net's input — an extra VGT channel for `mlp`, an extra invariant for `tbnn_net`, and a **trivial-rep channel at the equi lift** (a per-output-channel `weight_re` broadcast equally to all |G| copies, so octahedral equivariance is bit-exact). The global `Re_Δ = Δ²·√⟨|∇ū|²⟩/ν` is the same at training (stored `redelta` via `filter_reynolds`) and inference (reusing the pointwise `|∇ū|²` already formed in `fullchain`/`tbnn` — no extra VGT pass). The standardization `(μ, σ)` is computed over the trainpool (`compute_redelta_norm`) and stored in `psfile`. `use_redelta=false` rebuilds the previous nets bit-for-bit.
 
-**Net vs. solver precision.** The networks train in `train_setup.precision` (default `Float32`); the solver, data generation, and spectral fields stay `Float64`. The on-disk `ps-<key>.jld2` keeps the trained precision, but `create_model` upcasts `ps` to `Float64` at load time so the inference forward pass through `fullchain`/`tbnn` is uniformly `Float64` (otherwise the apost equivariance diagnostic would be pinned to Float32 eps). The precision-cross now lives at one point — the `f64` cast in `create_model` — rather than per-call inside the wrappers.
+**Train/val split.** The dataloaders return `(trainloader, valloader)` via `split_loaders`: a **time-based** holdout (last `schedule.val_fraction` of the time-ordered snapshots). Training is **fixed-budget** — the validation loss is tracked only for the convergence curve, never for model selection (no early stopping, no checkpointing). `split_loaders` folds the last spatial axis into the batch dimension (the 1×1 models use no neighbor info) and casts to `schedule.precision`.
 
-**Checkpoint/resume.** Long trainings are SLURM-safe: `train` writes `ps-<key>-checkpoint.jld2` every `train_setup.checkpoint_every` steps and at each epoch end; `:resume` continues from it (`create_model` deletes it on successful completion). A completed training (final `ps-<key>.jld2` present, no checkpoint) is *skipped* under `:resume`; use `:scratch` to deliberately retrain. Adam moments are *not* checkpointed — a resume restarts the optimizer state (acceptable for infrequent restarts).
+**Net vs. solver precision.** Networks train in `schedule.precision` (default `Float32`); the solver, data generation, and spectral fields stay `Float64`. `psfile` keeps the trained precision, but `build_model` upcasts `ps` to `Float64` at load, so the inference forward pass through `fullchain`/`tbnn` is uniformly `Float64` (otherwise the equivariance diagnostic would be pinned to Float32 eps).
 
-**Seed sweep.** The `:seeds` stage in `run-les.jl`/`run-tgv.jl` repeats training (`train_models(...; seeds)`), rollout, and a-priori stats per training seed. The canonical seed (`train_setup.seed`) keeps the plain artifact keys, so existing single-seed artifacts stay valid; other seeds get `_seed<i>`-suffixed keys via `seed_key` (`ps-tbnn_seed1.jld2`, `u-post-tbnn_seed1.jld2`, `sfs_stats_tbnn_seed1.jld2`, …). Seeds change only network init and batch shuffling (`with_seed`), never the data. `:convsym` is swept a-priori only (its rollout costs |G|× the MLP's).
+**Seed sweep.** `netseed` is a model coordinate (network init + batch shuffling only; the data is unaffected). The driver uses more seeds for the cheap saturation curve (`netseeds_curve`, one eval point) than the expensive top-tier grid (`netseeds_grid`, full ν × Δ). `get_seed_statistics` aggregates the per-`familyname` spread at each eval point into `seedstatsfile`, which the trend figure, the seed-aggregated bar plots (a-priori / dissipation / backscatter / equivariance, mean ± std whiskers), and `write_errors_table` all consume; `plot_saturation` reads the per-model artifacts directly (no aggregate file) so adding sizes needs no rebuild. The dense per-curve figures (densities, budget, spectra, error-vs-time) take a curated one-seed, top-tier subset (`series_models` in the drivers).
 
-**Shell-clamp forcing.** The pipeline maintains low-wavenumber shell energy at its initial value rather than using an explicit body force. Setup: `shells = energy_shells(grid, [1, 2], u)`. Per-step: `maintain_shell_energy!(u, shells)`. Forcing-via-`forced_rhs!` exists but is currently commented out at all call sites.
+**Shell-clamp forcing.** Forced HIT maintains low-wavenumber shell energy at its initial value rather than an explicit body force (`shells = energy_shells(grid, [1,2], u)`; per-step `maintain_shell_energy!`). The decaying TGV is unforced — `solve_les` derives `forced = case.forced && dns.role !== :tgv`.

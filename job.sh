@@ -1,27 +1,17 @@
 #!/bin/bash
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_h100
-#SBATCH --mail-user=sda@cwi.nl
 #SBATCH --time=10:00:00
-# #SBATCH --time=00:30:00
-# #SBATCH --array=1-6
-# #SBATCH -o toto
-# #SBATCH --nodes=1
-# #SBATCH --ntasks=1
-# #SBATCH --cpus-per-task=16
 # #SBATCH --mail-type=BEGIN,END
-
-# Note:
-# - gpu_a100: 18 cores
-# - gpu_h100: 16 cores
+# #SBATCH --mail-user=sda@cwi.nl
 # https://servicedesk.surf.nl/wiki/display/WIKI/Snellius+partitions+and+accounting
 
-# mkdir -p /scratch-shared/$USER
+# Generic runner: it just evaluates `julia --project <args>`. `submit.sh` hands it
+# the driver + phase and the per-phase sbatch overrides (--array, --time,
+# --dependency); the directives above are the defaults. Run a single piece by hand
+# with e.g.  `sbatch job.sh run-les.jl reduce`  or  `sbatch --array=1-56 job.sh
+# run-les.jl models`. A `reduce` phase needs no GPU — point it at a CPU partition
+# (`sbatch --partition=... --gpus=0 job.sh run-les.jl reduce`) to save GPU hours.
 
-echo "Slurm job ID: $SLURM_JOB_ID"
-echo "Slurm array task ID: $SLURM_ARRAY_TASK_ID"
-
-# First create data, then run LES
-# julia --project create-data.jl
-# julia --project run-les.jl
-julia --project run-tgv.jl
+echo "Slurm job $SLURM_JOB_ID  array task ${SLURM_ARRAY_TASK_ID:-none}  ::  julia $*"
+julia --project "$@"

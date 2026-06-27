@@ -33,54 +33,159 @@ function les!(du, u, grid, cache; model, visc)
 end
 
 """
-Path of the LES rollout artifact for closure `key`. Accepts any key — model
-keys (`:nomo`, …, `:convsym`) as well as seed-suffixed variants from
-[`seed_key`](@ref).
+A-posteriori rollout for one closure `m` (a learned coordinate or a classical
+symbol) on test dataset (dns, Δf), reducing the metrics **on the fly** and
+discarding the heavy LES fields (Notes/ReExperiment.md — storing full LES
+trajectories blows up the disk). The LES is integrated from the first
+filtered-DNS snapshot across the reference save times; at each save time the
+reduced metrics are accumulated. Persists the light `apostfile(case, dns, Δf, m)`:
+
+- `t` — save times reached (truncated if the rollout blew up early).
+- `e_post` — relative solution error ‖u_les − ūbar‖/‖ūbar‖ vs the filtered DNS.
+- `spectra_les` — resolved energy spectrum per snapshot.
+- `ke`, `eps_visc`, `eps_sfs` — resolved KE, viscous dissipation ν⟨|∇u|²⟩, and SFS
+  dissipation −⟨τᵢⱼSᵢⱼ⟩ (drain positive) per snapshot.
+- `transfer` — `(; k, eps_sfs)`, the eval-mean shell-resolved SFS dissipation ε_sfs(k).
+
+`m === :ref` reduces the filtered-DNS reference directly (no integration; the SFS
+stress is the reference `outputs`); `m === :nomo` rolls out with no closure
+(eps_sfs ≡ 0). `getmodel` is a zero-arg thunk built only on a cache miss and never
+for `:ref`/`:nomo`. With `savefields`, the dealiased LES field series is also
+written to `apostfieldsfile` (reserved for the single showcase case).
 """
-upostfile(setup, key) = "$(setup.outdir)/u-post-$(key).jld2"
+function solve_les(case, m, dns, Δf, getmodel = () -> nothing; force = false, savefields = false)
+    (; D, l, n_les, backend, cfl) = case
+    visc = dns.visc
+    forced = case.forced && dns.role !== :tgv   # the decaying TGV is unforced
+    file = apostfile(case, dns, Δf, m)
+    skip_if_cached(file; force, label = "a-posteriori for $(modelname(m))") && return
 
-"""
-Run the LES rollout for a single closure keyed under `key`, starting from the
-first eval-window snapshot and integrating across `data.times[eval]`. `getmodel`
-is a zero-arg thunk that builds the closure; it is only invoked on a cache miss,
-so a cached run never instantiates the model. Persists snapshots and timing to
-`u-post-<key>.jld2`; returns nothing.
-"""
-function solve_les(setup, key, getmodel; force = false)
-    (; D, l, n_les, backend, visc, cfl, forced) = setup
-    grid = Grid{D}(; l, n = n_les, backend)
-    file = upostfile(setup, key)
-    skip_if_cached(file; force, label = "LES rollout for $(key)") && return
-    model = getmodel()
+    inputs, outputs = load(fieldsfile(case, dns, Δf), "inputs", "outputs")
+    times = load(dnsmetafile(case, dns), "times")
+    @assert length(inputs) == length(times) "fields/metadata snapshot count mismatch"
 
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
+    g = Grid{D}(; l, n = n_les, backend)
+    T = typeof(l)
+    stuff = spectral_stuff(g)
+    plan = plan_rfft(spacescalarfield(g))
 
-    # Start the rollout at the first eval snapshot; the training window is
-    # used only by the dataloaders and does not appear in any post-hoc result.
-    eval_range = data_ranges(setup).eval
-    u_les = data.inputs[eval_range[1]]
-    times = data.times[eval_range]
+    # Reduction scratch (reused every snapshot).
+    u_ref = vectorfield(g)
+    diss = KernelAbstractions.zeros(backend, T, ndrange(g))
+    A = tensorfield_nonsym(g)
+    AA = spacetensorfield_nonsym(g)
+    τphys = spacetensorfield(g)
+    τspec = tensorfield(g)
+    clo = vectorfield(g)
+    Tlocal = KernelAbstractions.zeros(backend, T, ndrange(g))
 
-    @info "Solving LES with $(key)"
-    flush(stderr)
-    u_model = vectorfield(grid)
+    # On-the-fly accumulators (heavy fields never stored).
+    e_post = Float64[]
+    ke = Float64[]
+    eps_visc = Float64[]
+    eps_sfs = Float64[]
+    spectra_les = Vector{Float64}[]
+    T_accum = zeros(length(stuff.k))
+    fields = savefields ? typeof(map(Array, u_ref))[] : nothing
 
-    # Do a short model warmup (so that compilation does not get included in timing)
-    twarm = [0.0, 1.0e-6]
-    foreach(copyto!, u_model, u_les)
-    solve_les!(u_model; times = twarm, grid, visc, model, cfl, forced)
+    model = m in (:ref, :nomo) ? nothing : getmodel()
 
-    # Solve LES
-    foreach(copyto!, u_model, u_les)
-    t = time()
-    snapshots = solve_les!(u_model; times, grid, visc, model, cfl, forced)
-    t = time() - t
+    # Reduce one (dealiased, spectral) LES state `u` against reference snapshot `i`.
+    reduce! = function (i, u)
+        foreach(copyto!, u_ref, inputs[i])
+        foreach(x -> apply!(twothirds!, g, (x, g)), u_ref)
+        push!(e_post, norm(stack(u) - stack(u_ref)) / norm(stack(u_ref)))
+        push!(ke, sum(getenergy, u) / 2)
+        push!(eps_visc, get_dissipation!(diss, u, visc, g))
+        push!(spectra_les, spectrum(u, g, stuff).s)
 
-    save_object_atomic(file, (; times, u = snapshots, timing = t))
+        if m === :nomo
+            push!(eps_sfs, 0.0)   # no closure ⇒ no SFS drain or transfer
+        else
+            # Physical strain rate from the resolved field.
+            apply!(vectorgradient!, g, (A, u, g))
+            for (AA, A) in zip(AA, A)
+                apply!(twothirds!, g, (A, g))
+                to_phys!(AA, A, plan, g)
+            end
+            S = strain_from_gradient(AA, g)
+
+            # Deviatoric SFS stress: reference `outputs` for :ref, else the closure
+            # re-evaluated on the rolled-out state (a-posteriori convention).
+            if m === :ref
+                for (ts, tcpu) in zip(τspec, outputs[i])
+                    copyto!(ts, tcpu)
+                    apply!(twothirds!, g, (ts, g))
+                end
+                for (tp, ts) in zip(τphys, τspec)
+                    to_phys!(tp, ts, plan, g)
+                end
+            else
+                foreach(copyto!, τphys, unstack_symtensor(model(u, AA), g))
+            end
+            make_tracefree!(τphys, g)
+
+            push!(eps_sfs, -mean(contract_dissipation(τphys, S, g)))
+
+            # Shell-resolved drain: clo_i = -i kⱼ τ̂_ij is the closure term in ∂ₜûᵢ.
+            for (ts, tp) in zip(τspec, τphys)
+                to_spec!(ts, tp, plan, g)
+                apply!(twothirds!, g, (ts, g))
+            end
+            apply!(tensordivergence!, g, (clo, τspec, g))
+            if D == 3
+                @. Tlocal = real(conj(u.x) * clo.x + conj(u.y) * clo.y + conj(u.z) * clo.z)
+            else
+                @. Tlocal = real(conj(u.x) * clo.x + conj(u.y) * clo.y)
+            end
+            for (j, shell) in enumerate(stuff.shells)
+                T_accum[j] += sum(view(Tlocal, shell))
+            end
+        end
+
+        isnothing(fields) || push!(fields, map(Array, u))
+        return
+    end
+
+    timing = 0.0
+    if m === :ref
+        @info "Reducing reference a-posteriori metrics (visc=$(visc), Δ=$(Δf))"
+        flush(stderr)
+        u = vectorfield(g)
+        for i in eachindex(inputs)
+            foreach(copyto!, u, inputs[i])
+            foreach(x -> apply!(twothirds!, g, (x, g)), u)
+            reduce!(i, u)
+        end
+    else
+        @info "Solving LES with $(modelname(m)) (visc=$(visc), Δ=$(Δf))"
+        flush(stderr)
+        u_model = vectorfield(g)
+
+        # Warm up (compile) on a throwaway run so timing excludes compilation.
+        foreach(copyto!, u_model, inputs[1])
+        solve_les!(u_model; times = [0.0, 1.0e-6], grid = g, visc, model, cfl, forced)
+
+        foreach(copyto!, u_model, inputs[1])
+        timing = time()
+        solve_les!(u_model; times, grid = g, visc, model, cfl, forced, onsnapshot = reduce!)
+        timing = time() - timing
+    end
+
+    nred = length(e_post)
+    nred < length(times) &&
+        @warn "rollout stored $(nred)/$(length(times)) snapshots (blew up early)"
+    transfer = (; k = collect(stuff.k), eps_sfs = .-T_accum ./ max(nred, 1))
+    save_object_atomic(
+        file,
+        (; t = times[1:nred], e_post, ke, eps_visc, eps_sfs, spectra_les, transfer, timing),
+    )
+    savefields &&
+        save_object_atomic(apostfieldsfile(case, dns, Δf, m), (; t = times[1:nred], u = fields))
     return
 end
 
-function solve_les!(u; times, grid, visc, model, cfl, forced = true)
+function solve_les!(u; times, grid, visc, model, cfl, forced = true, onsnapshot = (i, u) -> nothing)
     cache = getcache(grid)
     if !isnothing(model)
         # Allocate velocity gradient for closure
@@ -95,9 +200,6 @@ function solve_les!(u; times, grid, visc, model, cfl, forced = true)
     # an explicit forcing term to the RHS. Disabled for decaying flows
     # (`forced = false`, e.g. the Taylor-Green vortex).
     shells = forced ? energy_shells(grid, [1, 2], u) : nothing
-
-    # Storage for states on CPU
-    states = fill(map(Array, u), 0)
 
     t = times[1]
     j = 0
@@ -121,72 +223,27 @@ function solve_les!(u; times, grid, visc, model, cfl, forced = true)
 
             if j % 1 == 0
                 e = energy(u)
-                # @info join(
-                #     [
-                #         "j = $j",
-                #         "t = $(round(t; sigdigits = 4))",
-                #         "Δt = $(round(Δt; sigdigits = 4))",
-                #         "energy = $(round(e; sigdigits = 4))",
-                #     ],
-                #     ",\t",
-                # )
                 flush(stderr)
-                # Bail out on clearly unstable rollouts, but keep the snapshots
-                # accumulated so far so downstream comparisons can still run.
+                # Bail out on clearly unstable rollouts; the caller keeps whatever
+                # `onsnapshot` reduced so far so downstream comparisons can run.
                 forever = Δt < 1.0e-8
                 boom = e > 1.0e5
                 if forever || boom
                     forever && @warn "This will never finish"
                     boom && @warn "Boom!"
                     flush(stderr)
-                    return states
+                    return
                 end
             end
             j += 1
         end
 
-        # Store current state
+        # Reduce the current (dealiased) state on the fly, then continue.
         foreach(u -> apply!(twothirds!, grid, (u, grid)), u)
-        push!(states, map(Array, u))
+        onsnapshot(i, u)
     end
 
-    return states
-end
-
-function get_les_statistics(setup, keys)
-    (; D, l, n_les, backend, visc) = setup
-
-    data = joinpath(setup.outdir, "data.jld2") |> load_object
-
-    g = Grid{D}(; l, n = n_les, backend)
-    dissfield_les = KernelAbstractions.zeros(backend, typeof(l), ndrange(g))
-    stuff = spectral_stuff(g)
-    u_ref = data.inputs[data_ranges(setup).eval]
-    u_les_gpu = vectorfield(g)
-    u_ref_gpu = vectorfield(g)
-    return map(keys) do k
-        f = upostfile(setup, k)
-        @info "Reading $(f)"
-        flush(stderr)
-        u_les = f |> load_object |> x -> x.u
-        e_post = map(u_les, u_ref) do u_les, u_ref
-            foreach(copyto!, u_les_gpu, u_les)
-            foreach(copyto!, u_ref_gpu, u_ref)
-            foreach(u -> apply!(twothirds!, g, (u, g)), u_les_gpu)
-            foreach(u -> apply!(twothirds!, g, (u, g)), u_ref_gpu)
-            foreach(copyto!, u_les, u_les_gpu)
-            foreach(copyto!, u_ref, u_ref_gpu)
-            u_les = stack(u_les)
-            u_ref = stack(u_ref)
-            norm(u_les - u_ref) / norm(u_ref)
-        end
-        s = map(u_les) do u_les
-            foreach(copyto!, u_les_gpu, u_les)
-            spec = spectrum(u_les_gpu, g, stuff)
-            return spec.s
-        end
-        k => (; e_post, s)
-    end |> NamedTuple
+    return
 end
 
 function getdissipation(g, u, m)

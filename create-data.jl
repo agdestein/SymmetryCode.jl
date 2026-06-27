@@ -1,6 +1,15 @@
-# Generate forced DNS data for training and evaluating closures.
-# Adjust the parameters in `get_setup` and `get_config`.
-# Results are written to `plotdir` and arrays are cached in `outdir`.
+# Generate the forced-HIT DNS data for the Re_Δ experiment.
+#
+# Coordinate-driven: `case_snellius` holds everything shared across the sweep and
+# `dns_runs()` lists the (ν, seed, role) realizations. For each run we warm up the
+# DNS (`create_dns` -> dnsfile) and generate the (ūbar, τ) pairs at every filter
+# ratio of the run's role (`create_data` -> dnsmetafile + per-Δ fieldsfile/lesmeta).
+# `run-les.jl` consumes these.
+#
+# Phases (`julia create-data.jl <phase>`, default `all` = serial end-to-end):
+# `data` generates one DNS run per SLURM_ARRAY_TASK_ID; `reduce` writes the shared
+# stat tables; `count` prints the `data` array size. `submit.sh` chains data →
+# reduce with an `afterok` dependency.
 
 @info "Loading packages"
 flush(stderr)
@@ -13,178 +22,119 @@ using Statistics: mean
 
 import SymmetryCode as S
 
-#######################
-# Setup + experiment config
-#######################
-
-# Pick one. Output paths are derived automatically.
-
-# get_setup() = S.setup_laptop()
-# get_setup() = S.setup_turbulator_small()
-# get_setup() = S.setup_turbulator_medium()
-# get_setup() = S.setup_turbulator_large()
-get_setup() = S.setup_snellius()
+get_case() = S.case_snellius()
 
 get_config() = (;
-    # Pipeline stages to execute, in order. `create_dns` (:dns) writes
-    # dns.jld2; `create_data` (:data) reads it and writes data.jld2; the
-    # plot stages read whichever artifact already exists on disk.
+    # Pipeline stages, in order. `:dns` writes dnsfile (warm-up); `:data` reads it
+    # and writes dnsmetafile + per-Δ fieldsfile/lesmetafile. The plot stages read
+    # whichever artifact already exists.
     experiments = [
-        :dns,              # create_dns -> dns.jld2 (DNS warm-up) + tabulate warm-up stats
-        :spectrum_dns,     # plot_spectrum_dns -> DNS energy spectrum
-        :evolution_dns,    # plot_evolution_dns -> DNS time series
-        # :dissipation_fd, # plot_dissipation_finite_difference -> ε vs dE/dt check
-        :data,             # create_data -> data.jld2 ((ubar, τ) pairs) + tabulate time-avg stats
-        :dnsfield,         # heatmap of a DNS component + its filtered counterpart
-        :evolution_data,   # plot_evolution_data -> (ubar, τ) data time series
-        :spectrum_data,    # plot_spectrum_data -> DNS vs filtered-DNS spectra
+        :dns,            # create_dns -> dnsfile (DNS warm-up)
+        :evolution_dns,  # plot_evolution_dns -> warm-up time series
+        :spectrum_dns,   # plot_spectrum_dns -> DNS vs filtered-DNS spectrum (per Δ)
+        :data,           # create_data -> dnsmetafile + fieldsfile/lesmetafile per Δ
+        :evolution_data, # plot_evolution_data -> data-window time series
+        :spectrum_data,  # plot_spectrum_data -> time-averaged spectra (per Δ)
     ],
 
-    # Stage labels here force a re-compute regardless of cache. By default
-    # :dns/:data short-circuit when dns.jld2/data.jld2 already exist; uncomment
-    # a line below (or `push!(config.force, :data)` at the REPL) to invalidate.
-    # Only these two stages are cached; the plot stages always regenerate.
-    force = Set{Symbol}(
-        [
-            # :dns,
-            # :data,
-        ]
-    ),
+    # Stages whose cache is invalidated for this run. Only :dns/:data are cached;
+    # the plots always regenerate. Add e.g. `push!(config.force, :data)` at the REPL.
+    force = Set{Symbol}([]),
 )
 
-# Script-specific table file. create-data.jl and run-les.jl share a setup (hence
-# a plotdir), so each writes its summary tables to its own file to avoid one
-# script truncating the other's. Defined as a function (not a `const`) so both
-# scripts can be `include`d into the same REPL session — a `const` in one would
-# clash with the `const` of the same name in the other, whereas a function method
-# is freely redefinable. These thin wrappers thread that filename through
-# `S.tabulate` / `S.reset_tables` so the call sites below stay uncluttered.
+# Per-script table file (create-data.jl and run-les.jl share case.plotdir).
 tablefile() = "tables-data.txt"
-reset_tables(setup; kwargs...) = S.reset_tables(setup; filename = tablefile(), kwargs...)
+reset_tables(case; kwargs...) = S.reset_tables(case; filename = tablefile(), kwargs...)
 tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile(), kwargs...)
 
-# Stage 1 of the pipeline: DNS warm-up (`create_dns`) followed by (ubar, τ) data
-# generation (`create_data`), plus the diagnostic plots for both. Produces
-# `dns.jld2` and `data.jld2`, which `run-les.jl` consumes. The `config.experiments`
-# list below toggles which stages run, mirroring `run-les.jl` / `run-tgv.jl`.
-function main()
-    # Load setup/config from top of file
-    setup = get_setup()
-    config = get_config()
-    reset_tables(setup)
-    tabulate(setup, "Problem setup", setup)
+"Time-mean of a vector of NamedTuple statistics."
+timemean(stats) = let ks = keys(first(stats))
+    NamedTuple{ks}(map(k -> mean(getindex.(stats, k)), ks))
+end
 
-    #######################
-    # DNS warm-up
-    #######################
+print_count(case) = println(length(S.dns_runs().all))
 
-    if :dns in config.experiments
-        S.create_dns(setup; force = :dns in config.force)
+"""
+Phase `data` (array over `dns_runs().all`): warm up the DNS (`create_dns`) and
+generate the (ūbar, τ) data (`create_data`) for one run, plus that run's plots.
+`task_id === nothing` does every run; an integer does only that 1-based run.
+"""
+function run_data!(case, config, task_id)
+    for (i, dns) in enumerate(S.dns_runs().all)
+        isnothing(task_id) || i == task_id || continue
+        @info "===== DNS run $i: visc=$(dns.visc), seed=$(dns.seed), role=$(dns.role) ====="
+        flush(stderr)
+        filters = dns.role === :train ? case.filters_train : case.filters_test
 
-        # Tabulate statistics at the end of warm-up, to sanity-check the
-        # turbulent state (Reynolds numbers, resolution) before data generation.
-        let
-            walltime, statistics = load("$(setup.outdir)/dns.jld2", "walltime", "statistics")
-            tabulate(setup, "DNS warmup wall time", (; walltime))
-            tabulate(setup, "DNS statistics after warm-up", statistics[end])
-        end
-    end
-
-    if :spectrum_dns in config.experiments
-        S.plot_spectrum_dns(setup)
-    end
-
-    if :evolution_dns in config.experiments
-        S.plot_evolution_dns(setup)
-    end
-
-    if :dissipation_fd in config.experiments
-        S.plot_dissipation_finite_difference(setup)
-    end
-
-    #######################
-    # (ubar, τ) data generation
-    #######################
-
-    if :data in config.experiments
-        S.create_data(setup; force = :data in config.force)
-
-        # Tabulate the statistics averaged over the data-generation window, for
-        # reporting the characteristic Reynolds numbers, length/time scales and
-        # resolution of the (ubar, τ) dataset. Done for both the DNS and the
-        # filtered (LES-grid) fields.
-        let
-            data = joinpath(setup.outdir, "data.jld2") |> load_object
-            timemean(stats) = let ks = keys(first(stats))
-                NamedTuple{ks}(map(k -> mean(getindex.(stats, k)), ks))
+        :dns in config.experiments && S.create_dns(case, dns; force = :dns in config.force)
+        :evolution_dns in config.experiments && S.plot_evolution_dns(case, dns)
+        if :spectrum_dns in config.experiments
+            for Δf in filters
+                S.plot_spectrum_dns(case, dns, Δf)
             end
-            (; n_train, nstep) = setup.datagen
-            inference = data.timing * (nstep - n_train) / nstep # Timing for inference window
-            tabulate(setup, "Data generation timing", (; full = data.timing, inference))
-            tabulate(
-                setup, "Time-averaged DNS statistics (data window)",
-                timemean(data.statistics_dns),
-            )
-            tabulate(
-                setup, "Time-averaged filtered-DNS statistics (data window)",
-                timemean(data.statistics_les),
-            )
         end
-    end
 
-    if :dnsfield in config.experiments
-        # Plot DNS component
-        let
-            (; D) = setup
-            u = load("$(setup.outdir)/dns.jld2", "u") |> u -> map(copy, u) |> adapt(setup.backend)
-            g = S.Grid{setup.D}(; setup.l, n = setup.n_dns, setup.backend)
-            v = S.spacescalarfield(g)
-            p = S.getplan(g)
-            if D == 2
-                S.to_phys!(v, u.x, p, g)
-                field = v |> Array
-            else
-                S.to_phys!(v, u.z, p, g)
-                field = v[:, :, end] |> Array
+        :data in config.experiments && S.create_data(case, dns; force = :data in config.force)
+        :evolution_data in config.experiments && S.plot_evolution_data(case, dns)
+        if :spectrum_data in config.experiments
+            for Δf in filters
+                S.plot_spectrum_data(case, dns, Δf)
             end
-            fig, _ = heatmap(field; colormap = :RdBu)
-            save("$(setup.plotdir)/dnsfield.png", fig)
-            fig
-        end
-
-        # Plot filtered DNS component
-        let
-            (; D) = setup
-            data = joinpath(setup.outdir, "data.jld2") |> load_object
-            u = map(copy, data.inputs[1]) |> adapt(setup.backend)
-            g = S.Grid{setup.D}(; setup.l, n = setup.n_les, setup.backend)
-            v = S.spacescalarfield(g)
-            p = S.getplan(g)
-            if D == 2
-                S.to_phys!(v, u.x, p, g)
-                field = v |> Array
-            else
-                S.to_phys!(v, u.z, p, g)
-                field = v[:, :, end] |> Array
-            end
-            fig, _ = heatmap(field; colormap = :RdBu)
-            save("$(setup.plotdir)/dnsfield_filtered.png", fig)
-            fig
         end
     end
-
-    if :evolution_data in config.experiments
-        S.plot_evolution_data(setup)
-    end
-
-    if :spectrum_data in config.experiments
-        S.plot_spectrum_data(setup)
-    end
-
-    @info "Done."
-    flush(stderr)
-
     return
 end
 
-main()
+"""
+Phase `reduce` (serial): the per-run DNS-stat tables and the paper-ready
+cross-dataset DNS-stats table, read back from what the `data` phase wrote (a run
+whose artifact is missing is skipped). The shared text table is written only here,
+so array `data` tasks never race it.
+"""
+function run_reduce!(case, config)
+    reset_tables(case)
+    for dns in S.dns_runs().all
+        :dns in config.experiments && isfile(S.dnsfile(case, dns)) && tabulate(
+            case, "DNS stats after warm-up (visc=$(dns.visc), seed=$(dns.seed))",
+            load(S.dnsfile(case, dns), "statistics")[end],
+        )
+        :data in config.experiments && isfile(S.dnsmetafile(case, dns)) && tabulate(
+            case, "Time-averaged DNS stats, data window (visc=$(dns.visc), seed=$(dns.seed))",
+            timemean(load(S.dnsmetafile(case, dns), "statistics_dns")),
+        )
+    end
+    S.write_dns_table(case, S.dns_runs().all)
+    @info "Done (reduce)."
+    flush(stderr)
+    return
+end
+
+"""
+Entry point. `julia create-data.jl [phase]`, `phase ∈ all|data|reduce|count`
+(default `all` = every run then the tables, serial). The cluster submits `data` as
+a SLURM array (one unit per DNS run) then `reduce` serially, chained by `afterok`
+(see `submit.sh`); `count` prints the `data` array size.
+"""
+function (@main)(args)
+    case = get_case()
+    config = get_config()
+    phase = isempty(args) ? "all" : first(args)
+    task_id = let s = get(ENV, "SLURM_ARRAY_TASK_ID", nothing)
+        isnothing(s) ? nothing : parse(Int, s)
+    end
+
+    phase in ("all", "data", "reduce", "count") ||
+        error("unknown phase '$(phase)'; expected all|data|reduce|count")
+
+    if phase == "count"
+        print_count(case)
+    elseif phase == "all"
+        run_data!(case, config, nothing)
+        run_reduce!(case, config)
+    elseif phase == "data"
+        run_data!(case, config, task_id)
+    elseif phase == "reduce"
+        run_reduce!(case, config)
+    end
+    return 0
+end
