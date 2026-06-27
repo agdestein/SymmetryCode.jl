@@ -10,22 +10,27 @@
 #
 # Usage:  ./submit.sh [stage]      stage ∈ data | les | tgv | all   (default all)
 # Run a single stage once its inputs exist (e.g. `./submit.sh les` after `data`).
-#
-# Array sizes come from each driver's `count` phase (pure list arithmetic — no GPU),
-# run here on the login node so they always track the config. If login-node Julia is
-# undesirable, replace the `count` calls with literal numbers.
 
-# -e: stop on first error; pipefail: a failed `count` pipe is an error. (No -u: an
-# empty ${DEP[@]} must expand to nothing on the cluster's and older local bashes.)
-set -eo pipefail
+set -eo pipefail   # stop on first error
 cd "$(dirname "$0")"
 stage=${1:-all}
+
+# --- array sizes (must match the active config in each driver) ----------------
+# Hard-coded because the login node can't run Julia without a long recompile. They
+# change only when you change a sweep axis (archs/sizes/seeds, dns_runs, tgv_runs).
+# Recompute on a compute node via each driver's `count` phase, e.g.
+#     sbatch --wrap 'julia --project run-les.jl count'   # logs "<models> <convsym>"
+# (read the value from the job's stdout), then update the matching variable.
+N_DNS=5            # create-data.jl : length(dns_runs().all)
+N_MODELS=49        # run-les.jl     : length(les_worklist)
+N_CONVSYM=18       # run-les.jl     : length(convsym_models)
+N_TGVDATA=1        # run-tgv.jl     : length(tgv_runs())
+N_TGVMODELS=14     # run-tgv.jl     : length(eval_models)
 
 # sub <driver> <phase> [extra sbatch flags...]  ->  echoes the new job id.
 # job.sh evaluates `julia --project <driver> <phase>`; the flags are per-phase
 # overrides (--array / --time / --dependency) layered on job.sh's #SBATCH defaults.
 sub() { local drv=$1 ph=$2; shift 2; sbatch --parsable "$@" job.sh "$drv" "$ph"; }
-count() { julia --project "$1" count | tail -n1; }
 
 last=""   # job id the next stage waits on (links the stages end-to-end)
 # Populate DEP with an afterok flag on the previous stage's reduce, for the first
@@ -33,7 +38,6 @@ last=""   # job id the next stage waits on (links the stages end-to-end)
 first_dep() { DEP=(); [ -n "$last" ] && DEP=(--dependency=afterok:"$last"); return 0; }
 
 if [[ $stage == data || $stage == all ]]; then
-    read -r N_DNS <<<"$(count create-data.jl)"
     first_dep
     d=$(sub create-data.jl data --array=1-"$N_DNS" "${DEP[@]}")
     last=$(sub create-data.jl reduce --time=00:20:00 --dependency=afterok:"$d")
@@ -41,7 +45,6 @@ if [[ $stage == data || $stage == all ]]; then
 fi
 
 if [[ $stage == les || $stage == all ]]; then
-    read -r N_MODELS N_CONVSYM <<<"$(count run-les.jl)"
     first_dep
     m=$(sub run-les.jl models --array=1-"$N_MODELS" "${DEP[@]}")
     c=$(sub run-les.jl convsym --array=1-"$N_CONVSYM" --dependency=afterok:"$m")
@@ -50,7 +53,6 @@ if [[ $stage == les || $stage == all ]]; then
 fi
 
 if [[ $stage == tgv || $stage == all ]]; then
-    read -r N_TGVDATA N_TGVMODELS <<<"$(count run-tgv.jl)"
     first_dep
     d=$(sub run-tgv.jl data --array=1-"$N_TGVDATA" "${DEP[@]}")
     m=$(sub run-tgv.jl models --array=1-"$N_TGVMODELS" --dependency=afterok:"$d")
