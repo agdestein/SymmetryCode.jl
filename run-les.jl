@@ -43,16 +43,19 @@ get_config() = (;
     # The capacity grid (names = `case.tiers` keys). `sizes` is shared by all three
     # archs; `sizes_extra` extends individual archs (conv runs higher — the others
     # OOM the equivariant rollout past ~8k and saturate well before).
-    sizes = (:p120, :p400, :p1200, :p3000, :p8000),
-    sizes_extra = (; conv = (:p16000,)),
-    top = :p8000,                # matched top tier for the B / C comparisons
+    # sizes = (:p120, :p400, :p1200, :p3000, :p8000),
+    sizes = (:p120, :p400, :p1200),
+    # sizes_extra = (; conv = (:p16000,)),
+    sizes_extra = (; conv = (:p3000,)),
+    # top = :p8000,                # matched top tier for the B / C comparisons
+    top = :p1200,                # matched top tier for the B / C comparisons
 
     # Seeds: more for the cheap saturation curve (one eval point), fewer for the
     # expensive top-tier grid (full ν × Δ).
     netseeds_curve = 0:2,
     netseeds_grid = 0:1,
 
-    classical = [:nomo, :clar],
+    classical = [:nomo, :dynsmag, :clar],
     train = true,
 
     experiments = [
