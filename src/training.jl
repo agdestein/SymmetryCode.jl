@@ -147,11 +147,18 @@ function build_net_stuff(netsetup, arch, layers; same_as_equi = false, use_redel
 end
 
 """
-Inference closure `(u, ∇ū) -> τ` for a trained learned-model coordinate `m`,
-wrapping `psfile(case, m)` for evaluation at `setup` (which supplies the filter
-width Δ). (Re_Δ-augmented inference is wired in a later increment.)
+Inference closure `(u, ∇ū) -> τ` for a learned-model coordinate `m`, wrapping
+`psfile(case, m)` for evaluation at `setup` (which supplies the filter width Δ).
+`m.arch === :convsym` owns no params: it loads the matching `:conv` coordinate and
+group-averages it ([`symmetrize_pointwise`](@ref)) for exact equivariance.
 """
 function build_model(case, m, setup)
+    # The symmetrized MLP reuses :conv's trained params (identical function, made
+    # exactly equivariant at inference). It has no psfile of its own.
+    if m.arch === :convsym
+        g = Grid{case.D}(; case.l, n = case.n_les, case.backend)
+        return symmetrize_pointwise(build_model(case, (; m..., arch = :conv), setup), g)
+    end
     layers = case.tiers[m.tier][m.arch]
     ns = build_net_stuff(make_netsetup(case, m.netseed), m.arch, layers; m.use_redelta)
     d = load(psfile(case, m))

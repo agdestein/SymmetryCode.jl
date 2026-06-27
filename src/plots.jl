@@ -247,7 +247,7 @@ line). Learned `families` are aggregated over `netseeds` (whisker = ±std); the
 `classical` baselines are single bars. Below 1 ⇒ under-dissipative (Clark), above
 1 ⇒ over-dissipative. Same drain convention as [`compute_sfs_stats`](@ref).
 """
-function plot_dissipation_bar(case, dns, Δf, families, netseeds; classical = (:nomo, :clar))
+function plot_dissipation_bar(case, dns, Δf, families, netseeds; classical)
     agg = get_seed_statistics(case, families, dns, Δf, netseeds)
     items = [collect(classical); collect(families)]
     fig = Figure(; size = (max(520, 38 * length(items) + 150), 360))
@@ -269,7 +269,7 @@ Bar plot of the local backscatter fraction per model — the fraction of points 
 ±std), `classical` as single bars; the filtered-DNS reference is the dashed line
 at its absolute fraction. Smagorinsky-type `τ = -2νₜS` (νₜ ≥ 0) is pinned to zero.
 """
-function plot_backscatter_bar(case, dns, Δf, families, netseeds; classical = (:nomo, :clar))
+function plot_backscatter_bar(case, dns, Δf, families, netseeds; classical)
     ref_bs = load_object(sfsstatsfile(case, dns, Δf, :ref)).diss.backscatter
     agg = get_seed_statistics(case, families, dns, Δf, netseeds)
     items = [collect(classical); collect(families)]
@@ -295,7 +295,7 @@ lower is better) and cross-correlation with the filtered-DNS reference (right,
 higher is better). Learned `families` aggregated over `netseeds` (whisker = ±std),
 `classical` as single bars.
 """
-function plot_apriori_bar(case, dns, Δf, families, netseeds; classical = (:nomo, :clar))
+function plot_apriori_bar(case, dns, Δf, families, netseeds; classical)
     agg = get_seed_statistics(case, families, dns, Δf, netseeds)
     items = [collect(classical); collect(families)]
     fig = Figure(; size = (max(900, 70 * length(items) + 120), 360))
@@ -491,7 +491,7 @@ aggregate). `classical` closures are overlaid as single-value reference trends. 
 """
 function plot_trend_vs_redelta(
         case, evalpoints, families;
-        netseeds = 0:0, classical = (:clar,), trainpoints = nothing,
+        netseeds, classical, trainpoints = nothing,
     )
     redelta_of(dns, Δf) = mean(load(fieldsfile(case, dns, Δf), "redelta"))
     re = [redelta_of(dns, Δf) for (dns, Δf) in evalpoints]
@@ -580,7 +580,7 @@ same error floor, but the ones with more inductive bias reach it at far fewer
 parameters. `classical` closures are horizontal reference lines. Reads
 [`sfsstatsfile`](@ref) and [`apostfile`](@ref); `paramcount` sets the x-position.
 """
-function plot_saturation(case, dns, Δf, families, netseeds; classical = (:clar,))
+function plot_saturation(case, dns, Δf, families, netseeds; classical)
     archs = unique(f.arch for f in families)
     relerr(m) = isfile(sfsstatsfile(case, dns, Δf, m)) ?
         load_object(sfsstatsfile(case, dns, Δf, m)).apriori.relerr : missing
@@ -1304,7 +1304,7 @@ comment).
 """
 function write_errors_table(
         case, dns, Δf, families, netseeds;
-        classical = (:nomo, :clar), include_equi = true, filename = "errors.tex",
+        classical, include_equi = true, filename = "errors.tex",
     )
     refstats = load_object(sfsstatsfile(case, dns, Δf, :ref))
     refmed = refstats.diss.median
@@ -1453,7 +1453,7 @@ adds one input channel at negligible cost. A cell whose artifact is missing prin
 """
 function write_timing_table(
         case, dns, Δf, families, netseeds;
-        classical = (:nomo, :clar), filename = "timing.tex",
+        classical, filename = "timing.tex",
     )
     items = [collect(classical); collect(families)]
 
