@@ -9,15 +9,14 @@
 # coordinate `(; visc, seed, role=:tgv, Re_target)` from `tgv_runs()`. No training
 # here — run-les.jl owns the ps-*.jld2.
 #
-# SLURM array distribution (mirrors run-les.jl). The distributable unit is one
-# closure evaluated at every (tgv, Δf) point; with SLURM_ARRAY_TASK_ID=i set this
-# process handles only `models[i]`, unset it runs them all serially. The TGV data
-# generation is one inherently-serial high-res DNS per run (a single time march, not
-# array-splittable), and the model-independent references and figures are
-# cross-model — all run in the serial pass only. So the parallel workflow is:
-# generate the data with a serial run (`experiments = [:data]`), submit the eval
-# array (`--array=1-N`, N = the logged worklist length), then a final serial run for
-# the references + figures. A plain serial run does the whole thing end-to-end.
+# Phases (`julia run-tgv.jl <phase>`, default `all` = serial end-to-end):
+#   data     generate one TGV run's data per SLURM_ARRAY_TASK_ID (a high-res DNS
+#            time march). Each run is independent, so the array splits over runs.
+#   models   evaluate one closure at every (tgv, Δf) point — a second array over
+#            `eval_models`. Reuses run-les.jl's psfiles; assumes `data` has run.
+#   reduce   serial: model-independent references + the per-eval-point figures.
+#   count    print the `data` and `models` array sizes for submit.sh.
+# `submit.sh` chains data → models → reduce with SLURM `afterok` dependencies.
 
 @info "Loading packages"
 flush(stderr)
@@ -95,62 +94,54 @@ function eval_model!(case, config, m, dns, Δf)
     return
 end
 
-function main()
-    case = get_case()
-    config = get_config()
+tgv_points(case) = [(tgv, Δf) for tgv in S.tgv_runs() for Δf in case.filters_test]
+print_counts(config) = println(length(S.tgv_runs()), " ", length(eval_models(config)))
 
-    slurm_id = get(ENV, "SLURM_ARRAY_TASK_ID", nothing)
-    task_id = isnothing(slurm_id) ? nothing : parse(Int, slurm_id)
-    serial = isnothing(task_id)
-
-    models = eval_models(config)
-    fams = families(config)
-    tgvs = S.tgv_runs()
-    points = [(tgv, Δf) for tgv in tgvs for Δf in case.filters_test]
-
-    # TGV data generation: one inherently-serial high-res DNS per run, so it runs
-    # only in the serial pass (before the eval loop). An eval array therefore assumes
-    # the data already exists — generate it first with a serial `:data` run.
-    if serial && :data in config.experiments
-        for tgv in tgvs
-            @info "===== TGV data: Re=$(tgv.Re_target), visc=$(tgv.visc) ====="
-            flush(stderr)
-            S.create_data_tgv(case, tgv; force = :data in config.force)
-        end
+"""
+Phase `data` (array over `tgv_runs()`): generate one TGV run's (ūbar, τ) data
+(`create_data_tgv`) — a single high-res DNS time march. Each run is independent.
+`task_id === nothing` does every run; an integer does only that 1-based run.
+"""
+function run_data!(case, config, task_id)
+    :data in config.experiments || return
+    for (i, tgv) in enumerate(S.tgv_runs())
+        isnothing(task_id) || i == task_id || continue
+        @info "===== TGV data $i: Re=$(tgv.Re_target), visc=$(tgv.visc) ====="
+        flush(stderr)
+        S.create_data_tgv(case, tgv; force = :data in config.force)
     end
+    return
+end
 
-    #######################
-    # Per-model work (distributed): evaluate the closure at every (tgv, Δf) point.
-    #######################
-    @info "TGV worklist: $(length(models)) units (SLURM array range 1-$(length(models)))"
-    flush(stderr)
+"""
+Phase `models` (array over `eval_models`): evaluate one closure at every (tgv, Δf)
+point — a-priori stats + the decaying rollout. Closures are reused verbatim from
+run-les.jl's psfiles (no training); assumes the `data` phase has run.
+"""
+function run_models!(case, config, task_id)
+    models = eval_models(config)
+    points = tgv_points(case)
     for (i, m) in enumerate(models)
-        serial || i == task_id || continue
-        @info "===== unit $i/$(length(models)): $(S.modelname(m)) ====="
+        isnothing(task_id) || i == task_id || continue
+        @info "===== model $i/$(length(models)): $(S.modelname(m)) ====="
         flush(stderr)
         for (tgv, Δf) in points
             eval_model!(case, config, m, tgv, Δf)
         end
     end
+    return
+end
 
-    # An array task is done after its slice; everything below is the serial pass.
-    if !serial
-        @info "Done (array task $(task_id))."
-        flush(stderr)
-        return
-    end
-
-    #######################
-    # Serial aggregation: model-independent references, then the per-eval-point
-    # figures (cross-model). After an array run, rerun without the array env — the
-    # per-model loop above is then all cache hits and only this section runs.
-    #######################
-    for (tgv, Δf) in points
-        eval_ref!(case, config, tgv, Δf)
-    end
-
+"""
+Phase `reduce` (serial): the model-independent references then the per-eval-point
+cross-model figures (bars, error, spectra, the dissipation benchmark, the field
+montage). Reads what the `models` phase wrote.
+"""
+function run_reduce!(case, config)
+    fams = families(config)
     series = series_models(config)
-    for (tgv, Δf) in points
+    for (tgv, Δf) in tgv_points(case)
+        eval_ref!(case, config, tgv, Δf)
         if :plots in config.experiments
             S.plot_apriori_bar(case, tgv, Δf, fams, config.netseeds; classical = config.classical)
             S.plot_dissipation_bar(case, tgv, Δf, fams, config.netseeds; classical = config.classical)
@@ -162,10 +153,40 @@ function main()
         :field_evolution in config.experiments &&
             S.plot_field_evolution_tgv(case, tgv, Δf)
     end
-
-    @info "Done."
+    @info "Done (reduce)."
     flush(stderr)
     return
 end
 
-main()
+"""
+Entry point. `julia run-tgv.jl [phase]`, `phase ∈ all|data|models|reduce|count`
+(default `all` = serial end-to-end). The cluster submits `data` and `models` as
+SLURM arrays then `reduce` serially, chained by `afterok` (see `submit.sh`);
+`count` prints the two array sizes.
+"""
+function (@main)(args)
+    case = get_case()
+    config = get_config()
+    phase = isempty(args) ? "all" : first(args)
+    task_id = let s = get(ENV, "SLURM_ARRAY_TASK_ID", nothing)
+        isnothing(s) ? nothing : parse(Int, s)
+    end
+
+    phase in ("all", "data", "models", "reduce", "count") ||
+        error("unknown phase '$(phase)'; expected all|data|models|reduce|count")
+
+    if phase == "count"
+        print_counts(config)
+    elseif phase == "all"
+        run_data!(case, config, nothing)
+        run_models!(case, config, nothing)
+        run_reduce!(case, config)
+    elseif phase == "data"
+        run_data!(case, config, task_id)
+    elseif phase == "models"
+        run_models!(case, config, task_id)
+    elseif phase == "reduce"
+        run_reduce!(case, config)
+    end
+    return 0
+end

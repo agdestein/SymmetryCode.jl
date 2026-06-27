@@ -17,15 +17,18 @@
 # B reads A/C's artifacts at the in-distribution point. Artifacts self-locate from
 # coordinates, so adding a size or a seed later recomputes only the gaps.
 #
-# SLURM array distribution (mirrors create-data.jl). The per-model work — train the
-# closure, then evaluate it at every point it appears in — is the distributable
-# unit. With SLURM_ARRAY_TASK_ID=i set this process handles only `worklist[i]`;
-# unset, it runs the whole list serially. Partitioning by *model* (not by eval
-# point) gives every psfile exactly one writer, so trainings never race. The
-# model-independent references, the Phase-0 binning, and every cross-model
-# figure/table run only in the serial pass — so after an array run, rerun once
-# without the array env to aggregate (the per-model loop is then all cache hits).
-# Submit with `--array=1-N`, N = the worklist length logged at startup.
+# Phases (`julia run-les.jl <phase>`, default `all` = the whole pipeline serially):
+#   models   per-model train+eval, distributed over SLURM_ARRAY_TASK_ID (one unit
+#            per `les_worklist` entry). Partitioning by *model* gives every psfile
+#            exactly one writer, so concurrent trainings never race.
+#   convsym  evaluate the symmetrized MLP (reuses :conv's psfile) — a second array,
+#            run *after* `models` so the conv params exist (afterok in submit.sh).
+#   reduce   serial: model-independent references, Re_Δ binning, every cross-model
+#            figure/table (reads what the two array phases wrote).
+#   count    print the `models` and `convsym` array sizes for submit.sh.
+# `submit.sh` chains models → convsym → reduce with SLURM `afterok` dependencies,
+# so the sweep is one submission instead of hand-sequenced reruns. Artifacts
+# self-locate from coordinates, so adding a size/seed recomputes only the gaps.
 
 @info "Loading packages"
 flush(stderr)
@@ -163,81 +166,81 @@ function eval_model!(case, config, m, dns, Δf; equi = false)
     return
 end
 
-function main()
-    case = get_case()
-    config = get_config()
+# Eval points + the distributed worklist; the phase entry points below read these.
+eval_indist(case) = (first(S.dns_runs().test), first(case.filters_test))  # the A/B point
+eval_grid(case) = [(dns, Δf) for dns in S.dns_runs().test for Δf in case.filters_test]
+les_worklist(c) = [c.classical; all_models(c)]
+print_counts(config) = println(length(les_worklist(config)), " ", length(convsym_models(config)))
 
-    slurm_id = get(ENV, "SLURM_ARRAY_TASK_ID", nothing)
-    task_id = isnothing(slurm_id) ? nothing : parse(Int, slurm_id)
-    serial = isnothing(task_id)
+"""
+Phase `models` (array over `les_worklist`): train each learned closure (cache-
+guarded), then evaluate it at every point it appears in — the in-distribution A/B
+point for all, plus the full C grid for the classical baselines and the ±Re
+ablation set. `task_id === nothing` runs the whole list; an integer runs only that
+1-based unit. Equivariance is computed at the A/B point only.
+"""
+function run_models!(case, config, task_id)
+    indist, Δ_ab = eval_indist(case)
+    grid = eval_grid(case)
+    work = les_worklist(config)
+    cgrid = [config.classical; ablation_models(config)]
 
-    serial && reset_tables(case)
-
-    # Trainpool load is heavy; build it lazily so eval-only / already-trained tasks
-    # and the serial aggregation rerun (all cache hits) never pay for it.
+    # Trainpool load is heavy; build it lazily so eval-only / already-trained units
+    # never pay for it.
     local trainpool = nothing
     gettrainpool() = (isnothing(trainpool) && (trainpool = S.build_trainpool(case)); trainpool)
 
-    indist = first(S.dns_runs().test)        # in-distribution test run (A/B eval point)
-    Δ_ab = first(case.filters_test)          # representative filter for A/B
-    gridpoints = [(dns, Δf) for dns in S.dns_runs().test for Δf in case.filters_test]
-
-    # The distributable unit: one closure handled end-to-end. Everyone is evaluated
-    # at the A/B in-distribution point; the classical baselines and the ±Re ablation
-    # models additionally span the full C grid (the A/B point is itself one of the
-    # grid points, hence the dedup below).
-    worklist = [config.classical; all_models(config)]
-    cgrid_closures = [config.classical; ablation_models(config)]
-    @info "LES worklist: $(length(worklist)) units (SLURM array range 1-$(length(worklist)))"
-    flush(stderr)
-
-    #######################
-    # Per-model work (distributed): train (learned only), then evaluate at every
-    # point the closure appears in. A/B is the only point that gets equivariance.
-    #######################
-    for (i, m) in enumerate(worklist)
-        serial || i == task_id || continue
-        @info "===== unit $i/$(length(worklist)): $(S.modelname(m)) ====="
+    for (i, m) in enumerate(work)
+        isnothing(task_id) || i == task_id || continue
+        @info "===== model $i/$(length(work)): $(S.modelname(m)) ====="
         flush(stderr)
-
         if config.train && m isa NamedTuple && (:train in config.force || !isfile(S.psfile(case, m)))
             S.train_model(case, m, gettrainpool(); force = :train in config.force)
         end
         S.clean()
-
         points = [(indist, Δ_ab)]
-        m in cgrid_closures && append!(points, [p for p in gridpoints if p != (indist, Δ_ab)])
+        m in cgrid && append!(points, [p for p in grid if p != (indist, Δ_ab)])
         for (dns, Δf) in points
             eval_model!(case, config, m, dns, Δf; equi = (dns, Δf) == (indist, Δ_ab))
         end
     end
+    return
+end
 
-    # An array task is done after its slice; everything below is the serial pass.
-    if !serial
-        @info "Done (array task $(task_id))."
+"""
+Phase `convsym` (array over `convsym_models`): evaluate the symmetrized MLP at the
+in-distribution point. It reuses :conv's psfile, so it must run *after* the
+`models` phase trained those — the submit DAG enforces the order with an `afterok`
+dependency; a serial/local run already has them on disk.
+"""
+function run_convsym!(case, config, task_id)
+    indist, Δ_ab = eval_indist(case)
+    models = convsym_models(config)
+    for (i, m) in enumerate(models)
+        isnothing(task_id) || i == task_id || continue
+        @info "===== convsym $i/$(length(models)): $(S.modelname(m)) ====="
         flush(stderr)
-        return
+        eval_model!(case, config, m, indist, Δ_ab; equi = true)
     end
+    return
+end
 
-    #######################
-    # Serial aggregation. Model-independent references at every eval point + the
-    # Phase-0 Re_Δ binning per grid point, then the training timing/curves and every
-    # cross-model figure/table. After an array run, rerun once without the array env:
-    # the per-model loop above is all cache hits, so only this section does work.
-    #######################
-    for (dns, Δf) in unique([(indist, Δ_ab); gridpoints])
+"""
+Phase `reduce` (serial): the model-independent references at every eval point, the
+Phase-0 Re_Δ binning, and every cross-model figure/table. Reads the per-model
+artifacts the `models` / `convsym` phases wrote, so it runs last (`afterok`).
+"""
+function run_reduce!(case, config)
+    indist, Δ_ab = eval_indist(case)
+    grid = eval_grid(case)
+    reset_tables(case)
+
+    for (dns, Δf) in unique([(indist, Δ_ab); grid])
         eval_ref!(case, config, dns, Δf)
     end
 
-    # :convsym is eval-only (reuses :conv's psfile) and in-distribution only, so it
-    # runs here in the serial pass — once the conv models it wraps are trained —
-    # rather than as its own distributed unit (which would race that training).
-    for m in convsym_models(config)
-        eval_model!(case, config, m, indist, Δ_ab; equi = true)
-    end
-
     if :redelta_binning in config.experiments
-        for (dns, Δf) in gridpoints
+        for (dns, Δf) in grid
             S.compute_redelta_binning(case, dns, Δf; force = :redelta_binning in config.force)
             S.plot_redelta_binning(case, dns, Δf)
         end
@@ -278,7 +281,7 @@ function main()
     if :trend in config.experiments
         trainpoints = [(dns, Δf) for dns in S.dns_runs().train for Δf in case.filters_train]
         S.plot_trend_vs_redelta(
-            case, gridpoints, ablation_families(config);
+            case, grid, ablation_families(config);
             netseeds = config.netseeds_grid,
             classical = Tuple(filter(!=(:nomo), config.classical)),  # :nomo diss-ratio = 0 (log axis)
             trainpoints,
@@ -294,9 +297,41 @@ function main()
         )
     end
 
-    @info "Done."
+    @info "Done (reduce)."
     flush(stderr)
     return
 end
 
-main()
+"""
+Entry point. `julia run-les.jl [phase]`, `phase ∈ all|models|convsym|reduce|count`
+(default `all` = the full pipeline, serial). The cluster submits `models` and
+`convsym` as SLURM arrays (one unit per `SLURM_ARRAY_TASK_ID`) then `reduce`
+serially, chained by `afterok` (see `submit.sh`); `count` prints the two array
+sizes. `all` ignores the array env so a stray `SLURM_ARRAY_TASK_ID` can't shard it.
+"""
+function (@main)(args)
+    case = get_case()
+    config = get_config()
+    phase = isempty(args) ? "all" : first(args)
+    task_id = let s = get(ENV, "SLURM_ARRAY_TASK_ID", nothing)
+        isnothing(s) ? nothing : parse(Int, s)
+    end
+
+    phase in ("all", "models", "convsym", "reduce", "count") ||
+        error("unknown phase '$(phase)'; expected all|models|convsym|reduce|count")
+
+    if phase == "count"
+        print_counts(config)
+    elseif phase == "all"
+        run_models!(case, config, nothing)
+        run_convsym!(case, config, nothing)
+        run_reduce!(case, config)
+    elseif phase == "models"
+        run_models!(case, config, task_id)
+    elseif phase == "convsym"
+        run_convsym!(case, config, task_id)
+    elseif phase == "reduce"
+        run_reduce!(case, config)
+    end
+    return 0
+end

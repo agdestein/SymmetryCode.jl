@@ -5,6 +5,11 @@
 # DNS (`create_dns` -> dnsfile) and generate the (ūbar, τ) pairs at every filter
 # ratio of the run's role (`create_data` -> dnsmetafile + per-Δ fieldsfile/lesmeta).
 # `run-les.jl` consumes these.
+#
+# Phases (`julia create-data.jl <phase>`, default `all` = serial end-to-end):
+# `data` generates one DNS run per SLURM_ARRAY_TASK_ID; `reduce` writes the shared
+# stat tables; `count` prints the `data` array size. `submit.sh` chains data →
+# reduce with an `afterok` dependency.
 
 @info "Loading packages"
 flush(stderr)
@@ -47,32 +52,21 @@ timemean(stats) = let ks = keys(first(stats))
     NamedTuple{ks}(map(k -> mean(getindex.(stats, k)), ks))
 end
 
-function main()
-    case = get_case()
-    config = get_config()
+print_count(case) = println(length(S.dns_runs().all))
 
-    slurm_id = get(ENV, "SLURM_ARRAY_TASK_ID", nothing)
-    task_id = isnothing(slurm_id) ? nothing : parse(Int, slurm_id)
-    serial = isnothing(task_id)
-
-    # The shared text-table file is written only in the serial pass; an array task
-    # owns one run, so resetting/appending here would race the other tasks.
-    serial && reset_tables(case)
-
+"""
+Phase `data` (array over `dns_runs().all`): warm up the DNS (`create_dns`) and
+generate the (ūbar, τ) data (`create_data`) for one run, plus that run's plots.
+`task_id === nothing` does every run; an integer does only that 1-based run.
+"""
+function run_data!(case, config, task_id)
     for (i, dns) in enumerate(S.dns_runs().all)
-        serial || i == task_id || continue
-        @info "===== DNS run: visc=$(dns.visc), seed=$(dns.seed), role=$(dns.role) ====="
+        isnothing(task_id) || i == task_id || continue
+        @info "===== DNS run $i: visc=$(dns.visc), seed=$(dns.seed), role=$(dns.role) ====="
         flush(stderr)
         filters = dns.role === :train ? case.filters_train : case.filters_test
 
-        if :dns in config.experiments
-            S.create_dns(case, dns; force = :dns in config.force)
-            serial && tabulate(
-                case, "DNS stats after warm-up (visc=$(dns.visc), seed=$(dns.seed))",
-                load(S.dnsfile(case, dns), "statistics")[end],
-            )
-        end
-
+        :dns in config.experiments && S.create_dns(case, dns; force = :dns in config.force)
         :evolution_dns in config.experiments && S.plot_evolution_dns(case, dns)
         if :spectrum_dns in config.experiments
             for Δf in filters
@@ -80,15 +74,7 @@ function main()
             end
         end
 
-        if :data in config.experiments
-            S.create_data(case, dns; force = :data in config.force)
-            serial && tabulate(
-                case,
-                "Time-averaged DNS stats, data window (visc=$(dns.visc), seed=$(dns.seed))",
-                timemean(load(S.dnsmetafile(case, dns), "statistics_dns")),
-            )
-        end
-
+        :data in config.experiments && S.create_data(case, dns; force = :data in config.force)
         :evolution_data in config.experiments && S.plot_evolution_data(case, dns)
         if :spectrum_data in config.experiments
             for Δf in filters
@@ -96,16 +82,59 @@ function main()
             end
         end
     end
+    return
+end
 
-    # Cross-dataset DNS-stats table (paper-ready) — serial pass only (an array task
-    # owns one run, so writing here would race the shared file). After an array run,
-    # rerun without the array env to emit it; any run whose dnsmetafile isn't
-    # generated yet is skipped.
-    serial && S.write_dns_table(case, S.dns_runs().all)
-
-    @info "Done."
+"""
+Phase `reduce` (serial): the per-run DNS-stat tables and the paper-ready
+cross-dataset DNS-stats table, read back from what the `data` phase wrote (a run
+whose artifact is missing is skipped). The shared text table is written only here,
+so array `data` tasks never race it.
+"""
+function run_reduce!(case, config)
+    reset_tables(case)
+    for dns in S.dns_runs().all
+        :dns in config.experiments && isfile(S.dnsfile(case, dns)) && tabulate(
+            case, "DNS stats after warm-up (visc=$(dns.visc), seed=$(dns.seed))",
+            load(S.dnsfile(case, dns), "statistics")[end],
+        )
+        :data in config.experiments && isfile(S.dnsmetafile(case, dns)) && tabulate(
+            case, "Time-averaged DNS stats, data window (visc=$(dns.visc), seed=$(dns.seed))",
+            timemean(load(S.dnsmetafile(case, dns), "statistics_dns")),
+        )
+    end
+    S.write_dns_table(case, S.dns_runs().all)
+    @info "Done (reduce)."
     flush(stderr)
     return
 end
 
-main()
+"""
+Entry point. `julia create-data.jl [phase]`, `phase ∈ all|data|reduce|count`
+(default `all` = every run then the tables, serial). The cluster submits `data` as
+a SLURM array (one unit per DNS run) then `reduce` serially, chained by `afterok`
+(see `submit.sh`); `count` prints the `data` array size.
+"""
+function (@main)(args)
+    case = get_case()
+    config = get_config()
+    phase = isempty(args) ? "all" : first(args)
+    task_id = let s = get(ENV, "SLURM_ARRAY_TASK_ID", nothing)
+        isnothing(s) ? nothing : parse(Int, s)
+    end
+
+    phase in ("all", "data", "reduce", "count") ||
+        error("unknown phase '$(phase)'; expected all|data|reduce|count")
+
+    if phase == "count"
+        print_count(case)
+    elseif phase == "all"
+        run_data!(case, config, nothing)
+        run_reduce!(case, config)
+    elseif phase == "data"
+        run_data!(case, config, task_id)
+    elseif phase == "reduce"
+        run_reduce!(case, config)
+    end
+    return 0
+end
