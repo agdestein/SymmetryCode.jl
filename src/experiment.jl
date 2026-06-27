@@ -48,11 +48,11 @@ stop at `p8000`. The grid is open-ended — add a point (e.g. a `p24000` conv), 
 and the cache fills in only the new coordinates.
 """
 default_tiers() = (;
-    p120 = (; conv = [3, 5, 6], equi = [1, 1, 1], tbnn = [3, 5, 6]),
-    p400 = (; conv = [6, 10, 14], equi = [2, 2, 2], tbnn = [6, 10, 14]),
-    p1200 = (; conv = [10, 18, 32], equi = [2, 3, 5], tbnn = [10, 18, 32]),
-    p3000 = (; conv = [22, 36, 44], equi = [4, 5, 8], tbnn = [22, 36, 44]),
-    p8000 = (; conv = [44, 64, 64], equi = [4, 8, 16], tbnn = [46, 64, 64]),
+    p120   = (; conv = [3,   5,  6], equi = [1, 1,  1], tbnn = [ 3,  5,  6]),
+    p400   = (; conv = [6,  10, 14], equi = [2, 2,  2], tbnn = [ 6, 10, 14]),
+    p1200  = (; conv = [10, 18, 32], equi = [2, 3,  5], tbnn = [10, 18, 32]),
+    p3000  = (; conv = [22, 36, 44], equi = [4, 5,  8], tbnn = [22, 36, 44]),
+    p8000  = (; conv = [44, 64, 64], equi = [4, 8, 16], tbnn = [46, 64, 64]),
     p16000 = (; conv = [64, 96, 96]),
 )
 
@@ -78,7 +78,7 @@ function case_snellius(;
         cfl = 0.35,
         forced = true,
         totalenergy = 0.2,
-        warmup_tstop = 0.05,
+        warmup_tstop = 5.0,
         # Production sampling. For a quick structural smoke test, drop both
         # nturnover to ~0.05 (short rollout, ~free).
         train_sampling = (; nsnap = 8, nturnover = 2),
