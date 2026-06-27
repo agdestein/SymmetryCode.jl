@@ -607,6 +607,8 @@ the synthesis operator (`project`) expands these into the full equivariant weigh
 """
 function paramcount(case, m)
     D = case.D
+    # :convsym shares :conv's network (group-averaged at inference) → same count.
+    m.arch === :convsym && return paramcount(case, (; m..., arch = :conv))
     g = Grid{D}(; case.l, n = case.n_les, case.backend)
     c = case.tiers[m.tier][m.arch]
     re = m.use_redelta ? 1 : 0                     # extra standardized log Re_Δ input

@@ -4,11 +4,14 @@
 #
 #   A  Saturation   — +Re, every architecture across its size grid, one eval point.
 #                     → error vs parameter count: all archs saturate to the same
-#                       floor, inductive bias gets there at fewer params.
-#   B  Equal-cap.   — top tier ±Re, the inductive-bias / equivariance comparison
-#                       at matched capacity (bars, equivariance, errors table).
+#                       floor, inductive bias gets there at fewer params. The
+#                       symmetrized MLP (:convsym) is overlaid — does post-hoc
+#                       symmetry recover the equivariant nets' low-param efficiency?
+#   B  Equal-cap.   — top tier ±Re (plus :convsym), the inductive-bias /
+#                       equivariance comparison at matched capacity (bars,
+#                       equivariance, errors table).
 #   C  Re_Δ grid    — top tier ±Re across the full (ν, Δ) test grid → the Re_Δ
-#                       generalization trend.
+#                       generalization trend (no :convsym — skipped on the grid).
 #
 # A is broad in *size* / narrow in *eval*; C is broad in *eval* / narrow in *size*;
 # B reads A/C's artifacts at the in-distribution point. Artifacts self-locate from
@@ -52,7 +55,7 @@ get_config() = (;
 
     # Seeds: more for the cheap saturation curve (one eval point), fewer for the
     # expensive top-tier grid (full ν × Δ).
-    netseeds_curve = 0:2,
+    netseeds_curve = 0:3,
     netseeds_grid = 0:1,
 
     classical = [:nomo, :dynsmag, :clar],
@@ -92,6 +95,21 @@ ablation_models(c) = [
 ablation_families(c) = [
     (; arch, tier = c.top, use_redelta = ur) for arch in c.archs for ur in (false, true)
 ]
+
+# :convsym — the symmetrized MLP: :conv's trained params group-averaged over the
+# cube symmetry at inference (build_model loads the matching :conv psfile, so it is
+# *not* trained). It joins the saturation curve (A, +Re across the conv sizes) and
+# the equal-capacity comparison (B, top tier ±Re), but is excluded from the C grid
+# — evaluated at the in-distribution point only, reusing every conv coordinate that
+# `all_models` already trains (so `convsym_models` never lacks a psfile).
+convsym_curve(c) = [(; arch = :convsym, tier, use_redelta = true) for tier in arch_sizes(c, :conv)]
+convsym_top(c) = [(; arch = :convsym, tier = c.top, use_redelta = ur) for ur in (false, true)]
+convsym_models(c) = [(; m..., arch = :convsym) for m in all_models(c) if m.arch === :conv]
+
+# B — equal-capacity comparison: the ±Re ablation set plus the symmetrized MLP at
+# the top tier (conv's equivariance twin at matched capacity). Drives the
+# in-distribution bars/tables only; the C trend stays on `ablation_families`.
+comparison_families(c) = [ablation_families(c); convsym_top(c)]
 
 # Curated one-seed subset for the per-curve series plots (+Re top + classical).
 series_models(c) = [
@@ -210,6 +228,14 @@ function main()
     for (dns, Δf) in unique([(indist, Δ_ab); gridpoints])
         eval_ref!(case, config, dns, Δf)
     end
+
+    # :convsym is eval-only (reuses :conv's psfile) and in-distribution only, so it
+    # runs here in the serial pass — once the conv models it wraps are trained —
+    # rather than as its own distributed unit (which would race that training).
+    for m in convsym_models(config)
+        eval_model!(case, config, m, indist, Δ_ab; equi = true)
+    end
+
     if :redelta_binning in config.experiments
         for (dns, Δf) in gridpoints
             S.compute_redelta_binning(case, dns, Δf; force = :redelta_binning in config.force)
@@ -227,13 +253,16 @@ function main()
     :plots in config.experiments && S.plot_training(case, all_models(config))
 
     :saturation in config.experiments &&
-        S.plot_saturation(case, indist, Δ_ab, saturation_families(config), config.netseeds_curve)
+        S.plot_saturation(
+        case, indist, Δ_ab, [saturation_families(config); convsym_curve(config)], config.netseeds_curve;
+        classical = config.classical,
+    )
 
     :seeds in config.experiments &&
-        S.get_seed_statistics(case, ablation_families(config), indist, Δ_ab, config.netseeds_grid; force = :seeds in config.force)
+        S.get_seed_statistics(case, comparison_families(config), indist, Δ_ab, config.netseeds_grid; force = :seeds in config.force)
 
     if :plots in config.experiments
-        fams = ablation_families(config)
+        fams = comparison_families(config)
         S.plot_apriori_bar(case, indist, Δ_ab, fams, config.netseeds_grid; classical = config.classical)
         S.plot_dissipation_bar(case, indist, Δ_ab, fams, config.netseeds_grid; classical = config.classical)
         S.plot_backscatter_bar(case, indist, Δ_ab, fams, config.netseeds_grid; classical = config.classical)
@@ -257,7 +286,7 @@ function main()
     end
 
     if :tables in config.experiments
-        S.write_errors_table(case, indist, Δ_ab, ablation_families(config), config.netseeds_grid; classical = config.classical)
+        S.write_errors_table(case, indist, Δ_ab, comparison_families(config), config.netseeds_grid; classical = config.classical)
         S.write_timing_table(
             case, indist, Δ_ab,
             unique([saturation_families(config); ablation_families(config)]),
