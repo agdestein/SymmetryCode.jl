@@ -212,6 +212,53 @@ function create_data(case, dns; force = false)
 end
 
 """
+Post-run diagnostic for a TGV DNS pass: print (1) the resolution at peak
+dissipation (`kmax_η` is most strained there) and (2) the per-filter global Re_Δ
+trajectory — startup → in-time peak → final — against the forced-HIT trained band
+([`hit_redelta_band`](@ref)). The trajectory rises from a near-laminar start, so
+the placement check is on the peak; whether it lands inside the trained band (vs
+the held-out band, vs full extrapolation) is the interpolation-generalization
+read for the TGV capstone. Printing only; skips the band line if the HIT sweep is
+not yet on disk.
+"""
+function report_tgv_redelta(case, tgv, times, redelta, filters, statistics_dns)
+    diss = [s.diss for s in statistics_dns]
+    kme = [s.kmax_eta for s in statistics_dns]
+    ipk = argmax(diss)
+    @info "TGV resolution: kmax_η at peak diss (t=$(round(times[ipk]; sigdigits = 3)))" *
+        " = $(round(kme[ipk]; digits = 2)), min over run = $(round(minimum(kme); digits = 2))" *
+        " (target ≳ 1.5)"
+
+    band = hit_redelta_band(case)
+    haveband = !isempty(band.train)
+    tlo, thi = haveband ? extrema(band.train) : (NaN, NaN)
+    flo, fhi = haveband ? extrema(band.full) : (NaN, NaN)
+    if haveband
+        @info "HIT Re_Δ band (per-(ν,Δ) snapshot means): " *
+            "train [$(round(Int, tlo))–$(round(Int, thi))], " *
+            "full [$(round(Int, flo))–$(round(Int, fhi))]"
+    else
+        @info "HIT Re_Δ band unavailable (run the forced-HIT sweep first); " *
+            "printing TGV trajectory only."
+    end
+
+    @info "TGV global Re_Δ trajectory (per filter):"
+    for (k, Δf) in enumerate(filters)
+        tr = redelta[k]
+        pk = maximum(tr)
+        verdict = !haveband ? "" :
+            pk > fhi ? " — peak ABOVE full band (extrapolation)" :
+            pk > thi ? " — peak in held-out band (train < peak ≤ full)" :
+            pk ≥ tlo ? " — peak within trained band" :
+            " — peak BELOW trained band (low-Re extrapolation)"
+        @info "  Δf=$(Δf): start=$(round(tr[1]; digits = 1)) " *
+            "peak=$(round(Int, pk)) final=$(round(tr[end]; digits = 1))$(verdict)"
+    end
+    flush(stderr)
+    return nothing
+end
+
+"""
 Generate the decaying Taylor-Green `(ūbar, τ)` data for one TGV run `tgv`
 (`(; visc, seed, role=:tgv, Re_target)`), at every test filter ratio, in a single
 DNS pass — the same two-file schema as [`create_data`](@ref) so the whole post-hoc
@@ -306,6 +353,8 @@ function create_data_tgv(case, tgv; force = false)
         flush(stderr)
     end
     walltime = time() - walltime
+
+    report_tgv_redelta(case, tgv, times, redelta, filters, statistics_dns)
 
     jldsave_atomic(
         dnsmetafile(case, tgv);

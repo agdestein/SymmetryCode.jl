@@ -48,11 +48,11 @@ stop at `p8000`. The grid is open-ended — add a point (e.g. a `p24000` conv), 
 and the cache fills in only the new coordinates.
 """
 default_tiers() = (;
-    p120   = (; conv = [3,   5,  6], equi = [1, 1,  1], tbnn = [ 3,  5,  6]),
-    p400   = (; conv = [6,  10, 14], equi = [2, 2,  2], tbnn = [ 6, 10, 14]),
-    p1200  = (; conv = [10, 18, 32], equi = [2, 3,  5], tbnn = [10, 18, 32]),
-    p3000  = (; conv = [22, 36, 44], equi = [4, 5,  8], tbnn = [22, 36, 44]),
-    p8000  = (; conv = [44, 64, 64], equi = [4, 8, 16], tbnn = [46, 64, 64]),
+    p120 = (; conv = [3, 5, 6], equi = [1, 1, 1], tbnn = [3, 5, 6]),
+    p400 = (; conv = [6, 10, 14], equi = [2, 2, 2], tbnn = [6, 10, 14]),
+    p1200 = (; conv = [10, 18, 32], equi = [2, 3, 5], tbnn = [10, 18, 32]),
+    p3000 = (; conv = [22, 36, 44], equi = [4, 5, 8], tbnn = [22, 36, 44]),
+    p8000 = (; conv = [44, 64, 64], equi = [4, 8, 16], tbnn = [46, 64, 64]),
     p16000 = (; conv = [64, 96, 96]),
 )
 
@@ -132,7 +132,26 @@ applied to a transitioning-then-decaying TGV at `Re_target` (initial amplitude
 grid and test filters, so the whole `compute_sfs_stats` / `solve_les` / plot
 pipeline applies unchanged on the `(tgv, Δf)` eval points.
 """
-tgv_runs() = [(; visc = 2.5e-4, seed = 0, role = :tgv, Re_target = 1600)]
+tgv_runs() = [(; visc = 2.5e-4, seed = 0, role = :tgv, Re_target = 6000)]
+
+"""
+The forced-HIT global Re_Δ coverage, read back from the generated `lesmetafile`s
+(`redelta_mean`, the per-(ν,Δ) snapshot mean). `train` is the band the closures
+were actually fit over (role `:train`, `filters_train`); `full` adds the held-out
+runs/filters. Missing files are skipped, so this is safe to call before the whole
+HIT sweep exists. Used to place the TGV Re_Δ trajectory against the trained band.
+"""
+function hit_redelta_band(case)
+    runs = dns_runs()
+    collect_means(dnslist) =
+        [
+        load(lesmetafile(case, dns, Δf), "redelta_mean")
+            for dns in dnslist
+            for Δf in (dns.role === :train ? case.filters_train : case.filters_test)
+            if isfile(lesmetafile(case, dns, Δf))
+    ]
+    return (; train = collect_means(runs.train), full = collect_means(runs.all))
+end
 
 """
 Per-(ν, Δ) `setup` view consumed by the rest of the pipeline. Built **once** from
