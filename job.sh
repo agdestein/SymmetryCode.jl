@@ -1,7 +1,7 @@
 #!/bin/bash
 #SBATCH --gpus=1
 #SBATCH --partition=gpu_h100
-#SBATCH --time=10:00:00
+#SBATCH --time=2:00:00
 # #SBATCH --mail-type=BEGIN,END
 # #SBATCH --mail-user=sda@cwi.nl
 # https://servicedesk.surf.nl/wiki/display/WIKI/Snellius+partitions+and+accounting
