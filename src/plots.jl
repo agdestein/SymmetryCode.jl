@@ -118,20 +118,29 @@ function spectrum_reference(setup, stats)
 end
 
 """
-Validation-loss convergence curves for the learned closures — one panel per
-architecture (a single figure for the whole sweep; the models span the trainpool
-and are trained once). Within a panel the curves are colored by capacity tier and
-dashed for the Re_Δ variant, with the `netseeds` overlapping so run-to-run spread
-is visible. Reads `losses_valid` from each [`psfile`](@ref); classical symbols and
-models without a persisted artifact are skipped, so the same call works for any
-trained subset.
+Validation-loss convergence for the learned closures — one panel per architecture,
+one band per capacity tier. Within a tier the line is the per-iteration *median*
+over `netseeds` and the shaded band is the seed *min–max*, so run-to-run spread is
+visible without seed spaghetti. Only the `use_redelta = true` variants are shown
+(the capacity sweep); the ±Re pair is training-indistinguishable, so overlaying the
+base curves only added the confusing asymmetry that most tiers have no base run.
+Per-batch loss is thousands of points, so curves are strided to ~`maxpoints` (the
+convergence shape is preserved). Reads `losses_valid` from each [`psfile`](@ref);
+classical symbols and models without a persisted artifact are skipped, so the same
+call works for any trained subset.
 """
 function plot_training(case, models; maxpoints = 1000)
-    learned = [m for m in models if m isa NamedTuple && isfile(psfile(case, m))]
+    learned = [m for m in models if m isa NamedTuple && m.use_redelta && isfile(psfile(case, m))]
     isempty(learned) && return nothing
     archs = unique(m.arch for m in learned)
     tiers = unique(m.tier for m in learned)
     tcolor = Dict(t => c for (t, c) in zip(tiers, Makie.wong_colors()))
+
+    function curve(m)
+        v = load(psfile(case, m), "losses_valid")
+        idx = 1:cld(length(v), maxpoints):length(v)
+        return idx, v[idx]
+    end
 
     fig = Figure(; size = (300 * length(archs) + 40, 360))
     for (i, a) in enumerate(archs)
@@ -140,29 +149,21 @@ function plot_training(case, models; maxpoints = 1000)
             xlabel = "Iteration", ylabel = "Validation loss",
             ylabelvisible = i == 1, yscale = log10, title = getlabels()[a],
         )
-        for m in learned
-            m.arch === a || continue
-            losses = load(psfile(case, m), "losses_valid")
-            # Per-batch loss is ~thousands of points per curve; a vector PDF of all
-            # of them (× tiers × Re × seeds × panels) is huge and slow to render.
-            # Stride down to ~maxpoints — the convergence shape is preserved.
-            idx = 1:cld(length(losses), maxpoints):length(losses)
-            lines!(
-                ax, idx, losses[idx];
-                color = tcolor[m.tier], linestyle = m.use_redelta ? :dash : :solid,
-            )
+        for t in tiers
+            seeds = [m for m in learned if m.arch === a && m.tier === t]
+            isempty(seeds) && continue
+            curves = [curve(m) for m in seeds]
+            x = first(curves[1])
+            M = reduce(hcat, [c[2] for c in curves])     # iterations × seeds
+            band!(ax, x, vec(minimum(M; dims = 2)), vec(maximum(M; dims = 2)); color = (tcolor[t], 0.25))
+            lines!(ax, x, vec(median(M; dims = 2)); color = tcolor[t], linewidth = 1.5)
         end
     end
 
-    # Shared tier × Re legend (only the combinations actually present).
-    combos = [(t, ur) for t in tiers for ur in (false, true)]
-    filter!(c -> any(m -> m.tier === c[1] && m.use_redelta === c[2], learned), combos)
-    elements = [
-        Makie.LineElement(; color = tcolor[t], linestyle = ur ? :dash : :solid) for (t, ur) in combos
-    ]
-    labels = ["$(string(t))$(ur ? " +Re" : "")" for (t, ur) in combos]
+    # Legend: one entry per capacity tier present.
+    elements = [Makie.LineElement(; color = tcolor[t]) for t in tiers]
     Legend(
-        fig[0, :], elements, labels;
+        fig[0, :], elements, [string(t) for t in tiers];
         tellwidth = false, tellheight = true, framevisible = false,
         orientation = :horizontal, nbanks = 1,
     )
@@ -218,6 +219,13 @@ function plot_densities(case, dns, Δf, models; dolog = true)
     yscale = dolog ? log10 : identity
     fig = Figure(; size = (450, 340))
     ax = Axis(fig[1, 1]; xlabel = "SFS dissipation rate", ylabel = "Density", yscale)
+    # X-range = the contiguous above-floor run around each KDE's mode, not its full
+    # support: Smagorinsky's ε ∝ |Ā|³ heavy tail produces a lone, *gap-separated*
+    # KDE bump near |Ā|³_max whose bare support stretches the axis into dead
+    # whitespace. Restricting to the run containing the peak drops that artifact
+    # while keeping the full backscatter shoulder + the positive tail to the floor.
+    floorx = 1.0e-4
+    xlo, xhi = Inf, -Inf
     for m in models
         dens = load_object(sfsstatsfile(case, dns, Δf, m)).kde.diss
         isempty(dens.x) && continue   # :nomo has degenerate (all-zero) samples
@@ -225,10 +233,22 @@ function plot_densities(case, dns, Δf, models; dolog = true)
             ax, dens.x, max.(dens.density, 1.0e-16);
             label = plotlabel(m), color = plotstyle(m).color, linestyle = plotstyle(m).linestyle,
         )
+        ip = argmax(dens.density)
+        l = ip
+        while l > 1 && dens.density[l - 1] > floorx
+            l -= 1
+        end
+        r = ip
+        while r < length(dens.density) && dens.density[r + 1] > floorx
+            r += 1
+        end
+        xlo, xhi = min(xlo, dens.x[l]), max(xhi, dens.x[r])
     end
+    isfinite(xlo) && xlims!(ax, xlo - 0.03 * (xhi - xlo), xhi + 0.03 * (xhi - xlo))
     # Clamp the log-y floor so the meaningless ~1e-15 KDE-tail noise is out of
     # frame; the bulk + backscatter shoulder (down to ~1e-4) stay readable.
-    dolog && ylims!(ax, 1.0e-4, nothing)
+    # dolog && ylims!(ax, 1.0e-4, nothing)
+    dolog && ylims!(ax, 1.0e-4, 1e2)
     Legend(
         fig[0, 1], ax;
         tellwidth = false, tellheight = true, framevisible = false, horizontal = true, nbanks = 4,
@@ -255,7 +275,8 @@ function plot_dissipation_bar(case, dns, Δf, families, netseeds; classical)
     vals = metric_bar!(ax, case, dns, Δf, items, agg, :diss_median)
     hlines!(ax, [1.0]; color = :black, linestyle = :dash, label = "Reference")
     ymax = maximum(v -> isnan(v.c) ? 0.0 : v.c + v.s, vals; init = 1.0)
-    ylims!(ax, 0, ymax + 0.15)
+    # Extra headroom so the top-right legend clears the value labels on the tall bars.
+    ylims!(ax, 0, ymax + 0.4)
     axislegend(ax; position = :rt, framevisible = false)
     file = joinpath(figdir(case, dns, Δf), "dissipation-bar.pdf")
     @info "Saving dissipation bar plot to $(file)"
@@ -335,7 +356,7 @@ function plot_budget(case, dns, Δf, models)
     Legend(
         fig[0, :], ax_ke;
         tellwidth = false, tellheight = true, framevisible = false,
-        orientation = :horizontal, nbanks = 5,
+        orientation = :horizontal, nbanks = 2,
     )
     rowgap!(fig.layout, 5)
     file = joinpath(figdir(case, dns, Δf), "budget.pdf")
@@ -425,7 +446,8 @@ end
 Classical-closure metric at one eval point (no seed spread). `metric ∈`:
 `:diss_median` (median SFS dissipation normalized by the `:ref` median), `:relerr`
 / `:crosscor` (a-priori tensor error / cross-correlation), `:backscatter` (local
-backscatter fraction), `:e_post` (time-mean a-posteriori solution error).
+backscatter fraction), `:e_post` (time-mean a-posteriori solution error —
+`missing` if the rollout diverged, see [`apost_emean`](@ref)).
 """
 function classical_metric(case, dns, Δf, c, metric)
     if metric === :diss_median
@@ -438,7 +460,7 @@ function classical_metric(case, dns, Δf, c, metric)
     elseif metric === :backscatter
         return load_object(sfsstatsfile(case, dns, Δf, c)).diss.backscatter
     else # :e_post
-        return mean(load_object(apostfile(case, dns, Δf, c)).e_post)
+        return apost_emean(case, dns, Δf, c)
     end
 end
 
@@ -469,7 +491,14 @@ function metric_bar!(ax, case, dns, Δf, items, agg, metric)
     barplot!(ax, x, [v.c for v in vals]; color = [plotstyle(m).color for m in items])
     pos = findall(v -> v.s > 0, vals)
     isempty(pos) ||
-        errorbars!(ax, x[pos], [vals[i].c for i in pos], [vals[i].s for i in pos]; whiskerwidth = 6)
+        errorbars!(ax, x[pos], [vals[i].c for i in pos], [vals[i].s for i in pos]; whiskerwidth = 6, color = :black)
+    # Value label above each bar (and its whisker). `fixeddecimals` keeps a fixed
+    # two-decimal width so the labels read as a tidy column (`string(round(...))`
+    # drops trailing zeros and looks ragged: 0.5 vs 0.47 vs 1.0).
+    for (xi, v) in zip(x, vals)
+        isfinite(v.c) || continue
+        text!(ax, xi, v.c + v.s; text = fixeddecimals(v.c, 2), align = (:center, :bottom), offset = (0, 4), fontsize = 9)
+    end
     ax.xticks = (x, [famlabel(m) for m in items])
     ax.xticklabelrotation = π / 6
     return vals
@@ -509,7 +538,7 @@ function plot_trend_vs_redelta(
     re, agg, evalpoints = re[order], agg[order], evalpoints[order]
 
     xlab = "Filter-scale Reynolds number"
-    fig = Figure(; size = (1100, 380))
+    fig = Figure(; size = (1100, 320))
     ax_diss = Axis(
         fig[1, 1];
         xscale = log10, yscale = log10, xlabel = xlab,
@@ -552,22 +581,55 @@ function plot_trend_vs_redelta(
         end
     end
 
+    # Diverged a-posteriori rollouts carry a `missing` e_post (their truncated mean
+    # is meaningless — see [`apost_emean`](@ref)). Rather than plotting that value
+    # and letting a blow-up spike (or a deceptively low early-bail mean) distort the
+    # panel, pin such points with an ✗ just above the real data. Marker height from
+    # the finite a-posteriori values actually plotted.
+    postvals = Float64[]
+    for fam in families
+        fname = familyname(fam)
+        for a in agg
+            haskey(a, fname) || continue
+            v = collect(skipmissing(a[fname].e_post))
+            isempty(v) || push!(postvals, mean(v))
+        end
+    end
+    for c in classical, (dns, Δf) in evalpoints
+        e = classical_metric(case, dns, Δf, c, :e_post)
+        ismissing(e) || push!(postvals, e)
+    end
+    divy = isempty(postvals) ? 1.0 : maximum(postvals) * 1.05
+    diverged_any = false
+
     for c in classical
         st = plotstyle(c)
         for (ax, metric) in zip(axs, metrics)
             ys = [classical_metric(case, dns, Δf, c, metric) for (dns, Δf) in evalpoints]
-            scatterlines!(
-                ax, re, ys;
+            keep = findall(!ismissing, ys)
+            isempty(keep) || scatterlines!(
+                ax, re[keep], Float64[ys[i] for i in keep];
                 label = plotlabel(c), color = st.color, marker = st.marker, linestyle = st.linestyle,
             )
+            drop = findall(ismissing, ys)
+            if !isempty(drop)
+                diverged_any = true
+                scatter!(ax, re[drop], fill(divy, length(drop)); color = st.color, marker = :star8, markersize = 13)
+            end
         end
+    end
+
+    if diverged_any
+        # Legend entry for the marker, and headroom so the ✗ row clears the data.
+        scatter!(ax_diss, [NaN], [NaN]; color = :gray, marker = :star8, markersize = 13, label = "Diverged")
+        ylims!(ax_post, nothing, divy * 1.05)
     end
 
     hlines!(ax_diss, [1.0]; color = :black, linestyle = :dash, label = "Reference")
     Legend(
         fig[0, :], ax_diss;
         tellwidth = false, tellheight = true, framevisible = false,
-        orientation = :horizontal, nbanks = 3,
+        orientation = :horizontal, nbanks = 2,
     )
     rowgap!(fig.layout, 5)
     file = "$(case.plotdir)/trend-vs-redelta.pdf"
@@ -886,7 +948,7 @@ function plot_equivariance_bar(case, dns, Δf, families, netseeds)
         push!(wc, v.c)
         push!(ws, v.s)
     end
-    isempty(wx) || errorbars!(ax, wx, wc, ws; whiskerwidth = 8)
+    isempty(wx) || errorbars!(ax, wx, wc, ws; whiskerwidth = 8, color = :black)
     ylims!(ax, 1.0e-17, 5.0)
     file = joinpath(figdir(case, dns, Δf), "equi-errors.pdf")
     @info "Saving equivariance bar plot to $(file)"
@@ -1185,14 +1247,13 @@ function plot_spectrum_dns(case, dns, Δf)
 end
 
 """
-Two-panel LES energy-spectrum comparison. Left: the time-averaged spectra on
-the usual log-log axes (the models are nearly indistinguishable there). Right:
-the same spectra *divided by the reference spectrum*, on a linear ordinate —
-this is where the per-model deviations (Smagorinsky's intermediate-wavenumber
-excess, the learned models' high-wavenumber deficit) actually become visible.
-The under-dissipative models (No-model, Clark) leave the right panel's frame
-through their high-wavenumber pile-up; the axis is clamped so the ±10%
-deviations of the well-behaved closures stay readable.
+LES energy-spectrum comparison: the time-averaged spectra *divided by the
+reference spectrum*, on a linear ordinate — this is where the per-model
+deviations (Smagorinsky's intermediate-wavenumber excess, the learned models'
+high-wavenumber deficit) become visible (the raw log-log spectra are nearly
+indistinguishable, so that panel was dropped). The under-dissipative models
+(No-model, Clark) leave the frame through their high-wavenumber pile-up; the
+axis is clamped so the ±10% deviations of the well-behaved closures stay readable.
 """
 function plot_spectrum_les(case, dns, Δf, models)
     # Reference LES spectrum = filtered-DNS spectra averaged over the test series.
@@ -1201,29 +1262,25 @@ function plot_spectrum_les(case, dns, Δf, models)
     k = 2π / case.l * eachindex(s_ref)
     styles = getstyles()
 
-    fig = Figure(; size = (820, 360))
-    ax = Axis(fig[1, 1]; xscale = log10, yscale = log10, xlabel = "Wavenumber", ylabel = "Energy")
+    fig = Figure(; size = (520, 360))
     ax_ratio = Axis(
-        fig[1, 2];
+        fig[1, 1];
         xscale = log10, xlabel = "Wavenumber", ylabel = "Energy relative to reference",
-    )
-    lines!(
-        ax, r.kscale * k, r.escale * s_ref;
-        label = "Reference", color = styles.ref.color, linestyle = styles.ref.linestyle,
     )
     for m in models
         m === :ref && continue
         s = mean(load_object(apostfile(case, dns, Δf, m)).spectra_les)
-        kw = (; label = plotlabel(m), color = plotstyle(m).color, linestyle = plotstyle(m).linestyle)
-        lines!(ax, r.kscale * k, r.escale * s; kw...)
-        lines!(ax_ratio, r.kscale * k, s ./ s_ref; kw...)
+        lines!(
+            ax_ratio, r.kscale * k, s ./ s_ref;
+            label = plotlabel(m), color = plotstyle(m).color, linestyle = plotstyle(m).linestyle,
+        )
     end
-    hlines!(ax_ratio, [1.0]; color = styles.ref.color, linestyle = styles.ref.linestyle)
+    hlines!(ax_ratio, [1.0]; color = styles.ref.color, linestyle = styles.ref.linestyle, label = "Reference")
     ylims!(ax_ratio, 0, 2)
     Legend(
-        fig[0, :], ax;
+        fig[0, :], ax_ratio;
         tellwidth = false, tellheight = true, framevisible = false,
-        orientation = :horizontal, nbanks = 5,
+        orientation = :horizontal, nbanks = 2,
     )
     rowgap!(fig.layout, 5)
     file = joinpath(figdir(case, dns, Δf), "spectrum-les.pdf")

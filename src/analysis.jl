@@ -322,6 +322,39 @@ function apriori_equivariance_error(case, m, dns, Δf, getmodel; force = false)
 end
 
 """
+Snapshot count of a *complete* a-posteriori rollout at `(dns, Δf)`. The `:ref`
+reduction never integrates (it just reduces the filtered-DNS series), so it always
+reaches every scheduled snapshot — the reliable bar for divergence detection.
+"""
+apost_nfull(case, dns, Δf) = length(load_object(apostfile(case, dns, Δf, :ref)).e_post)
+
+"""
+`true` if model `m`'s a-posteriori rollout at `(dns, Δf)` bailed out early. The
+`solve_les` instability guard (`les.jl`) returns the moment the rollout blows up,
+so `e_post` holds only the pre-blow-up prefix and is shorter than a complete
+rollout ([`apost_nfull`](@ref)). A truncated rollout's `mean(e_post)` averages just
+that prefix — artificially low when the blow-up is sudden — so callers treat a
+diverged point as `missing` rather than plotting/tabulating the mean.
+"""
+function apost_diverged(case, dns, Δf, m)
+    f = apostfile(case, dns, Δf, m)
+    isfile(f) || return false
+    return length(load_object(f).e_post) < apost_nfull(case, dns, Δf)
+end
+
+"""
+Divergence-aware time-mean a-posteriori solution error: `mean(e_post)` for a
+completed rollout, `missing` if the rollout diverged ([`apost_diverged`](@ref)) or
+no artifact exists. Use this instead of a bare `mean(load_object(apostfile(...)).e_post)`.
+"""
+function apost_emean(case, dns, Δf, m)
+    f = apostfile(case, dns, Δf, m)
+    isfile(f) || return missing
+    ep = load_object(f).e_post
+    return length(ep) < apost_nfull(case, dns, Δf) ? missing : mean(ep)
+end
+
+"""
 Aggregate the netseed spread of the scalar closure metrics at evaluation point
 (dns, Δf), for each learned-model family in `families` (each `(; arch, tier,
 use_redelta)`). For every family and every seed in `netseeds`, reads the per-seed
@@ -365,7 +398,10 @@ function get_seed_statistics(case, families, dns, Δf, netseeds; force = false)
                     diss_median = st.diss.median / refmed,
                     backscatter = st.diss.backscatter,
                     equi,
-                    e_post = ismissing(eser) ? missing : mean(eser),
+                    # Divergence-aware: a truncated (blown-up) rollout's mean is
+                    # meaningless, so the scalar is `missing`; the raw series is kept
+                    # for the error-vs-time plots (which should show the blow-up).
+                    e_post = apost_emean(case, dns, Δf, m),
                     e_post_series = eser,
                 )
             end
