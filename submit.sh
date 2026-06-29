@@ -39,23 +39,23 @@ first_dep() { DEP=(); [ -n "$last" ] && DEP=(--dependency=afterok:"$last"); retu
 
 if [[ $stage == data || $stage == all ]]; then
     first_dep
-    d=$(sub create-data.jl data --array=1-"$N_DNS" "${DEP[@]}")
-    last=$(sub create-data.jl reduce --time=00:20:00 --dependency=afterok:"$d")
+    d=$(sub create-data.jl data --time=20:00:00 --array=1-"$N_DNS" "${DEP[@]}")
+    last=$(sub create-data.jl reduce --time=00:30:00 --dependency=afterok:"$d")
     echo "create-data: data[$d] (1-$N_DNS) -> reduce[$last]"
 fi
 
 if [[ $stage == les || $stage == all ]]; then
     first_dep
-    m=$(sub run-les.jl models --array=1-"$N_MODELS" "${DEP[@]}")
-    c=$(sub run-les.jl convsym --array=1-"$N_CONVSYM" --dependency=afterok:"$m")
+    m=$(sub run-les.jl models --time=01:00:00 --array=1-"$N_MODELS" "${DEP[@]}")
+    c=$(sub run-les.jl convsym --time=02:00:00 --array=1-"$N_CONVSYM" --dependency=afterok:"$m")
     last=$(sub run-les.jl reduce --time=00:30:00 --dependency=afterok:"$c")
     echo "run-les: models[$m] (1-$N_MODELS) -> convsym[$c] (1-$N_CONVSYM) -> reduce[$last]"
 fi
 
 if [[ $stage == tgv || $stage == all ]]; then
     first_dep
-    d=$(sub run-tgv.jl data --array=1-"$N_TGVDATA" "${DEP[@]}")
-    m=$(sub run-tgv.jl models --array=1-"$N_TGVMODELS" --dependency=afterok:"$d")
+    d=$(sub run-tgv.jl data --time=20:00:00 --array=1-"$N_TGVDATA" "${DEP[@]}")
+    m=$(sub run-tgv.jl models--time=02:00:00  --array=1-"$N_TGVMODELS" --dependency=afterok:"$d")
     last=$(sub run-tgv.jl reduce --time=00:30:00 --dependency=afterok:"$m")
     echo "run-tgv: data[$d] (1-$N_TGVDATA) -> models[$m] (1-$N_TGVMODELS) -> reduce[$last]"
 fi
