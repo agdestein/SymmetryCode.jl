@@ -50,15 +50,14 @@ get_config() = (;
     # archs; `sizes_extra` extends individual archs (conv runs higher — the others
     # OOM the equivariant rollout past ~8k and saturate well before).
     # sizes = (:p120, :p400, :p1200, :p3000, :p8000),
-    sizes = (:p120, :p400, :p1200),
     # sizes_extra = (; conv = (:p16000,)),
-    sizes_extra = (; conv = (:p3000,)),
-    # top = :p8000,                # matched top tier for the B / C comparisons
+    sizes = (:p120, :p400, :p1200, :p3000),
+    sizes_extra = (;),
     top = :p1200,                # matched top tier for the B / C comparisons
 
     # Seeds: more for the cheap saturation curve (one eval point), fewer for the
     # expensive top-tier grid (full ν × Δ).
-    netseeds_curve = 0:3,
+    netseeds_curve = 0:4,
     netseeds_grid = 0:1,
 
     classical = [:nomo, :dynsmag, :clar],

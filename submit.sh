@@ -22,8 +22,8 @@ stage=${1:-all}
 #     sbatch --wrap 'julia --project run-les.jl count'   # logs "<models> <convsym>"
 # (read the value from the job's stdout), then update the matching variable.
 N_DNS=5            # run-dns.jl : length(dns_runs().all)
-N_MODELS=49        # run-les.jl     : length(les_worklist)
-N_CONVSYM=18       # run-les.jl     : length(convsym_models)
+N_MODELS=69        # run-les.jl     : length(les_worklist)
+N_CONVSYM=22       # run-les.jl     : length(convsym_models)
 N_TGVDATA=1        # run-tgv.jl     : length(tgv_runs())
 N_TGVMODELS=14     # run-tgv.jl     : length(eval_models)
 
