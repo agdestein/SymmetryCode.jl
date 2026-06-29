@@ -86,7 +86,7 @@ end
 
 "Path of the text table artifact `\$(setup.plotdir)/<filename>` (default `tables.txt`).
 Each pipeline script passes its own `filename` so concurrent scripts sharing a
-`plotdir` (e.g. `create-data.jl` and `run-les.jl`) don't clobber each other."
+`plotdir` (e.g. `run-dns.jl` and `run-les.jl`) don't clobber each other."
 tables_path(setup, filename = "tables.txt") = joinpath(setup.plotdir, filename)
 
 """

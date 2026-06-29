@@ -15,7 +15,7 @@ CI only runs CompatHelper. **Companion paper & cross-repo sync.** The LaTeX sour
 ```bash
 julia --project=. -e 'using SymmetryCode'   # precompile; cold-load smoke check
 julia --project=test test/runtests.jl       # test suite (may lag the refactor — see note)
-julia --project create-data.jl              # stage 1: DNS warm-up + (ūbar,τ) data, all runs
+julia --project run-dns.jl              # stage 1: DNS warm-up + (ūbar,τ) data, all runs
 julia --project run-les.jl                  # stage 2: train + evaluate the (ν,Δ) grid + figures
 julia --project run-tgv.jl                  # stage 3: apply the trained closures to the TGV
 sbatch job.sh                               # SLURM submission on a single H100
@@ -24,11 +24,11 @@ runic -i .                                  # format all code in place (run from
 
 **REPL workflow — prefer `julia-mcp` over `julia -e ...`.** A persistent Julia session is available via the `julia-mcp` MCP server (`mcp__julia__julia_eval`, `julia_list_sessions`, `julia_restart`). Use it for smoke checks, iterative debugging, and running pipeline sections. **Revise** is loaded in every session, so source edits are picked up without restart (after *deleting* a function, `isdefined` may stay `true` while calls throw `MethodError` — expected). **TestEnv** is in the global env (`using TestEnv; TestEnv.activate()` makes the `test/` deps loadable in-process). Only `julia_restart` as a last resort (segfault, GPU stuck, native-code change Revise can't patch).
 
-The three drivers are run in order (`create-data` → `run-les` → `run-tgv`) and are structured as scripts meant to be evaluated section by section. Each stage is **cache-guarded**: a rerun short-circuits when the artifact for that coordinate already exists; `config.experiments` toggles which stages run and `config.force` invalidates a stage's cache. Format with [Runic.jl](https://github.com/fredrikekre/Runic.jl) (no per-repo config) before committing.
+The three drivers are run in order (`run-dns` → `run-les` → `run-tgv`) and are structured as scripts meant to be evaluated section by section. Each stage is **cache-guarded**: a rerun short-circuits when the artifact for that coordinate already exists; `config.experiments` toggles which stages run and `config.force` invalidates a stage's cache. Format with [Runic.jl](https://github.com/fredrikekre/Runic.jl) (no per-repo config) before committing.
 
 > **Note on the test suite.** `test/runtests.jl` predates the coordinate refactor and may reference removed functions; treat a red test as "needs migrating", not as a regression in the new code. The package itself cold-loads and runs.
 
-> **This worktree.** Work happens on the `redelta-refactor` branch in the `SymmetryCode-redelta` worktree, a sibling of `SymmetryCode`. Commit on this branch; it merges back into `SymmetryCode`'s `main` when the experiment lands. The clean-slate refactor deliberately discarded all back-compat — there is no migration path for old artifacts; regenerate from `create-data.jl`.
+> **This worktree.** Work happens on the `redelta-refactor` branch in the `SymmetryCode-redelta` worktree, a sibling of `SymmetryCode`. Commit on this branch; it merges back into `SymmetryCode`'s `main` when the experiment lands. The clean-slate refactor deliberately discarded all back-compat — there is no migration path for old artifacts; regenerate from `run-dns.jl`.
 
 ## The coordinate design
 
