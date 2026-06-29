@@ -477,8 +477,8 @@ end
 
 """
 The H2 deliverable: three trends against the global filter-scale Reynolds number
-`Re_Δ` (per eval point = the mean over the test series of the `redelta` stored in
-[`fieldsfile`](@ref)) — median SFS dissipation ratio (→ 1 ideal, log axis), the
+`Re_Δ` (per eval point = the series-mean `redelta_mean` stored in the light
+[`lesmetafile`](@ref)) — median SFS dissipation ratio (→ 1 ideal, log axis), the
 a-priori relative SFS tensor error, and the time-mean a-posteriori solution error.
 
 `evalpoints` is a list of `(dns, Δf)` evaluation points; `families` a list of
@@ -493,7 +493,16 @@ function plot_trend_vs_redelta(
         case, evalpoints, families;
         netseeds, classical, trainpoints = nothing,
     )
-    redelta_of(dns, Δf) = mean(load(fieldsfile(case, dns, Δf), "redelta"))
+    # Series-mean global Re_Δ, read from the light lesmetafile; fall back to the
+    # heavy fieldsfile for artifacts predating `redelta_mean` (run
+    # `scripts/backfill_lesmeta.jl` to avoid needing the heavy file off-cluster).
+    function redelta_of(dns, Δf)
+        f = lesmetafile(case, dns, Δf)
+        jldopen(f, "r") do file
+            haskey(file, "redelta_mean") ? file["redelta_mean"] :
+                mean(load(fieldsfile(case, dns, Δf), "redelta"))
+        end
+    end
     re = [redelta_of(dns, Δf) for (dns, Δf) in evalpoints]
     agg = [get_seed_statistics(case, families, dns, Δf, netseeds) for (dns, Δf) in evalpoints]
     order = sortperm(re)

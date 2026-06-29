@@ -94,8 +94,10 @@ fields (Notes/ReExperiment.md):
 - `dnsmetafile` (once): `times`, `spectra_dns`, `statistics_dns`, `t_int` — Δ-independent.
 - `fieldsfile` (per Δ): `inputs` (ūbar), `outputs` (τ), `redelta` (per-snapshot
   global Re_Δ), plus `Δ`, `Δ_factor`, `visc`.
-- `lesmetafile` (per Δ): `spectra_les`. (Filtered-field turbulence statistics are
-  *not* stored — they are meaningless for the filtered field.)
+- `lesmetafile` (per Δ): `spectra_les` + `redelta_mean` (the series-mean global
+  Re_Δ — the trend figure's x-coordinate, kept here so plotting never reloads the
+  heavy `fieldsfile`). (Filtered-field turbulence statistics are *not* stored —
+  they are meaningless for the filtered field.)
 
 Train runs sample a few snapshots over ~2 turnovers (a-priori diversity); test
 runs a denser series over ~1 turnover (a-posteriori reference). The window length
@@ -198,7 +200,10 @@ function create_data(case, dns; force = false)
             inputs = inputs[k], outputs = outputs[k], redelta = redelta[k],
             Δ, Δ_factor = Δf, visc,
         )
-        jldsave_atomic(lesmetafile(case, dns, Δf); spectra_les = spectra_les[k])
+        jldsave_atomic(
+            lesmetafile(case, dns, Δf);
+            spectra_les = spectra_les[k], redelta_mean = mean(redelta[k]),
+        )
     end
 
     @info "Finished data generation after $(round(walltime; sigdigits = 4)) s"
@@ -314,7 +319,10 @@ function create_data_tgv(case, tgv; force = false)
             inputs = inputs[k], outputs = outputs[k], redelta = redelta[k],
             Δ, Δ_factor = Δf, visc,
         )
-        jldsave_atomic(lesmetafile(case, tgv, Δf); spectra_les = spectra_les[k])
+        jldsave_atomic(
+            lesmetafile(case, tgv, Δf);
+            spectra_les = spectra_les[k], redelta_mean = mean(redelta[k]),
+        )
     end
 
     @info "Finished TGV data generation after $(round(walltime; sigdigits = 4)) s"

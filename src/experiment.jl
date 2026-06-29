@@ -57,16 +57,27 @@ default_tiers() = (;
 )
 
 """
+Default (cluster) artifact root, used by `case_snellius` unless
+`ENV["SYMMETRY_ROOTDIR"]` is set. `scripts/pull_results.sh` defaults its remote
+source path to this same location (keep the two in sync).
+"""
+const cluster_rootdir = "/projects/prjs1757/SymmetryOutput/redelta"
+
+"""
 Everything shared across the whole ν/Δ/seed sweep — never the swept axes
-themselves. `rootdir` is the (cluster) artifact root; `plotdir` collects every
-figure. Sampling is given in integral turnovers; the actual save times are
-resolved against the *measured* turnover at data generation. Train uses a few
-sparse snapshots over ~2 turnovers (a-priori diversity); test a denser series
-over ~1 turnover (a-posteriori reference; Clark blows up past ~1 turnover).
+themselves. `rootdir` is the artifact root; it defaults to the cluster path
+([`cluster_rootdir`](@ref)) but falls back to `ENV["SYMMETRY_ROOTDIR"]` when set,
+so a laptop can point the plotting pipeline at an `scp`-ed copy of the results
+without touching this file (set the env var, then run the `reduce`/`plot_*` parts;
+`backend` is already `CPU()` off-cluster). `plotdir` collects every figure.
+Sampling is given in integral turnovers; the actual save times are resolved
+against the *measured* turnover at data generation. Train uses a few sparse
+snapshots over ~2 turnovers (a-priori diversity); test a denser series over ~1
+turnover (a-posteriori reference; Clark blows up past ~1 turnover).
 """
 function case_snellius(;
         backend = default_backend(),
-        rootdir = "/projects/prjs1757/SymmetryOutput/redelta",
+        rootdir = get(ENV, "SYMMETRY_ROOTDIR", cluster_rootdir),
         plotdir = joinpath(@__DIR__, "..", "output", "redelta") |> mkpath,
     )
     return (;

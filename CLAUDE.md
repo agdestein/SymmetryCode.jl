@@ -46,7 +46,7 @@ This is the spine of the codebase (`src/experiment.jl`). The swept axes — visc
 | `dnsfile` | DNS warm-up state | `(case, dns)` |
 | `dnsmetafile` | Δ-independent DNS metadata (times, spectra, stats, t_int) | `(case, dns)` |
 | `fieldsfile` | heavy `(ūbar, τ)` field series + per-snapshot `redelta` | `(case, dns, Δf)` |
-| `lesmetafile` | light LES-side spectra | `(case, dns, Δf)` |
+| `lesmetafile` | light LES-side spectra + mean Re_Δ (`redelta_mean`) | `(case, dns, Δf)` |
 | `psfile` | trained params + states + loss curves + `redelta_norm` | `(case, m)` |
 | `sfsstatsfile` | aggregated a-priori SFS statistics (reduced on the fly) | `(case, dns, Δf, m)` |
 | `apostfile` | reduced a-posteriori metrics (one rollout) | `(case, dns, Δf, m)` |
