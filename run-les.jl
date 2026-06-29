@@ -126,7 +126,7 @@ all_models(c) = unique([saturation_models(c); ablation_models(c)])
 # Build a single closure (classical symbol or learned coordinate) against `setup`.
 buildone(case, setup, m) = S.build_models(case, setup, [m])[S.modelname(m)]
 
-# Per-script table file (shares case.plotdir with create-data.jl).
+# Per-script table file (shares case.plotdir with run-dns.jl).
 tablefile() = "tables-les.txt"
 reset_tables(case; kwargs...) = S.reset_tables(case; filename = tablefile(), kwargs...)
 tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile(), kwargs...)

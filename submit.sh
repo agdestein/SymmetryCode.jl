@@ -6,7 +6,7 @@
 # MLP only runs once the :conv params it reuses are on disk.
 #
 #   data ─array→ reduce ─→ models ─array→ convsym ─array→ reduce ─→ data ─array→ models ─array→ reduce
-#   └─ create-data ─┘      └──────────────── run-les ───────────────┘  └────────── run-tgv ──────────┘
+#   └─ run-dns ─┘      └──────────────── run-les ───────────────┘  └────────── run-tgv ──────────┘
 #
 # Usage:  ./submit.sh [stage]      stage ∈ data | les | tgv | all   (default all)
 # Run a single stage once its inputs exist (e.g. `./submit.sh les` after `data`).
@@ -21,7 +21,7 @@ stage=${1:-all}
 # Recompute on a compute node via each driver's `count` phase, e.g.
 #     sbatch --wrap 'julia --project run-les.jl count'   # logs "<models> <convsym>"
 # (read the value from the job's stdout), then update the matching variable.
-N_DNS=5            # create-data.jl : length(dns_runs().all)
+N_DNS=5            # run-dns.jl : length(dns_runs().all)
 N_MODELS=49        # run-les.jl     : length(les_worklist)
 N_CONVSYM=18       # run-les.jl     : length(convsym_models)
 N_TGVDATA=1        # run-tgv.jl     : length(tgv_runs())
@@ -39,9 +39,9 @@ first_dep() { DEP=(); [ -n "$last" ] && DEP=(--dependency=afterok:"$last"); retu
 
 if [[ $stage == data || $stage == all ]]; then
     first_dep
-    d=$(sub create-data.jl data --time=20:00:00 --array=1-"$N_DNS" "${DEP[@]}")
-    last=$(sub create-data.jl reduce --time=00:30:00 --dependency=afterok:"$d")
-    echo "create-data: data[$d] (1-$N_DNS) -> reduce[$last]"
+    d=$(sub run-dns.jl data --time=20:00:00 --array=1-"$N_DNS" "${DEP[@]}")
+    last=$(sub run-dns.jl reduce --time=00:30:00 --dependency=afterok:"$d")
+    echo "run-dns: data[$d] (1-$N_DNS) -> reduce[$last]"
 fi
 
 if [[ $stage == les || $stage == all ]]; then

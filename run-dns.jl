@@ -6,7 +6,7 @@
 # ratio of the run's role (`create_data` -> dnsmetafile + per-Δ fieldsfile/lesmeta).
 # `run-les.jl` consumes these.
 #
-# Phases (`julia create-data.jl <phase>`, default `all` = serial end-to-end):
+# Phases (`julia run-dns.jl <phase>`, default `all` = serial end-to-end):
 # `data` generates one DNS run per SLURM_ARRAY_TASK_ID; `reduce` writes the shared
 # stat tables; `count` prints the `data` array size. `submit.sh` chains data →
 # reduce with an `afterok` dependency.
@@ -42,7 +42,7 @@ get_config() = (;
     force = Set{Symbol}([]),
 )
 
-# Per-script table file (create-data.jl and run-les.jl share case.plotdir).
+# Per-script table file (run-dns.jl and run-les.jl share case.plotdir).
 tablefile() = "tables-data.txt"
 reset_tables(case; kwargs...) = S.reset_tables(case; filename = tablefile(), kwargs...)
 tabulate(args...; kwargs...) = S.tabulate(args...; filename = tablefile(), kwargs...)
@@ -110,7 +110,7 @@ function run_reduce!(case, config)
 end
 
 """
-Entry point. `julia create-data.jl [phase]`, `phase ∈ all|data|reduce|count`
+Entry point. `julia run-dns.jl [phase]`, `phase ∈ all|data|reduce|count`
 (default `all` = every run then the tables, serial). The cluster submits `data` as
 a SLURM array (one unit per DNS run) then `reduce` serially, chained by `afterok`
 (see `submit.sh`); `count` prints the `data` array size.
