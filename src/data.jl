@@ -281,7 +281,10 @@ function create_data_tgv(case, tgv; force = false)
     (; nsnap, tconv) = case.tgv_sampling
     tstop = tconv / V0
 
-    outfiles = [dnsmetafile(case, tgv); [fieldsfile(case, tgv, Δf) for Δf in filters]]
+    outfiles = [
+        dnsmetafile(case, tgv); tgvvorticityfile(case, tgv);
+        [fieldsfile(case, tgv, Δf) for Δf in filters]
+    ]
     if !force && all(isfile, outfiles)
         @info "TGV data cached (Re=$(tgv.Re_target))"
         flush(stderr)
@@ -314,6 +317,14 @@ function create_data_tgv(case, tgv; force = false)
     spectra_dns = Vector{Float64}[]
     statistics_dns = typeof(stat0)[]
 
+    # z-vorticity slice series — a horizontal x-y plane at max z, full DNS
+    # resolution — for the transition roll-up visualization. ω_z = ∂x u_y − ∂y u_x
+    # is formed in spectral space, transformed to a physical slab, and the top
+    # plane is stored as Float32 to keep the file light.
+    ω_spec = scalarfield(g_dns)
+    ω_phys = spacescalarfield(g_dns)
+    vort_slices = Matrix{Float32}[]
+
     # Per-filter accumulators (heavy fields + light spectra).
     inputs = [typeof(map(Array, ubar))[] for _ in filters]
     outputs = [typeof(map(Array, τ))[] for _ in filters]
@@ -340,6 +351,11 @@ function create_data_tgv(case, tgv; force = false)
         push!(spectra_dns, spectrum(u, g_dns, stuff_dns).s)
         push!(statistics_dns, turbulence_statistics(u, visc, g_dns, sc_dns))
 
+        # Horizontal z-vorticity slice at the top z-plane (full DNS resolution).
+        apply!(vorticity_z!, g_dns, (ω_spec, u, g_dns))
+        to_phys!(ω_phys, ω_spec, c_dns.plan, g_dns)
+        push!(vort_slices, Float32.(Array(@view ω_phys[:, :, end])))
+
         for (k, Δf) in enumerate(filters)
             Δ = Δf * l / n_les
             sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
@@ -361,6 +377,7 @@ function create_data_tgv(case, tgv; force = false)
         times, spectra_dns, statistics_dns,
         t_int = stat0.t_int, V0, Re_target = tgv.Re_target, walltime,
     )
+    jldsave_atomic(tgvvorticityfile(case, tgv); slices = vort_slices, times)
     for (k, Δf) in enumerate(filters)
         Δ = Δf * l / n_les
         jldsave_atomic(

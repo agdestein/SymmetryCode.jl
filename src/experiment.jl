@@ -193,6 +193,13 @@ dnsfile(case, dns) = joinpath(dnsdir(case, dns) |> mkpath, "dns.jld2")
 "Δ-independent DNS-side metadata (times, DNS spectra/statistics) — once per DNS."
 dnsmetafile(case, dns) = joinpath(dnsdir(case, dns) |> mkpath, "dns_meta.jld2")
 
+"""
+TGV-only z-vorticity slice series (a horizontal x-y plane at max z, full DNS
+resolution; `slices::Vector{Matrix{Float32}}` + matching `times`) for the
+transition-roll-up visualization. Δ-independent, once per TGV run.
+"""
+tgvvorticityfile(case, tgv) = joinpath(dnsdir(case, tgv) |> mkpath, "vorticity_z.jld2")
+
 "Heavy (ūbar, τ) field series + per-snapshot Re_Δ — per (ν, seed, Δ)."
 fieldsfile(case, dns, Δ_factor) = joinpath(datadir(case, dns, Δ_factor) |> mkpath, "fields.jld2")
 
