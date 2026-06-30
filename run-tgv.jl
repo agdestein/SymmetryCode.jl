@@ -36,7 +36,7 @@ get_config() = (;
     # top tier ±Re — sweep D applies sweep C's models to the decaying TGV.
     archs = (:conv, :equi, :tbnn),
     top = :p1200,
-    netseeds = 0:4,
+    netseeds = 0:1,
     classical = [:nomo, :dynsmag, :clar],
 
     experiments = [
@@ -47,7 +47,14 @@ get_config() = (;
         :dissipation,     # plot_dissipation_tgv (the benchmark)
         :vorticity,       # plot_vorticity_tgv montage (full-DNS z-vorticity, Δ-independent)
     ],
-    force = Set{Symbol}([]),
+    force = Set{Symbol}([
+        # :data,            # create_data_tgv -> dnsmetafile + fieldsfile/lesmeta per Δ
+        # :apriori,         # compute_sfs_stats (reduce-on-the-fly a-priori)
+        # :aposteriori,     # solve_les (decaying rollout, reduce-on-the-fly)
+        # :plots,           # per-eval-point figures
+        # :dissipation,     # plot_dissipation_tgv (the benchmark)
+        # :vorticity,       # plot_vorticity_tgv montage (full-DNS z-vorticity, Δ-independent)
+    ]),
 )
 
 # Top tier ±Re (mirrors run-les.jl's ablation set, which trained these ps-*.jld2).

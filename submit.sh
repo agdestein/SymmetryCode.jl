@@ -25,7 +25,7 @@ N_DNS=5            # run-dns.jl : length(dns_runs().all)
 N_MODELS=69        # run-les.jl     : length(les_worklist)
 N_CONVSYM=22       # run-les.jl     : length(convsym_models)
 N_TGVDATA=1        # run-tgv.jl     : length(tgv_runs())
-N_TGVMODELS=14     # run-tgv.jl     : length(eval_models)
+N_TGVMODELS=15     # run-tgv.jl     : length(eval_models)
 
 # sub <driver> <phase> [extra sbatch flags...]  ->  echoes the new job id.
 # job.sh evaluates `julia --project <driver> <phase>`; the flags are per-phase
@@ -54,8 +54,8 @@ fi
 
 if [[ $stage == tgv || $stage == all ]]; then
     first_dep
-    d=$(sub run-tgv.jl data --time=20:00:00 --array=1-"$N_TGVDATA" "${DEP[@]}")
-    m=$(sub run-tgv.jl models--time=02:00:00  --array=1-"$N_TGVMODELS" --dependency=afterok:"$d")
+    d=$(sub run-tgv.jl data --time=24:00:00 --array=1-"$N_TGVDATA" "${DEP[@]}")
+    m=$(sub run-tgv.jl models --time=02:00:00  --array=1-"$N_TGVMODELS" --dependency=afterok:"$d")
     last=$(sub run-tgv.jl reduce --time=00:30:00 --dependency=afterok:"$m")
     echo "run-tgv: data[$d] (1-$N_TGVDATA) -> models[$m] (1-$N_TGVMODELS) -> reduce[$last]"
 fi
