@@ -43,6 +43,7 @@ get_config() = (;
         :data,            # create_data_tgv -> dnsmetafile + fieldsfile/lesmeta per Δ
         :apriori,         # compute_sfs_stats (reduce-on-the-fly a-priori)
         :aposteriori,     # solve_les (decaying rollout, reduce-on-the-fly)
+        :seeds,           # get_seed_statistics (netseed aggregate -> seedstatsfile; feeds the bars)
         :plots,           # per-eval-point figures
         :dissipation,     # plot_dissipation_tgv (the benchmark)
         :vorticity,       # plot_vorticity_tgv montage (full-DNS z-vorticity, Δ-independent)
@@ -51,6 +52,7 @@ get_config() = (;
         # :data,            # create_data_tgv -> dnsmetafile + fieldsfile/lesmeta per Δ
         # :apriori,         # compute_sfs_stats (reduce-on-the-fly a-priori)
         # :aposteriori,     # solve_les (decaying rollout, reduce-on-the-fly)
+        # :seeds,           # get_seed_statistics (netseed aggregate -> seedstatsfile)
         # :plots,           # per-eval-point figures
         # :dissipation,     # plot_dissipation_tgv (the benchmark)
         # :vorticity,       # plot_vorticity_tgv montage (full-DNS z-vorticity, Δ-independent)
@@ -140,15 +142,18 @@ function run_models!(case, config, task_id)
 end
 
 """
-Phase `reduce` (serial): the model-independent references then the per-eval-point
-cross-model figures (bars, error, spectra, the dissipation benchmark, the field
-montage). Reads what the `models` phase wrote.
+Phase `reduce` (serial): the model-independent references, the netseed aggregate
+(`seedstatsfile`, which the bars consume — overwrite it with `:seeds` in
+`config.force`), then the per-eval-point cross-model figures (bars, error, spectra,
+the dissipation benchmark, the field montage). Reads what the `models` phase wrote.
 """
 function run_reduce!(case, config)
     fams = families(config)
     series = series_models(config)
     for (tgv, Δf) in tgv_points(case)
         eval_ref!(case, config, tgv, Δf)
+        :seeds in config.experiments &&
+            S.get_seed_statistics(case, fams, tgv, Δf, config.netseeds; force = :seeds in config.force)
         if :plots in config.experiments
             S.plot_apriori_bar(case, tgv, Δf, fams, config.netseeds; classical = config.classical)
             S.plot_dissipation_bar(case, tgv, Δf, fams, config.netseeds; classical = config.classical)
