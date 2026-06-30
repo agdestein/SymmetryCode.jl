@@ -45,7 +45,6 @@ get_config() = (;
         :aposteriori,     # solve_les (decaying rollout, reduce-on-the-fly)
         :plots,           # per-eval-point figures
         :dissipation,     # plot_dissipation_tgv (the benchmark)
-        :field_evolution, # plot_field_evolution_tgv montage (filtered LES field)
         :vorticity,       # plot_vorticity_tgv montage (full-DNS z-vorticity, Δ-independent)
     ],
     force = Set{Symbol}([]),
@@ -151,8 +150,6 @@ function run_reduce!(case, config)
         end
         :dissipation in config.experiments &&
             S.plot_dissipation_tgv(case, tgv, Δf, [:ref; series])
-        :field_evolution in config.experiments &&
-            S.plot_field_evolution_tgv(case, tgv, Δf)
     end
     # Δ-independent montage (one per TGV run): the full-DNS z-vorticity slices.
     if :vorticity in config.experiments

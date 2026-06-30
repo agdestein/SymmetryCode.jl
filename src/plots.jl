@@ -834,96 +834,15 @@ function plot_velocities(case, dns, Δf, models, comp)
 end
 
 """
-    plot_field_evolution_tgv(case, tgv, Δf; field = :vortz, ntime = 5, zslice = 1)
-
-Time-evolution montage of the filtered-DNS field for TGV run `tgv` at filter `Δf`:
-a row of 2D sections from the initial condition, through transition into turbulence
-(anchored on the peak-dissipation snapshot), and into the decay. Shows either a
-velocity component (`field ∈ (:x, :y, :z)`) or the out-of-plane vorticity
-`ω_z = ∂_x u_y - ∂_y u_x` (`field = :vortz`, default; it sharply marks the roll-up).
-In 3D a `z = zslice` section is taken. A shared, zero-centered color range makes the
-amplitude decay legible. Reads [`fieldsfile`](@ref) `inputs` + [`dnsmetafile`](@ref).
-"""
-function plot_field_evolution_tgv(case, tgv, Δf; field = :vortz, ntime = 5, zslice = 1)
-    (; D, l, n_les, backend) = case
-
-    inputs = load(fieldsfile(case, tgv, Δf), "inputs")
-    times, statistics_dns, V0 = load(dnsmetafile(case, tgv), "times", "statistics_dns", "V0")
-    # Dimensionless convective time t* = t·V₀/L (L = 1), matching the rest of the
-    # TGV pipeline (e.g. `plot_dissipation_tgv`).
-    times = (times .- times[1]) .* V0
-    nt = length(times)
-
-    # Sample the IC, the peak-dissipation snapshot (transition into turbulence),
-    # and evenly spaced snapshots through the post-peak decay.
-    diss = [s.diss for s in statistics_dns]
-    ipk = argmax(diss)
-    inds = round.(Int, [1; ipk; range(ipk, nt; length = ntime - 1)[2:end]])
-    inds = sort(unique(clamp.(inds, 1, nt)))
-
-    g = Grid{D}(; l, n = n_les, backend)
-    ubar = vectorfield(g)
-    ω = scalarfield(g)
-    f_space = spacescalarfield(g)
-    plan = plan_rfft(f_space)
-
-    # First pass: build the physical-space sections and a shared symmetric range.
-    slices = map(inds) do t
-        for c in keys(ubar)
-            copyto!(ubar[c], inputs[t][c])
-        end
-        spec = if field === :vortz
-            apply!(vorticity_z!, g, (ω, ubar, g))
-            ω
-        else
-            ubar[field]
-        end
-        apply!(twothirds!, g, (spec, g))
-        to_phys!(f_space, spec, plan, g)
-        sl = D == 2 ? f_space[:, :] : f_space[:, :, clamp(zslice, 1, n_les)]
-        return Array(sl)
-    end
-    amp = maximum(s -> maximum(abs, s), slices)
-    colorrange = (-amp, amp)
-
-    fig = Figure(; size = (180 * length(inds) + 80, 230))
-    local hm
-    for (i, t) in enumerate(inds)
-        ax = Axis(
-            fig[1, i];
-            # title = L"t^* = %$(round(times[t]; sigdigits = 2))",
-            title = "t = $(round(times[t]; sigdigits = 2))",
-            xticksvisible = false,
-            xticklabelsvisible = false,
-            yticksvisible = false,
-            yticklabelsvisible = false,
-            aspect = DataAspect(),
-        )
-        hm = image!(ax, slices[i]; colormap = :RdBu, colorrange, interpolate = false)
-    end
-    # label = field === :vortz ? L"\bar{\omega}_z" : "ubar_$(field)"
-    label = field === :vortz ? "Vorticity" : "Velocity"
-    Colorbar(fig[1, length(inds) + 1], hm; label)
-
-    rowgap!(fig.layout, 10)
-    colgap!(fig.layout, 10)
-
-    save(joinpath(figdir(case, tgv, Δf), "field-evolution-$(field).png"), fig; backend = CairoMakie)
-
-    return fig
-end
-
-"""
     plot_vorticity_tgv(case, tgv; ntime = 7)
 
 Full-DNS-resolution z-vorticity montage for TGV run `tgv`: a row of horizontal
 `ω_z` sections at the top z-plane, read straight from the precomputed
 [`tgvvorticityfile`](@ref) (no field reconstruction). Sampled at the IC, the
 peak-dissipation snapshot (the transition roll-up), then evenly through the decay;
-a shared zero-centered color range keeps the amplitude decay legible. Unlike
-[`plot_field_evolution_tgv`](@ref) (filtered LES field, 128²) this shows the raw
-DNS field (810²), so the small-scale roll-up is resolved. Δ-independent — one per
-run, saved under [`dnsfigdir`](@ref).
+a shared zero-centered color range keeps the amplitude decay legible. The slices
+are the raw DNS field (810²), so the small-scale roll-up is resolved. Δ-independent
+— one per run, saved under [`dnsfigdir`](@ref).
 """
 function plot_vorticity_tgv(case, tgv; ntime = 7)
     slices, times = load(tgvvorticityfile(case, tgv), "slices", "times")
