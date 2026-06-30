@@ -14,7 +14,9 @@
 #
 # For the Re_Δ trend figure, run `scripts/backfill_lesmeta.jl` ON THE CLUSTER first
 # so `les_meta.jld2` carries `redelta_mean` (otherwise the trend would need the
-# heavy fields.jld2).
+# heavy fields.jld2). For the TGV-vs-Re_Δ figure, also run
+# `scripts/backfill_redelta_peak.jl` ON THE CLUSTER first, same reason
+# (`redelta_peak`, the TGV's peak-dissipation-instant Re_Δ).
 #
 # Usage:
 #   scripts/pull_results.sh [--heavy] [--dry-run] REMOTE [DEST]

@@ -46,6 +46,7 @@ get_config() = (;
         :seeds,           # get_seed_statistics (netseed aggregate -> seedstatsfile; feeds the bars)
         :plots,           # per-eval-point figures
         :dissipation,     # plot_dissipation_tgv (the benchmark)
+        :redelta_trend,   # plot_tgv_vs_redelta (TGV on the forced-HIT Re_Δ axis)
         :vorticity,       # plot_vorticity_tgv montage (full-DNS z-vorticity, Δ-independent)
     ],
     force = Set{Symbol}(
@@ -168,6 +169,16 @@ function run_reduce!(case, config)
         end
         :dissipation in config.experiments &&
             S.plot_dissipation_tgv(case, tgv, Δf, [:ref; series])
+    end
+    if :redelta_trend in config.experiments
+        grid = [(dns, Δf) for dns in S.dns_runs().test for Δf in case.filters_test]
+        trainpoints = [(dns, Δf) for dns in S.dns_runs().train for Δf in case.filters_train]
+        S.plot_tgv_vs_redelta(
+            case, grid, fams, tgv_points(case);
+            netseeds = config.netseeds,
+            classical = Tuple(filter(!=(:nomo), config.classical)),  # :nomo diss-ratio = 0 (log axis)
+            trainpoints,
+        )
     end
     # Δ-independent (one per TGV run): the full-DNS z-vorticity montage + animation.
     if :vorticity in config.experiments

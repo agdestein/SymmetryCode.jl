@@ -212,22 +212,36 @@ function create_data(case, dns; force = false)
 end
 
 """
+Time index of peak DNS dissipation for a TGV run — the reference instant shared by
+every peak-instant diagnostic ([`report_tgv_redelta`](@ref),
+[`compute_redelta_peak`](@ref), `S.plot_tgv_vs_redelta`). Unlike forced HIT
+(statistically stationary, so the series mean is representative), the decaying TGV
+sweeps a wide range of regimes, so a single physically meaningful instant — the
+canonical dissipation-rate peak — is used instead of an average.
+"""
+redelta_peak_index(statistics_dns) = argmax([s.diss for s in statistics_dns])
+
+"""
 Post-run diagnostic for a TGV DNS pass: print (1) the resolution at peak
-dissipation (`kmax_η` is most strained there) and (2) the per-filter global Re_Δ
-trajectory — startup → in-time peak → final — against the forced-HIT trained band
-([`hit_redelta_band`](@ref)). The trajectory rises from a near-laminar start, so
-the placement check is on the peak; whether it lands inside the trained band (vs
-the held-out band, vs full extrapolation) is the interpolation-generalization
-read for the TGV capstone. Printing only; skips the band line if the HIT sweep is
-not yet on disk.
+dissipation (`kmax_η` is most strained there) and the turbulence state there
+(Re_λ, Re_L), and (2) the per-filter global Re_Δ trajectory — startup → at-peak →
+final — against the forced-HIT trained band ([`hit_redelta_band`](@ref)). The
+trajectory rises from a near-laminar start, so the placement check is on the
+value at the peak-dissipation instant ([`redelta_peak_index`](@ref)), not the
+trajectory's own (possibly later) maximum; whether it lands inside the trained
+band (vs the held-out band, vs full extrapolation) is the
+interpolation-generalization read for the TGV capstone. Printing only; skips the
+band line if the HIT sweep is not yet on disk.
 """
 function report_tgv_redelta(case, tgv, times, redelta, filters, statistics_dns)
-    diss = [s.diss for s in statistics_dns]
     kme = [s.kmax_eta for s in statistics_dns]
-    ipk = argmax(diss)
+    ipk = redelta_peak_index(statistics_dns)
+    s = statistics_dns[ipk]
     @info "TGV resolution: kmax_η at peak diss (t=$(round(times[ipk]; sigdigits = 3)))" *
         " = $(round(kme[ipk]; digits = 2)), min over run = $(round(minimum(kme); digits = 2))" *
         " (target ≳ 1.5)"
+    @info "TGV peak-dissipation turbulence state: Re_λ=$(round(s.Re_tay; digits = 1)), " *
+        "Re_L=$(round(s.Re_int; digits = 1))"
 
     band = hit_redelta_band(case)
     haveband = !isempty(band.train)
@@ -245,14 +259,66 @@ function report_tgv_redelta(case, tgv, times, redelta, filters, statistics_dns)
     @info "TGV global Re_Δ trajectory (per filter):"
     for (k, Δf) in enumerate(filters)
         tr = redelta[k]
-        pk = maximum(tr)
+        rpk = tr[ipk]
         verdict = !haveband ? "" :
-            pk > fhi ? " — peak ABOVE full band (extrapolation)" :
-            pk > thi ? " — peak in held-out band (train < peak ≤ full)" :
-            pk ≥ tlo ? " — peak within trained band" :
+            rpk > fhi ? " — peak ABOVE full band (extrapolation)" :
+            rpk > thi ? " — peak in held-out band (train < peak ≤ full)" :
+            rpk ≥ tlo ? " — peak within trained band" :
             " — peak BELOW trained band (low-Re extrapolation)"
         @info "  Δf=$(Δf): start=$(round(tr[1]; digits = 1)) " *
-            "peak=$(round(Int, pk)) final=$(round(tr[end]; digits = 1))$(verdict)"
+            "at-dns-peak=$(round(Int, rpk)) traj-max=$(round(Int, maximum(tr))) " *
+            "final=$(round(tr[end]; digits = 1))$(verdict)"
+    end
+    flush(stderr)
+    return nothing
+end
+
+"""
+Re_Δ at the peak-DNS-dissipation instant for one TGV eval point `(tgv, Δf)`,
+computed from the heavy `fieldsfile` — call this only where it lives (the
+cluster; see `scripts/backfill_redelta_peak.jl` for backfilling artifacts that
+predate this). `create_data_tgv` calls this reduction inline and caches the
+result as `redelta_peak` in the light `lesmetafile`, so off-cluster code should
+prefer [`redelta_peak_of`](@ref).
+"""
+function compute_redelta_peak(case, tgv, Δf)
+    statistics_dns = load(dnsmetafile(case, tgv), "statistics_dns")
+    ipk = redelta_peak_index(statistics_dns)
+    redelta = load(fieldsfile(case, tgv, Δf), "redelta")
+    return redelta[ipk]
+end
+
+"""
+Off-cluster-safe accessor for the TGV peak-instant Re_Δ: reads the cached
+`redelta_peak` from the light `lesmetafile` if present, else falls back to
+[`compute_redelta_peak`](@ref) (which needs the heavy `fieldsfile`). Mirrors the
+`redelta_mean` fallback pattern used for the forced trend's x-coordinate.
+"""
+function redelta_peak_of(case, tgv, Δf)
+    f = lesmetafile(case, tgv, Δf)
+    return jldopen(f, "r") do file
+        haskey(file, "redelta_peak") ? file["redelta_peak"] : compute_redelta_peak(case, tgv, Δf)
+    end
+end
+
+"""
+Light, off-cluster-safe peak-instant report for a TGV run: prints the turbulence
+statistics (Re_λ, Re_L, k_max·η) at the instant of peak DNS dissipation, plus the
+per-filter Re_Δ at that same instant ([`redelta_peak_of`](@ref)) — the numbers the
+paper's TGV peak-Re_Δ claims are read off. Reads only the light `dnsmetafile`/
+`lesmetafile`, unlike [`report_tgv_redelta`](@ref), which needs the heavy
+`fieldsfile` and so only runs where that lives.
+"""
+function report_tgv_peak_stats(case, tgv, filters)
+    times, statistics_dns = load(dnsmetafile(case, tgv), "times", "statistics_dns")
+    ipk = redelta_peak_index(statistics_dns)
+    s = statistics_dns[ipk]
+    @info "TGV peak-dissipation instant (t=$(round(times[ipk]; sigdigits = 3))): " *
+        "Re_λ=$(round(s.Re_tay; digits = 1)), Re_L=$(round(s.Re_int; digits = 1)), " *
+        "k_max·η=$(round(s.kmax_eta; digits = 2))"
+    for Δf in filters
+        rpk = redelta_peak_of(case, tgv, Δf)
+        @info "  Δf=$(Δf): Re_Δ(peak) = $(round(Int, rpk))"
     end
     flush(stderr)
     return nothing
@@ -269,7 +335,10 @@ The DNS starts from the analytic [`taylorgreen`](@ref) field at amplitude
 `maintain_shell_energy!`), and the save times span `tconv` convective times
 `t_c = L/V0` so the snapshots cover the laminar → transition → decay trajectory.
 `dnsmetafile` additionally stores `V0`/`Re_target` for the dissipation benchmark
-([`plot_dissipation_tgv`](@ref)).
+([`plot_dissipation_tgv`](@ref)). `lesmetafile` additionally stores `redelta_peak`
+— the Re_Δ at the peak-DNS-dissipation instant ([`redelta_peak_index`](@ref)),
+the TGV's representative point on the Re_Δ axis (the decay sweeps too wide a
+range for the forced-HIT series mean to be meaningful here).
 """
 function create_data_tgv(case, tgv; force = false)
     (; D, l, n_dns, n_les, cfl, backend) = case
@@ -374,6 +443,7 @@ function create_data_tgv(case, tgv; force = false)
     walltime = time() - walltime
 
     report_tgv_redelta(case, tgv, times, redelta, filters, statistics_dns)
+    ipk = redelta_peak_index(statistics_dns)
 
     jldsave_atomic(
         dnsmetafile(case, tgv);
@@ -391,6 +461,7 @@ function create_data_tgv(case, tgv; force = false)
         jldsave_atomic(
             lesmetafile(case, tgv, Δf);
             spectra_les = spectra_les[k], redelta_mean = mean(redelta[k]),
+            redelta_peak = redelta[k][ipk],
         )
     end
 

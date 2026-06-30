@@ -695,6 +695,156 @@ function plot_trend_vs_redelta(
 end
 
 """
+Companion to [`plot_trend_vs_redelta`](@ref): places the decaying TGV on the same
+Re_Δ axis as the forced-HIT trend, so generalization to a genuinely different flow
+(laminar → transition → decay, unforced) reads directly against the forced grid
+the closures were tuned on. Two panels — a-priori relative SFS error (left),
+median SFS dissipation / reference (right, log) — both vs the filter-scale
+Reynolds number (log x, same definition/scale as the forced figure).
+
+`evalpoints`/`families`/`trainpoints` are the forced-grid eval points / learned
+families / training points, exactly as in `plot_trend_vs_redelta`: they draw the
+forced trend curves faded (background context) plus the shaded training-Re_Δ
+span. `tgvpoints` is a list of `(tgv, Δf)` TGV eval points; each lands as one
+marker per family per Δ, **filled for `use_redelta = false`, open for
+`use_redelta = true`** (a scatter point can't use linestyle to disambiguate the
+on/off pair the way the forced curves do), in the family's architecture color.
+
+The TGV marker's x-coordinate is its Re_Δ at the instant of **peak DNS
+dissipation** ([`redelta_peak_of`](@ref)), not the series mean: unlike forced HIT
+(statistically stationary), the decay sweeps a wide Re_Δ range, so the mean would
+smear distinct flow regimes into one point. The y-values use the same
+seed-aggregate reduction as the forced grid ([`get_seed_statistics`](@ref) /
+[`classical_metric`](@ref)), so the two read on a common scale. Also prints each
+TGV run's peak-instant turbulence state ([`report_tgv_peak_stats`](@ref)).
+"""
+function plot_tgv_vs_redelta(
+        case, evalpoints, families, tgvpoints;
+        netseeds, classical, trainpoints = nothing,
+    )
+    function redelta_of(dns, Δf)
+        f = lesmetafile(case, dns, Δf)
+        return jldopen(f, "r") do file
+            haskey(file, "redelta_mean") ? file["redelta_mean"] :
+                mean(load(fieldsfile(case, dns, Δf), "redelta"))
+        end
+    end
+
+    # Forced grid (faded background curves), as in plot_trend_vs_redelta.
+    re = [redelta_of(dns, Δf) for (dns, Δf) in evalpoints]
+    agg = [get_seed_statistics(case, families, dns, Δf, netseeds) for (dns, Δf) in evalpoints]
+    order = sortperm(re)
+    re, agg, evalpoints = re[order], agg[order], evalpoints[order]
+
+    # TGV peak-instant diagnostics (printed) and Re_Δ x-coordinates / y-values.
+    for tgv in unique(first.(tgvpoints))
+        report_tgv_peak_stats(case, tgv, [Δf for (t, Δf) in tgvpoints if t == tgv])
+    end
+    tgv_re = [redelta_peak_of(case, tgv, Δf) for (tgv, Δf) in tgvpoints]
+    tgv_agg = [get_seed_statistics(case, families, tgv, Δf, netseeds) for (tgv, Δf) in tgvpoints]
+
+    xlab = "Filter-scale Reynolds number"
+    fig = Figure(; size = (760, 320))
+    ax_re = Axis(fig[1, 1]; xscale = log10, xlabel = xlab, ylabel = "A-priori relative SFS error")
+    ax_diss = Axis(
+        fig[1, 2];
+        xscale = log10, yscale = log10, xlabel = xlab,
+        ylabel = "Median SFS dissipation / reference",
+    )
+    axs = (ax_re, ax_diss)
+    metrics = (:relerr, :diss_median)
+
+    # Shade the training Re_Δ span, as in the forced trend figure.
+    if !isnothing(trainpoints)
+        tre = [redelta_of(dns, Δf) for (dns, Δf) in trainpoints]
+        for ax in axs
+            vspan!(ax, minimum(tre), maximum(tre); color = (:gray, 0.12))
+        end
+    end
+
+    # Faded forced-grid trend (background context — no legend entries of its own).
+    fade(color) = (color, 0.35)
+    for fam in families
+        fname = familyname(fam)
+        st = plotstyle(fam)
+        for (ax, metric) in zip(axs, metrics)
+            xs, ys = Float64[], Float64[]
+            for (i, a) in enumerate(agg)
+                haskey(a, fname) || continue
+                v = collect(skipmissing(getproperty(a[fname], metric)))
+                isempty(v) && continue
+                push!(xs, re[i])
+                push!(ys, mean(v))
+            end
+            isempty(xs) ||
+                scatterlines!(ax, xs, ys; color = fade(st.color), marker = st.marker, linestyle = st.linestyle)
+        end
+    end
+    for c in classical
+        st = plotstyle(c)
+        for (ax, metric) in zip(axs, metrics)
+            ys = [classical_metric(case, dns, Δf, c, metric) for (dns, Δf) in evalpoints]
+            keep = findall(!ismissing, ys)
+            isempty(keep) || scatterlines!(
+                ax, re[keep], Float64[ys[i] for i in keep];
+                color = fade(st.color), marker = st.marker, linestyle = st.linestyle,
+            )
+        end
+    end
+
+    # TGV markers: filled = blind, open = +Re; one per Δ per model.
+    for fam in families
+        fname = familyname(fam)
+        st = plotstyle(fam)
+        open = fam.use_redelta
+        for (ax, metric) in zip(axs, metrics)
+            xs, ys, es = Float64[], Float64[], Float64[]
+            for (i, a) in enumerate(tgv_agg)
+                haskey(a, fname) || continue
+                v = collect(skipmissing(getproperty(a[fname], metric)))
+                isempty(v) && continue
+                push!(xs, tgv_re[i])
+                push!(ys, mean(v))
+                push!(es, length(v) > 1 ? std(v) : 0.0)
+            end
+            isempty(xs) && continue
+            scatter!(
+                ax, xs, ys;
+                color = open ? :white : st.color, strokecolor = st.color, strokewidth = 1.5,
+                marker = st.marker, markersize = 13, label = plotlabel(fam),
+            )
+            isp = findall(>(0), es)
+            isempty(isp) ||
+                errorbars!(ax, xs[isp], ys[isp], es[isp]; whiskerwidth = 6, color = st.color)
+        end
+    end
+    for c in classical
+        st = plotstyle(c)
+        for (ax, metric) in zip(axs, metrics)
+            ys = [classical_metric(case, tgv, Δf, c, metric) for (tgv, Δf) in tgvpoints]
+            keep = findall(!ismissing, ys)
+            isempty(keep) || scatter!(
+                ax, tgv_re[keep], Float64[ys[i] for i in keep];
+                color = st.color, marker = st.marker, markersize = 13, label = plotlabel(c),
+            )
+        end
+    end
+
+    hlines!(ax_diss, [1.0]; color = :black, linestyle = :dash, label = "Reference")
+    Legend(
+        fig[0, :], ax_diss;
+        tellwidth = false, tellheight = true, framevisible = false,
+        orientation = :horizontal, nbanks = 2,
+    )
+    rowgap!(fig.layout, 5)
+    file = "$(case.plotdir)/tgv-vs-redelta.pdf"
+    @info "Saving TGV-vs-Re_Δ figure to $(file)"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
+    return fig
+end
+
+"""
 The saturation / parameter-efficiency figure: a-priori relative SFS error (left)
 and time-mean a-posteriori solution error (right) vs **parameter count** (log-x),
 one series per architecture, at evaluation point (dns, Δf). `families` is the size

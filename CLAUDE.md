@@ -44,7 +44,7 @@ This is the spine of the codebase (`src/experiment.jl`). The swept axes — visc
 | `dnsfile` | DNS warm-up state | `(case, dns)` |
 | `dnsmetafile` | Δ-independent DNS metadata (times, spectra, stats, t_int) | `(case, dns)` |
 | `fieldsfile` | heavy `(ūbar, τ)` field series + per-snapshot `redelta` | `(case, dns, Δf)` |
-| `lesmetafile` | light LES-side spectra + mean Re_Δ (`redelta_mean`) | `(case, dns, Δf)` |
+| `lesmetafile` | light LES-side spectra + mean Re_Δ (`redelta_mean`; TGV also: peak-instant Re_Δ `redelta_peak`) | `(case, dns, Δf)` |
 | `psfile` | trained params + states + loss curves + `redelta_norm` | `(case, m)` |
 | `sfsstatsfile` | aggregated a-priori SFS statistics (reduced on the fly) | `(case, dns, Δf, m)` |
 | `apostfile` | reduced a-posteriori metrics (one rollout) | `(case, dns, Δf, m)` |
@@ -95,7 +95,7 @@ A is broad in *size* / narrow in *eval*; C is broad in *eval* / narrow in *size*
 - **`data.jl`** — DNS warm-up (`create_dns`), `(ūbar, τ)` generation (`create_data`, `create_data_tgv`; both call `sfs!`), the CPU dataloaders (`create_dataloader`, `create_dataloader_tbnn`), and `append_redelta` (the Re_Δ input channel).
 - **`les.jl`** — LES RHS with closure (`les!`) and `solve_les` / `solve_les!`: the a-posteriori rollout **reduces metrics on the fly and discards the heavy LES fields** (one rollout → one light `apostfile`; `savefields` keeps the field series for the single showcase case).
 - **`analysis.jl`** — `compute_sfs_stats` (a-priori stats, **reduced on the fly** — the closure is evaluated per snapshot and reduced immediately, never writing a predicted-SFS field series), `apriori_equivariance_error`, `compute_redelta_binning` (the Phase-0 diagnostic), and `get_seed_statistics` (netseed aggregate → `seedstatsfile`).
-- **`plots.jl`** — all `plot_*`, the coordinate-aware `plotlabel`/`plotstyle` (a model resolves to its arch's label/color; the `+Re` variant is dashed; `tierlabel`/`famlabel` add the capacity tag where several sizes share an axis), `getlabels`/`getstyles` (the canonical style table — **every plot uses it**), `plot_saturation` (error vs parameter count — the headline), `plot_trend_vs_redelta` (the Re_Δ trend), and `write_errors_table` / `write_timing_table` (the paper-ready LaTeX, from the seed aggregate + classical values).
+- **`plots.jl`** — all `plot_*`, the coordinate-aware `plotlabel`/`plotstyle` (a model resolves to its arch's label/color; the `+Re` variant is dashed; `tierlabel`/`famlabel` add the capacity tag where several sizes share an axis), `getlabels`/`getstyles` (the canonical style table — **every plot uses it**), `plot_saturation` (error vs parameter count — the headline), `plot_trend_vs_redelta` (the Re_Δ trend), `plot_tgv_vs_redelta` (places the TGV on that same Re_Δ axis, at the peak-dissipation-instant Re_Δ), and `write_errors_table` / `write_timing_table` (the paper-ready LaTeX, from the seed aggregate + classical values).
 - **`verify.jl`** — REPL-only sanity checks (`test_equivariant_*`, `dns_aid`). Not part of the pipeline.
 
 ## Conventions to know before editing
