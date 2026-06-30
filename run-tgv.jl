@@ -48,15 +48,17 @@ get_config() = (;
         :dissipation,     # plot_dissipation_tgv (the benchmark)
         :vorticity,       # plot_vorticity_tgv montage (full-DNS z-vorticity, Δ-independent)
     ],
-    force = Set{Symbol}([
-        # :data,            # create_data_tgv -> dnsmetafile + fieldsfile/lesmeta per Δ
-        # :apriori,         # compute_sfs_stats (reduce-on-the-fly a-priori)
-        # :aposteriori,     # solve_les (decaying rollout, reduce-on-the-fly)
-        # :seeds,           # get_seed_statistics (netseed aggregate -> seedstatsfile)
-        # :plots,           # per-eval-point figures
-        # :dissipation,     # plot_dissipation_tgv (the benchmark)
-        # :vorticity,       # plot_vorticity_tgv montage (full-DNS z-vorticity, Δ-independent)
-    ]),
+    force = Set{Symbol}(
+        [
+            # :data,            # create_data_tgv -> dnsmetafile + fieldsfile/lesmeta per Δ
+            # :apriori,         # compute_sfs_stats (reduce-on-the-fly a-priori)
+            # :aposteriori,     # solve_les (decaying rollout, reduce-on-the-fly)
+            # :seeds,           # get_seed_statistics (netseed aggregate -> seedstatsfile)
+            # :plots,           # per-eval-point figures
+            # :dissipation,     # plot_dissipation_tgv (the benchmark)
+            # :vorticity,       # plot_vorticity_tgv montage (full-DNS z-vorticity, Δ-independent)
+        ]
+    ),
 )
 
 # Top tier ±Re (mirrors run-les.jl's ablation set, which trained these ps-*.jld2).
@@ -159,6 +161,13 @@ function run_reduce!(case, config)
             S.plot_dissipation_bar(case, tgv, Δf, fams, config.netseeds; classical = config.classical)
             S.plot_error_post(case, tgv, Δf, series)
             S.plot_spectrum_les(case, tgv, Δf, [:ref; series])
+            # Per-filter TGV error table. Distinct filename so it never clobbers the
+            # forced-LES `errors.tex` written by run-les.jl into the same plotdir.
+            S.write_errors_table(
+                case, tgv, Δf, fams, config.netseeds;
+                classical = config.classical, include_equi = false,
+                filename = "errors-tgv-delta=$(Δf).tex",
+            )
         end
         :dissipation in config.experiments &&
             S.plot_dissipation_tgv(case, tgv, Δf, [:ref; series])

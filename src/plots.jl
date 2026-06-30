@@ -176,24 +176,58 @@ function plot_training(case, models; maxpoints = 1000)
 end
 
 """
+Padded `(lo, hi)` axis limits from `vals` (a `pad` fractional margin on the data
+span). `anchor`, if given, clamps the lower bound (e.g. `0` for a non-negative
+quantity). Used to fix a TGV panel's limits from the *stable* curves only, so a
+diverging closure is drawn-then-clipped at the axis box rather than flattening
+every other curve into the baseline.
+"""
+function padded_limits(vals; pad = 0.05, anchor = nothing)
+    lo, hi = extrema(vals)
+    isnothing(anchor) || (lo = min(lo, anchor))
+    m = pad * (hi - lo)
+    m == 0 && (m = pad * abs(hi) + eps(float(hi)))
+    return (lo - m, hi + m)
+end
+
+"""
+Whether a decaying-TGV rollout stayed physical: an unforced flow can only lose
+resolved kinetic energy, so a series that grows above its initial value (or goes
+non-finite) has blown up. Lets an exploding closure stay on the TGV plots (legend
++ clipped curve) without letting it set the axis limits. The `1.05` tolerance
+absorbs round-off; forced (non-decaying) runs should not use this test.
+"""
+tgv_rollout_stable(a) = all(isfinite, a.ke) && maximum(a.ke) <= 1.05 * first(a.ke)
+
+"""
 A-posteriori relative solution error `e_post(t) = ‖u_les − ūbar‖/‖ūbar‖` for each
-closure in `models` at evaluation point (dns, Δf), against the reference
-large-eddy turnover time `t_int`. Reads [`apostfile`](@ref). `:ref` (≡ 0) is
-skipped. (Seed bands and the cross-model inset move to the Re_Δ trend figure.)
+closure in `models` at evaluation point (dns, Δf). The time axis is the TGV
+convective time `t* = t V0 / L` for a `:tgv` run (matching
+[`plot_dissipation_tgv`](@ref)) and the reference large-eddy turnover `t_int`
+otherwise. On the TGV the axis is clipped to the *stable* rollouts
+([`tgv_rollout_stable`](@ref)), so a diverged closure (e.g. Clark at coarse Δ)
+keeps its curve but does not blow up the y-range. Reads [`apostfile`](@ref);
+`:ref` (≡ 0) is skipped. (Seed bands and the cross-model inset move to the Re_Δ
+trend figure.)
 """
 function plot_error_post(case, dns, Δf, models)
-    t_int = load(dnsmetafile(case, dns), "t_int")
+    istgv = dns.role === :tgv
+    V0 = istgv ? load(dnsmetafile(case, dns), "V0") : nothing
+    t_int = istgv ? nothing : load(dnsmetafile(case, dns), "t_int")
+    timeaxis(t) = istgv ? t .* V0 : (t .- t[1]) ./ t_int
     fig = Figure(; size = (450, 380))
     ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Relative error")
+    inliers = Float64[]
     for m in models
         m === :ref && continue   # the reference error is identically zero
         a = load_object(apostfile(case, dns, Δf, m))
-        t = (a.t .- a.t[1]) ./ t_int
         lines!(
-            ax, t, a.e_post;
+            ax, timeaxis(a.t), a.e_post;
             label = plotlabel(m), color = plotstyle(m).color, linestyle = plotstyle(m).linestyle,
         )
+        istgv && tgv_rollout_stable(a) && append!(inliers, a.e_post)
     end
+    istgv && !isempty(inliers) && ylims!(ax, padded_limits(inliers; anchor = 0.0))
     Legend(
         fig[0, 1],
         ax;
@@ -405,10 +439,18 @@ function plot_dissipation_tgv(
     ax_e = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Kinetic energy")
     ax_eps = Axis(fig[1, 2]; xlabel = "Time", ylabel = "Dissipation rate")
 
+    # Stable-curve accumulators: a diverging closure (Clark at coarse Δ) is still
+    # drawn so the explosion is visible, but only physical rollouts set the limits.
+    e_inl, eps_inl = Float64[], Float64[]
+
     # Full-grid DNS over the whole trajectory (gold reference).
     tdns = times .* V0
-    lines!(ax_e, tdns, [s.e for s in statistics_dns] ./ V0^2; color = :black, label = labels.dns)
-    lines!(ax_eps, tdns, [s.diss for s in statistics_dns] ./ V0^3; color = :black, label = labels.dns)
+    e_dns = [s.e for s in statistics_dns] ./ V0^2
+    eps_dns = [s.diss for s in statistics_dns] ./ V0^3
+    lines!(ax_e, tdns, e_dns; color = :black, label = labels.dns)
+    lines!(ax_eps, tdns, eps_dns; color = :black, label = labels.dns)
+    append!(e_inl, e_dns)
+    append!(eps_inl, eps_dns)
 
     # Published Re=1600 reference (already nondimensional), if available.
     # Gray dotted, so it cannot be confused with the black dashed filtered-DNS.
@@ -418,16 +460,29 @@ function plot_dissipation_tgv(
     else
         lines!(ax_e, ref.t, ref.E; color = :gray, linestyle = :dot, label = "Ref. Re=1600")
         lines!(ax_eps, ref.t, ref.eps; color = :gray, linestyle = :dot, label = "Ref. Re=1600")
+        append!(e_inl, ref.E)
+        append!(eps_inl, ref.eps)
     end
 
     # LES closures: effective dissipation ε_visc + ε_sfs on each rollout.
     for m in models
         b = load_object(apostfile(case, tgv, Δf, m))
         t = b.t .* V0
+        e = b.ke ./ V0^2
+        eps = (b.eps_visc .+ b.eps_sfs) ./ V0^3
         kw = (; label = plotlabel(m), color = plotstyle(m).color, linestyle = plotstyle(m).linestyle)
-        lines!(ax_e, t, b.ke ./ V0^2; kw...)
-        lines!(ax_eps, t, (b.eps_visc .+ b.eps_sfs) ./ V0^3; kw...)
+        lines!(ax_e, t, e; kw...)
+        lines!(ax_eps, t, eps; kw...)
+        if tgv_rollout_stable(b)
+            append!(e_inl, e)
+            append!(eps_inl, eps)
+        end
     end
+
+    # Clip to the stable set: a blown-up closure runs off the box instead of
+    # collapsing every physical curve to a flat line (KE ≥ 0, so anchor there).
+    isempty(e_inl) || ylims!(ax_e, padded_limits(e_inl; anchor = 0.0))
+    isempty(eps_inl) || ylims!(ax_eps, padded_limits(eps_inl))
 
     Legend(
         fig[0, :], ax_eps;
@@ -1409,7 +1464,7 @@ function write_errors_table(
         return (; c = float(c), s)
     end
     function onecell(x)
-        isnothing(x) && return nothing
+        (isnothing(x) || ismissing(x)) && return nothing
         isnan(x) && return "--"
         return (; c = float(x), s = nothing)
     end
@@ -1427,11 +1482,12 @@ function write_errors_table(
         end
         sf = sfsstatsfile(case, dns, Δf, m)
         stats = isfile(sf) ? load_object(sf) : nothing
-        fa = apostfile(case, dns, Δf, m)
         ds = Any[
             onecell(isnothing(stats) ? nothing : stats.apriori.relerr),
             onecell(isnothing(stats) ? nothing : stats.apriori.crosscor),
-            onecell(isfile(fa) ? mean(load_object(fa).e_post) : nothing),
+            # Divergence-aware (→ "--" if the rollout blew up), matching the learned
+            # rows; a bare mean over a truncated prefix would read artificially low.
+            onecell(apost_emean(case, dns, Δf, m)),
         ]
         include_equi && push!(ds, m === :nomo ? "N.A." : nothing)   # classical: not equivariance-tested
         push!(ds, onecell(isnothing(stats) ? nothing : stats.diss.median / refmed))
