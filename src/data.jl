@@ -320,9 +320,12 @@ function create_data_tgv(case, tgv; force = false)
     # z-vorticity slice series — a horizontal x-y plane at max z, full DNS
     # resolution — for the transition roll-up visualization. ω_z = ∂x u_y − ∂y u_x
     # is formed in spectral space, transformed to a physical slab, and the top
-    # plane is stored as Float32 to keep the file light.
-    ω_spec = scalarfield(g_dns)
-    ω_phys = spacescalarfield(g_dns)
+    # plane is stored as Float32 to keep the file light. Both working fields alias
+    # time-stepping scratch (`σ.xx` spectral, `vi_vj` physical): the slice is taken
+    # before `sfs!` and the next march, which overwrite them anyway — so no extra
+    # 810³ allocation (memory is tight at this DNS size).
+    ω_spec = c_dns.σ.xx
+    ω_phys = c_dns.vi_vj
     vort_slices = Matrix{Float32}[]
 
     # Per-filter accumulators (heavy fields + light spectra).

@@ -248,7 +248,7 @@ function plot_densities(case, dns, Δf, models; dolog = true)
     # Clamp the log-y floor so the meaningless ~1e-15 KDE-tail noise is out of
     # frame; the bulk + backscatter shoulder (down to ~1e-4) stay readable.
     # dolog && ylims!(ax, 1.0e-4, nothing)
-    dolog && ylims!(ax, 1.0e-4, 1e2)
+    dolog && ylims!(ax, 1.0e-4, 1.0e2)
     Legend(
         fig[0, 1], ax;
         tellwidth = false, tellheight = true, framevisible = false, horizontal = true, nbanks = 4,
@@ -527,7 +527,7 @@ function plot_trend_vs_redelta(
     # `scripts/backfill_lesmeta.jl` to avoid needing the heavy file off-cluster).
     function redelta_of(dns, Δf)
         f = lesmetafile(case, dns, Δf)
-        jldopen(f, "r") do file
+        return jldopen(f, "r") do file
             haskey(file, "redelta_mean") ? file["redelta_mean"] :
                 mean(load(fieldsfile(case, dns, Δf), "redelta"))
         end
@@ -909,6 +909,58 @@ function plot_field_evolution_tgv(case, tgv, Δf; field = :vortz, ntime = 5, zsl
     colgap!(fig.layout, 10)
 
     save(joinpath(figdir(case, tgv, Δf), "field-evolution-$(field).png"), fig; backend = CairoMakie)
+
+    return fig
+end
+
+"""
+    plot_vorticity_tgv(case, tgv; ntime = 7)
+
+Full-DNS-resolution z-vorticity montage for TGV run `tgv`: a row of horizontal
+`ω_z` sections at the top z-plane, read straight from the precomputed
+[`tgvvorticityfile`](@ref) (no field reconstruction). Sampled at the IC, the
+peak-dissipation snapshot (the transition roll-up), then evenly through the decay;
+a shared zero-centered color range keeps the amplitude decay legible. Unlike
+[`plot_field_evolution_tgv`](@ref) (filtered LES field, 128²) this shows the raw
+DNS field (810²), so the small-scale roll-up is resolved. Δ-independent — one per
+run, saved under [`dnsfigdir`](@ref).
+"""
+function plot_vorticity_tgv(case, tgv; ntime = 7)
+    slices, times = load(tgvvorticityfile(case, tgv), "slices", "times")
+    statistics_dns, V0 = load(dnsmetafile(case, tgv), "statistics_dns", "V0")
+    # Dimensionless convective time t* = t·V₀/L (L = 1), matching the TGV pipeline.
+    tstar = (times .- times[1]) .* V0
+    nt = length(times)
+
+    # IC, peak-dissipation snapshot (transition), then evenly through the decay.
+    diss = [s.diss for s in statistics_dns]
+    ipk = argmax(diss)
+    inds = round.(Int, [1; ipk; range(ipk, nt; length = ntime - 1)[2:end]])
+    inds = sort(unique(clamp.(inds, 1, nt)))
+
+    amp = maximum(i -> maximum(abs, slices[i]), inds)
+    colorrange = (-amp, amp)
+
+    fig = Figure(; size = (180 * length(inds) + 80, 230))
+    local hm
+    for (col, i) in enumerate(inds)
+        ax = Axis(
+            fig[1, col];
+            title = "t = $(round(tstar[i]; sigdigits = 2))",
+            xticksvisible = false,
+            xticklabelsvisible = false,
+            yticksvisible = false,
+            yticklabelsvisible = false,
+            aspect = DataAspect(),
+        )
+        hm = image!(ax, slices[i]; colormap = :RdBu, colorrange, interpolate = false)
+    end
+    Colorbar(fig[1, length(inds) + 1], hm; label = "Vorticity")
+
+    rowgap!(fig.layout, 10)
+    colgap!(fig.layout, 10)
+
+    save(joinpath(dnsfigdir(case, tgv), "vorticity-tgv.png"), fig; backend = CairoMakie)
 
     return fig
 end
