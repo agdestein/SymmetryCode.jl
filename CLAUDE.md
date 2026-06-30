@@ -28,8 +28,6 @@ The three drivers are run in order (`run-dns` → `run-les` → `run-tgv`) and a
 
 > **Note on the test suite.** `test/runtests.jl` predates the coordinate refactor and may reference removed functions; treat a red test as "needs migrating", not as a regression in the new code. The package itself cold-loads and runs.
 
-> **This worktree.** Work happens on the `redelta-refactor` branch in the `SymmetryCode-redelta` worktree, a sibling of `SymmetryCode`. Commit on this branch; it merges back into `SymmetryCode`'s `main` when the experiment lands. The clean-slate refactor deliberately discarded all back-compat — there is no migration path for old artifacts; regenerate from `run-dns.jl`.
-
 ## The coordinate design
 
 This is the spine of the codebase (`src/experiment.jl`). The swept axes — viscosity, DNS seed, filter ratio, network architecture/size/init-seed, Re_Δ on/off — are **loose coordinates**, never fused into one config. Sweeps are plain Cartesian products or zips. No code block ever "destructures a list of setups that carry redundant info and rebuilds them with one parameter changed".
