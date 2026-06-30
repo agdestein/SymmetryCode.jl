@@ -151,10 +151,11 @@ function run_reduce!(case, config)
         :dissipation in config.experiments &&
             S.plot_dissipation_tgv(case, tgv, Δf, [:ref; series])
     end
-    # Δ-independent montage (one per TGV run): the full-DNS z-vorticity slices.
+    # Δ-independent (one per TGV run): the full-DNS z-vorticity montage + animation.
     if :vorticity in config.experiments
         for tgv in S.tgv_runs()
             S.plot_vorticity_tgv(case, tgv)
+            S.animate_vorticity_tgv(case, tgv)
         end
     end
     @info "Done (reduce)."

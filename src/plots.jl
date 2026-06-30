@@ -885,6 +885,51 @@ function plot_vorticity_tgv(case, tgv; ntime = 7)
 end
 
 """
+    animate_vorticity_tgv(case, tgv; framerate = 12, format = "mp4")
+
+Animate the full z-vorticity slice series for TGV run `tgv`: every horizontal `ω_z`
+section from [`tgvvorticityfile`](@ref), in time order, as one evolving heatmap. A
+shared zero-centered color range (fixed at the global peak amplitude) keeps the
+rise through transition and the decay on the same scale, so the animation shows the
+true amplitude evolution. Writes `vorticity-tgv.<format>`
+(`format ∈ ("mp4", "gif", "webm")`) under [`dnsfigdir`](@ref) and returns the path.
+The static counterpart is [`plot_vorticity_tgv`](@ref).
+"""
+function animate_vorticity_tgv(case, tgv; framerate = 12, format = "mp4")
+    slices, times = load(tgvvorticityfile(case, tgv), "slices", "times")
+    V0 = load(dnsmetafile(case, tgv), "V0")
+    # Dimensionless convective time t* = t·V₀/L (L = 1), matching the TGV pipeline.
+    tstar = (times .- times[1]) .* V0
+
+    amp = maximum(s -> maximum(abs, s), slices)
+    colorrange = (-amp, amp)
+
+    frame = Observable(slices[1])
+    title = Observable("t = $(round(tstar[1]; sigdigits = 2))")
+
+    fig = Figure(; size = (560, 600))
+    ax = Axis(
+        fig[1, 1];
+        title,
+        xticksvisible = false,
+        xticklabelsvisible = false,
+        yticksvisible = false,
+        yticklabelsvisible = false,
+        aspect = DataAspect(),
+    )
+    hm = image!(ax, frame; colormap = :RdBu, colorrange, interpolate = false)
+    Colorbar(fig[1, 2], hm; label = "Vorticity")
+
+    file = joinpath(dnsfigdir(case, tgv), "vorticity-tgv.$(format)")
+    # `Makie.record` — qualified because CUDA also exports `record` (CUDA events).
+    Makie.record(fig, file, eachindex(slices); framerate) do i
+        frame[] = slices[i]
+        title[] = "t = $(round(tstar[i]; sigdigits = 2))"
+    end
+    return file
+end
+
+"""
 A-priori equivariance commutation error per learned family at (dns, Δf): the mean
 over the 48 octahedral elements of `‖R(model(G)) − model(R(G))‖ / ‖model(R(G))‖`,
 aggregated over `netseeds` (whisker = ±std), as one marker per family on a log
