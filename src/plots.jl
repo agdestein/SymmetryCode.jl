@@ -889,7 +889,7 @@ function plot_velocities(case, dns, Δf, models, comp)
 end
 
 """
-    plot_vorticity_tgv(case, tgv; ntime = 7)
+    plot_vorticity_tgv(case, tgv; ntime = 7, clip_quantile = 0.99)
 
 Full-DNS-resolution z-vorticity montage for TGV run `tgv`: a row of horizontal
 `ω_z` sections at the top z-plane, read straight from the precomputed
@@ -898,8 +898,14 @@ peak-dissipation snapshot (the transition roll-up), then evenly through the deca
 a shared zero-centered color range keeps the amplitude decay legible. The slices
 are the raw DNS field (810²), so the small-scale roll-up is resolved. Δ-independent
 — one per run, saved under [`dnsfigdir`](@ref).
+
+`ω_z` is concentrated in thin vortex sheets: a handful of cores reach the peak
+amplitude while the bulk of the field is near zero, so scaling the range to the
+global max washes the plot out (RdBu's center is white). The shared range is
+clipped to the `clip_quantile` quantile of `|ω_z|` instead — the cores saturate
+to the colormap ends but the sheets stay legible.
 """
-function plot_vorticity_tgv(case, tgv; ntime = 7)
+function plot_vorticity_tgv(case, tgv; ntime = 7, clip_quantile = 0.99)
     slices, times = load(tgvvorticityfile(case, tgv), "slices", "times")
     statistics_dns, V0 = load(dnsmetafile(case, tgv), "statistics_dns", "V0")
     # Dimensionless convective time t* = t·V₀/L (L = 1), matching the TGV pipeline.
@@ -912,7 +918,10 @@ function plot_vorticity_tgv(case, tgv; ntime = 7)
     inds = round.(Int, [1; ipk; range(ipk, nt; length = ntime - 1)[2:end]])
     inds = sort(unique(clamp.(inds, 1, nt)))
 
-    amp = maximum(i -> maximum(abs, slices[i]), inds)
+    # Per-slice high quantile, maxed over the displayed snapshots: one shared
+    # zero-centered range, set by the strongest sheets rather than the few
+    # extreme cores (see the docstring).
+    amp = maximum(i -> quantile(abs.(vec(slices[i])), clip_quantile), inds)
     colorrange = (-amp, amp)
 
     fig = Figure(; size = (180 * length(inds) + 80, 230))
@@ -940,23 +949,26 @@ function plot_vorticity_tgv(case, tgv; ntime = 7)
 end
 
 """
-    animate_vorticity_tgv(case, tgv; framerate = 12, format = "mp4")
+    animate_vorticity_tgv(case, tgv; framerate = 12, format = "mp4", clip_quantile = 0.99)
 
 Animate the full z-vorticity slice series for TGV run `tgv`: every horizontal `ω_z`
 section from [`tgvvorticityfile`](@ref), in time order, as one evolving heatmap. A
-shared zero-centered color range (fixed at the global peak amplitude) keeps the
-rise through transition and the decay on the same scale, so the animation shows the
-true amplitude evolution. Writes `vorticity-tgv.<format>`
-(`format ∈ ("mp4", "gif", "webm")`) under [`dnsfigdir`](@ref) and returns the path.
-The static counterpart is [`plot_vorticity_tgv`](@ref).
+shared zero-centered color range keeps the rise through transition and the decay on
+the same scale, so the animation shows the true amplitude evolution. The range is
+clipped to the `clip_quantile` quantile of `|ω_z|` (maxed over frames) rather than
+the global peak amplitude, so the thin vortex sheets stay legible instead of washing
+out against the near-zero background (see [`plot_vorticity_tgv`](@ref)). Writes
+`vorticity-tgv.<format>` (`format ∈ ("mp4", "gif", "webm")`) under
+[`dnsfigdir`](@ref) and returns the path. The static counterpart is
+[`plot_vorticity_tgv`](@ref).
 """
-function animate_vorticity_tgv(case, tgv; framerate = 12, format = "mp4")
+function animate_vorticity_tgv(case, tgv; framerate = 12, format = "mp4", clip_quantile = 0.99)
     slices, times = load(tgvvorticityfile(case, tgv), "slices", "times")
     V0 = load(dnsmetafile(case, tgv), "V0")
     # Dimensionless convective time t* = t·V₀/L (L = 1), matching the TGV pipeline.
     tstar = (times .- times[1]) .* V0
 
-    amp = maximum(s -> maximum(abs, s), slices)
+    amp = maximum(s -> quantile(abs.(vec(s)), clip_quantile), slices)
     colorrange = (-amp, amp)
 
     frame = Observable(slices[1])
