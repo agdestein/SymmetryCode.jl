@@ -288,7 +288,7 @@ function run_reduce!(case, config)
     end
 
     if :tables in config.experiments
-        S.write_errors_table(case, indist, Δ_ab, comparison_families(config), config.netseeds_grid; classical = config.classical)
+        S.write_errors_table(case, indist, Δ_ab, comparison_families(config), config.netseeds_grid; classical = config.classical, include_tier = false)
         S.write_timing_table(
             case, indist, Δ_ab,
             unique([saturation_families(config); ablation_families(config)]),
