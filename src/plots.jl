@@ -1146,49 +1146,6 @@ function animate_vorticity_tgv(case, tgv; framerate = 12, format = "mp4", clip_q
     return file
 end
 
-"""
-A-priori equivariance commutation error per learned family at (dns, Δf): the mean
-over the 48 octahedral elements of `‖R(model(G)) − model(R(G))‖ / ‖model(R(G))‖`,
-aggregated over `netseeds` (whisker = ±std), as one marker per family on a log
-axis. The equivariant closures (G-CNN, TBNN) sit at machine-eps; the
-non-equivariant MLP is O(1). One bar per family replaces the dense per-element
-trace. Reads the aggregate from [`get_seed_statistics`](@ref).
-"""
-function plot_equivariance_bar(case, dns, Δf, families, netseeds)
-    agg = get_seed_statistics(case, families, dns, Δf, netseeds)
-    items = collect(families)
-    vals = [metric_value(case, dns, Δf, m, agg, :equi) for m in items]
-    keep = findall(v -> isfinite(v.c) && v.c > 0, vals)
-    isempty(keep) && return nothing
-
-    fig = Figure(; size = (max(460, 55 * length(keep) + 120), 340))
-    ax = Axis(
-        fig[1, 1];
-        yscale = log10, ylabel = "Mean equivariance error",
-        xticks = (1:length(keep), [famlabel(items[i]) for i in keep]),
-        xticklabelrotation = π / 6,
-    )
-    scatter!(
-        ax, 1:length(keep), [vals[i].c for i in keep];
-        color = [plotstyle(items[i]).color for i in keep], markersize = 13,
-    )
-    # Whiskers only where the spread stays positive on the log axis.
-    wx, wc, ws = Float64[], Float64[], Float64[]
-    for (p, i) in enumerate(keep)
-        v = vals[i]
-        v.s > 0 && v.c > v.s || continue
-        push!(wx, p)
-        push!(wc, v.c)
-        push!(ws, v.s)
-    end
-    isempty(wx) || errorbars!(ax, wx, wc, ws; whiskerwidth = 8, color = :black)
-    ylims!(ax, 1.0e-17, 5.0)
-    file = joinpath(figdir(case, dns, Δf), "equi-errors.pdf")
-    @info "Saving equivariance bar plot to $(file)"
-    save(file, fig; backend = CairoMakie)
-    return fig
-end
-
 "DNS warm-up energy/dissipation time series (from [`dnsfile`](@ref))."
 function plot_evolution_dns(case, dns)
     times, stats = load(dnsfile(case, dns), "times", "statistics")
@@ -1584,11 +1541,14 @@ evaluation point (dns, Δf) to `<plotdir>/<filename>`. One row per learned *fami
 sweep collapsed — plus one row per `classical` symbol (single values). A `Tier`
 column carries the capacity tier (`--` for classical).
 
-Columns: a-priori SFS tensor error, a-priori cross-correlation, time-mean
-a-posteriori solution error, mean a-priori equivariance error (skipped with
-`include_equi = false`), median pointwise SFS dissipation normalized by the
-reference, and the local backscatter fraction. Cells whose artifact is missing
-print `--`.
+Columns: a-priori SFS tensor error, a-priori cross-correlation (skipped with
+`include_crosscor = false` — it ranks the models the same as the closure error),
+time-mean a-posteriori solution error, mean a-priori equivariance error (skipped
+with `include_equi = false`; the machine-zero rows drop their seed spread, since
+its ± std is meaningless there, while the non-equivariant MLPs keep theirs),
+median pointwise SFS dissipation
+normalized by the reference, and the local backscatter fraction. Cells whose
+artifact is missing print `--`.
 
 Each column is printed at a *uniform* decimal precision: a per-column floor,
 widened so the cell with the smallest (seed std / value) still shows its leading
@@ -1603,12 +1563,17 @@ comment).
 """
 function write_errors_table(
         case, dns, Δf, families, netseeds;
-        classical, include_equi = true, include_tier = true, filename = "errors.tex",
+        classical, include_equi = true, include_crosscor = true, include_tier = true,
+        filename = "errors.tex",
     )
     refstats = load_object(sfsstatsfile(case, dns, Δf, :ref))
     refmed = refstats.diss.median
     seed = get_seed_statistics(case, families, dns, Δf, netseeds)
     items = [collect(classical); collect(families)]
+
+    # Numeric columns, in order: closure (relerr), optional cross-corr, solution
+    # (e_post), optional equivariance, median diss., backscatter.
+    ncol = 4 + include_crosscor + include_equi
 
     # Values below this many fixed-point decimals print in `\e{}` scientific
     # notation instead of widening a whole column (keeps O(1e-15) equi errors out).
@@ -1631,26 +1596,35 @@ function write_errors_table(
         return (; c = float(x), s = nothing)
     end
 
+    # Drop the seed spread only from a machine-zero equivariance cell (one that
+    # renders in `\e{}` scientific notation): its ± std is noise on noise. A
+    # meaningful, fixed-point equivariance error — the non-equivariant MLPs —
+    # keeps its spread.
+    dropspread(d) = d
+        # d isa NamedTuple && !(d.c == 0 || sigdecimals(d.c) <= maxdec) ?
+        # (; d.c, s = nothing) : d
+
     # One descriptor per cell, in column order, for a learned family or classical.
     function rowdescs(m)
         if m isa NamedTuple
             s = get(seed, familyname(m), nothing)   # absent if the aggregate cached a subset
-            isnothing(s) && return Any[nothing for _ in 1:(include_equi ? 6 : 5)]
-            ds = Any[aggcell(s.relerr), aggcell(s.crosscor), aggcell(s.e_post)]
-            include_equi && push!(ds, aggcell(s.equi))
+            isnothing(s) && return Any[nothing for _ in 1:ncol]
+            ds = Any[aggcell(s.relerr)]
+            include_crosscor && push!(ds, aggcell(s.crosscor))
+            push!(ds, aggcell(s.e_post))
+            include_equi && push!(ds, dropspread(aggcell(s.equi)))
             push!(ds, aggcell(s.diss_median))
             push!(ds, aggcell(s.backscatter))
             return ds
         end
         sf = sfsstatsfile(case, dns, Δf, m)
         stats = isfile(sf) ? load_object(sf) : nothing
-        ds = Any[
-            onecell(isnothing(stats) ? nothing : stats.apriori.relerr),
-            onecell(isnothing(stats) ? nothing : stats.apriori.crosscor),
-            # Divergence-aware (→ "--" if the rollout blew up), matching the learned
-            # rows; a bare mean over a truncated prefix would read artificially low.
-            onecell(apost_emean(case, dns, Δf, m)),
-        ]
+        ds = Any[onecell(isnothing(stats) ? nothing : stats.apriori.relerr)]
+        include_crosscor &&
+            push!(ds, onecell(isnothing(stats) ? nothing : stats.apriori.crosscor))
+        # Divergence-aware (→ "--" if the rollout blew up), matching the learned
+        # rows; a bare mean over a truncated prefix would read artificially low.
+        push!(ds, onecell(apost_emean(case, dns, Δf, m)))
         include_equi && push!(ds, m === :nomo ? "N.A." : nothing)   # classical: not equivariance-tested
         push!(ds, onecell(isnothing(stats) ? nothing : stats.diss.median / refmed))
         push!(ds, onecell(isnothing(stats) ? nothing : stats.diss.backscatter))
@@ -1662,7 +1636,11 @@ function write_errors_table(
     # widens to the most decimals any of its fixed-point cells needs to show its
     # leading significant figure (the std's, when seeded). Sub-`maxdec` cells stay
     # scientific. Result: every fixed cell in a column shares one decimal place.
-    bases = include_equi ? [4, 4, 4, 4, 3, 3] : [4, 4, 4, 3, 3]
+    bases = Int[4]                            # closure (relerr)
+    include_crosscor && push!(bases, 4)       # cross-corr
+    push!(bases, 4)                           # solution (e_post)
+    include_equi && push!(bases, 4)           # equivariance
+    append!(bases, [3, 3])                    # median diss., backscatter
     isfixed(d) = d isa NamedTuple && (d.c == 0 || sigdecimals(d.c) <= maxdec)
     coldigits = map(eachindex(bases)) do j
         reqs = [
@@ -1693,9 +1671,9 @@ function write_errors_table(
     header = [
         "Model",
         "            & Closure \\eqref{eq:tensor-error-prior}",
-        "            & Cross-corr.",
-        "            & Solution \\eqref{eq:tensor-error-post}",
     ]
+    include_crosscor && push!(header, "            & Cross-corr.")
+    push!(header, "            & Solution \\eqref{eq:tensor-error-post}")
     include_tier && insert!(header, 2, "            & Tier")
     include_equi &&
         push!(header, "            & Equivariance \\eqref{eq:equi-error-prior}")
@@ -1706,12 +1684,11 @@ function write_errors_table(
         ]
     )
 
-    ncol = include_equi ? 6 : 5
     file = joinpath(case.plotdir, filename)
     open(file, "w") do io
         println(io, "% Generated by SymmetryCode write_errors_table; do not edit by hand.")
         println(io, "% Reference backscatter fraction: $(round(refstats.diss.backscatter; digits = 3)).")
-        println(io, "\\begin{tabular}{l $(include_tier ? "l " : "")$(join(fill("r", ncol), " "))}")
+        println(io, "\\begin{tabular}{l $(include_tier ? "l " : "")$(join(fill("l", ncol), " "))}")
         println(io, "    \\toprule")
         foreach(h -> println(io, "    ", h), header)
         println(io, "    \\midrule")
@@ -1890,7 +1867,7 @@ function write_dns_table(case, runs; filename = "dns-stats.tex")
     open(file, "w") do io
         println(io, "% Generated by SymmetryCode write_dns_table; do not edit by hand.")
         println(io, "% Window-time-averaged forced-HIT DNS statistics.")
-        println(io, "\\begin{tabular}{l $(join(fill("r", ncell), " "))}")
+        println(io, "\\begin{tabular}{l $(join(fill("l", ncell), " "))}")
         println(io, "    \\toprule")
         println(io, "    $(headers[1])")
         for (j, h) in enumerate(headers[2:end])

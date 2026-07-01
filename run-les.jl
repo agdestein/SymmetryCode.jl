@@ -268,7 +268,6 @@ function run_reduce!(case, config)
         S.plot_apriori_bar(case, indist, Δ_ab, fams, config.netseeds_grid; classical = config.classical)
         S.plot_dissipation_bar(case, indist, Δ_ab, fams, config.netseeds_grid; classical = config.classical)
         S.plot_backscatter_bar(case, indist, Δ_ab, fams, config.netseeds_grid; classical = config.classical)
-        S.plot_equivariance_bar(case, indist, Δ_ab, fams, config.netseeds_grid)
         series = series_models(config)
         S.plot_densities(case, indist, Δ_ab, [:ref; series])
         S.plot_error_post(case, indist, Δ_ab, series)
@@ -288,7 +287,7 @@ function run_reduce!(case, config)
     end
 
     if :tables in config.experiments
-        S.write_errors_table(case, indist, Δ_ab, comparison_families(config), config.netseeds_grid; classical = config.classical, include_tier = false)
+        S.write_errors_table(case, indist, Δ_ab, comparison_families(config), config.netseeds_grid; classical = config.classical, include_tier = false, include_crosscor = false)
         S.write_timing_table(
             case, indist, Δ_ab,
             unique([saturation_families(config); ablation_families(config)]),

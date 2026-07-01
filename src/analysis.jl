@@ -286,7 +286,7 @@ A-priori equivariance error for closure `m` on test dataset (dns, Δf): compares
 `R(model(G))` with `model(R(G))` for every octahedral group element on the first
 filtered-DNS snapshot. Persists the per-element error series to
 `equipriorfile(case, dns, Δf, m)`; [`get_seed_statistics`](@ref) reduces it to the
-per-family mean that [`plot_equivariance_bar`](@ref) and the errors table consume.
+per-family mean that the errors table ([`write_errors_table`](@ref)) consumes.
 """
 function apriori_equivariance_error(case, m, dns, Δf, getmodel; force = false)
     file = equipriorfile(case, dns, Δf, m)
