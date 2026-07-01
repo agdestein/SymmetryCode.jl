@@ -36,7 +36,7 @@ get_config() = (;
     # top tier ±Re — sweep D applies sweep C's models to the decaying TGV.
     archs = (:conv, :equi, :tbnn),
     top = :p1200,
-    netseeds = 0:1,
+    netseeds = 0:4,
     classical = [:nomo, :dynsmag, :clar],
 
     experiments = [

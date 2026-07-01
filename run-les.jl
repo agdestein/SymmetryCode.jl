@@ -55,10 +55,9 @@ get_config() = (;
     sizes_extra = (;),
     top = :p1200,                # matched top tier for the B / C comparisons
 
-    # Seeds: more for the cheap saturation curve (one eval point), fewer for the
-    # expensive top-tier grid (full ν × Δ).
-    netseeds_curve = 0:4,
-    netseeds_grid = 0:1,
+    # Seeds: one set shared by the saturation curve and the top-tier grid (network
+    # init + batch shuffling only; the data is unaffected).
+    netseeds = 0:4,
 
     classical = [:nomo, :dynsmag, :clar],
     train = true,
@@ -74,7 +73,9 @@ get_config() = (;
         :trend,            # plot_trend_vs_redelta (C)
         :tables,           # errors + timing tables
     ],
-    force = Set{Symbol}([]),
+    force = Set{Symbol}([
+        # :seeds,
+    ]),
 )
 
 # Per-arch size points: the shared grid plus any per-arch extension.
@@ -83,7 +84,7 @@ arch_sizes(c, arch) = (c.sizes..., get(c.sizes_extra, arch, ())...)
 # A — saturation: +Re, every architecture across its full size range.
 saturation_models(c) = [
     (; arch, tier, netseed, use_redelta = true)
-        for arch in c.archs for tier in arch_sizes(c, arch) for netseed in c.netseeds_curve
+        for arch in c.archs for tier in arch_sizes(c, arch) for netseed in c.netseeds
 ]
 saturation_families(c) = [
     (; arch, tier, use_redelta = true) for arch in c.archs for tier in arch_sizes(c, arch)
@@ -92,7 +93,7 @@ saturation_families(c) = [
 # B / C — top tier, both Re_Δ settings (equal-capacity comparison + Re_Δ ablation).
 ablation_models(c) = [
     (; arch, tier = c.top, netseed, use_redelta = ur)
-        for arch in c.archs for ur in (false, true) for netseed in c.netseeds_grid
+        for arch in c.archs for ur in (false, true) for netseed in c.netseeds
 ]
 ablation_families(c) = [
     (; arch, tier = c.top, use_redelta = ur) for arch in c.archs for ur in (false, true)
@@ -116,7 +117,7 @@ comparison_families(c) = [ablation_families(c); convsym_top(c)]
 # Curated one-seed subset for the per-curve series plots (+Re top + classical).
 series_models(c) = [
     c.classical;
-    [(; arch, tier = c.top, netseed = first(c.netseeds_grid), use_redelta = true) for arch in c.archs]
+    [(; arch, tier = c.top, netseed = first(c.netseeds), use_redelta = true) for arch in c.archs]
 ]
 
 # Every distinct model to train (the +Re top is shared between A and C).
@@ -256,18 +257,18 @@ function run_reduce!(case, config)
 
     :saturation in config.experiments &&
         S.plot_saturation(
-        case, indist, Δ_ab, [saturation_families(config); convsym_curve(config)], config.netseeds_curve;
+        case, indist, Δ_ab, [saturation_families(config); convsym_curve(config)], config.netseeds;
         classical = config.classical,
     )
 
     :seeds in config.experiments &&
-        S.get_seed_statistics(case, comparison_families(config), indist, Δ_ab, config.netseeds_grid; force = :seeds in config.force)
+        S.get_seed_statistics(case, comparison_families(config), indist, Δ_ab, config.netseeds; force = :seeds in config.force)
 
     if :plots in config.experiments
         fams = comparison_families(config)
-        S.plot_apriori_bar(case, indist, Δ_ab, fams, config.netseeds_grid; classical = config.classical)
-        S.plot_dissipation_bar(case, indist, Δ_ab, fams, config.netseeds_grid; classical = config.classical)
-        S.plot_backscatter_bar(case, indist, Δ_ab, fams, config.netseeds_grid; classical = config.classical)
+        S.plot_apriori_bar(case, indist, Δ_ab, fams, config.netseeds; classical = config.classical)
+        S.plot_dissipation_bar(case, indist, Δ_ab, fams, config.netseeds; classical = config.classical)
+        S.plot_backscatter_bar(case, indist, Δ_ab, fams, config.netseeds; classical = config.classical)
         series = series_models(config)
         S.plot_densities(case, indist, Δ_ab, [:ref; series])
         S.plot_error_post(case, indist, Δ_ab, series)
@@ -280,18 +281,18 @@ function run_reduce!(case, config)
         trainpoints = [(dns, Δf) for dns in S.dns_runs().train for Δf in case.filters_train]
         S.plot_trend_vs_redelta(
             case, grid, ablation_families(config);
-            netseeds = config.netseeds_grid,
+            netseeds = config.netseeds,
             classical = Tuple(filter(!=(:nomo), config.classical)),  # :nomo diss-ratio = 0 (log axis)
             trainpoints,
         )
     end
 
     if :tables in config.experiments
-        S.write_errors_table(case, indist, Δ_ab, comparison_families(config), config.netseeds_grid; classical = config.classical, include_tier = false, include_crosscor = false)
+        S.write_errors_table(case, indist, Δ_ab, comparison_families(config), config.netseeds; classical = config.classical, include_tier = false, include_crosscor = false)
         S.write_timing_table(
             case, indist, Δ_ab,
             unique([saturation_families(config); ablation_families(config)]),
-            config.netseeds_curve; classical = config.classical,
+            config.netseeds; classical = config.classical,
         )
     end
 
