@@ -8,56 +8,116 @@
 #   data ─array→ reduce ─→ models ─array→ convsym ─array→ reduce ─→ data ─array→ models ─array→ reduce
 #   └─ run-dns ─┘      └──────────────── run-les ───────────────┘  └────────── run-tgv ──────────┘
 #
-# Usage:  ./submit.sh [stage]      stage ∈ data | les | tgv | all   (default all)
-# Run a single stage once its inputs exist (e.g. `./submit.sh les` after `data`).
+# Arrays are *exact*: the first requested stage runs the driver's `pending` phase
+# right here (login node — a pure `isfile` walk over the path functions, no GPU)
+# and submits only the units whose artifacts are missing, so a gap-fill rerun
+# never burns a GPU-node Julia load on a cached unit. Later stages can't know
+# their gaps until the previous reduce ran, so each stage's tail submits a small
+# `staging`-partition plan job that re-invokes this script for the remaining
+# stages (afterok on the reduce). Empty pending lists skip the array; the reduce
+# always runs (it regenerates the figures/tables).
+#
+# The inline `pending` needs Julia to load on non-GPU nodes without recompiling:
+# JULIA_CPU_TARGET below makes the precompile cache multi-target across the AMD
+# Zen 2 login/staging and Zen 4 H100 nodes (keep in sync with job.sh). The first
+# run after setting it precompiles once — from then on all node types share it.
+#
+# Usage:  ./submit.sh [stage...]    stage ∈ data | les | tgv | all   (default all)
+# Run a single stage once its inputs exist (e.g. `./submit.sh les` after `data`),
+# or a chain (`./submit.sh les tgv`).
 
 set -eo pipefail   # stop on first error
 cd "$(dirname "$0")"
-stage=${1:-all}
 
-# --- array sizes (must match the active config in each driver) ----------------
-# Hard-coded because the login node can't run Julia without a long recompile. They
-# change only when you change a sweep axis (archs/sizes/seeds, dns_runs, tgv_runs).
-# Recompute on a compute node via each driver's `count` phase, e.g.
-#     sbatch --wrap 'julia --project run-les.jl count'   # logs "<models> <convsym>"
-# (read the value from the job's stdout), then update the matching variable.
-N_DNS=5            # run-dns.jl : length(dns_runs().all)
-N_MODELS=78        # run-les.jl     : length(les_worklist)
-N_CONVSYM=25       # run-les.jl     : length(convsym_models)
-N_TGVDATA=1        # run-tgv.jl     : length(tgv_runs())
-N_TGVMODELS=33     # run-tgv.jl     : length(eval_models)
+export JULIA_CPU_TARGET="generic;znver2,clone_all;znver4,clone_all"
+
+# Expand/validate the requested stage list.
+stages=()
+for s in "${@:-all}"; do
+    case $s in
+        all) stages+=(data les tgv) ;;
+        data | les | tgv) stages+=("$s") ;;
+        *) echo "unknown stage '$s' (expected data|les|tgv|all)" >&2 && exit 1 ;;
+    esac
+done
+
+# pending <driver>: run the driver's `pending` phase on this node and fill
+# PENDING[<phase>] with the exact `--array` specs ("" = everything cached).
+declare -A PENDING
+pending() {
+    PENDING=()
+    while IFS='=' read -r k v; do PENDING[$k]=$v; done < <(julia --project "$1" pending)
+}
 
 # sub <driver> <phase> [extra sbatch flags...]  ->  echoes the new job id.
 # job.sh evaluates `julia --project <driver> <phase>`; the flags are per-phase
 # overrides (--array / --time / --dependency) layered on job.sh's #SBATCH defaults.
 sub() { local drv=$1 ph=$2; shift 2; sbatch --parsable "$@" job.sh "$drv" "$ph"; }
 
-last=""   # job id the next stage waits on (links the stages end-to-end)
-# Populate DEP with an afterok flag on the previous stage's reduce, for the first
-# job of a stage. Empty when a stage is started on its own (inputs must exist).
-first_dep() { DEP=(); [ -n "$last" ] && DEP=(--dependency=afterok:"$last"); return 0; }
+# Job id the next submission in this stage chains after ("" = no dependency).
+last=""
+dep() { [[ -n $last ]] && printf -- '--dependency=afterok:%s' "$last"; return 0; }
 
-if [[ $stage == data || $stage == all ]]; then
-    first_dep
-    d=$(sub run-dns.jl data --time=20:00:00 --array=1-"$N_DNS" "${DEP[@]}")
-    last=$(sub run-dns.jl reduce --time=00:30:00 --dependency=afterok:"$d")
-    echo "run-dns: data[$d] (1-$N_DNS) -> reduce[$last]"
+submit_data() {
+    pending run-dns.jl
+    if [[ -n ${PENDING[data]} ]]; then
+        last=$(sub run-dns.jl data --time=20:00:00 --array="${PENDING[data]}")
+        echo "run-dns: data[$last] --array=${PENDING[data]}"
+    else
+        echo "run-dns: data all cached"
+    fi
+    last=$(sub run-dns.jl reduce --time=00:30:00 $(dep))
+    echo "run-dns: reduce[$last]"
+}
+
+submit_les() {
+    pending run-les.jl
+    if [[ -n ${PENDING[models]} ]]; then
+        last=$(sub run-les.jl models --time=01:00:00 --array="${PENDING[models]}")
+        echo "run-les: models[$last] --array=${PENDING[models]}"
+    else
+        echo "run-les: models all cached"
+    fi
+    if [[ -n ${PENDING[convsym]} ]]; then
+        last=$(sub run-les.jl convsym --time=02:00:00 --array="${PENDING[convsym]}" $(dep))
+        echo "run-les: convsym[$last] --array=${PENDING[convsym]}"
+    else
+        echo "run-les: convsym all cached"
+    fi
+    last=$(sub run-les.jl reduce --time=00:30:00 $(dep))
+    echo "run-les: reduce[$last]"
+}
+
+submit_tgv() {
+    pending run-tgv.jl
+    if [[ -n ${PENDING[data]} ]]; then
+        last=$(sub run-tgv.jl data --time=24:00:00 --array="${PENDING[data]}")
+        echo "run-tgv: data[$last] --array=${PENDING[data]}"
+    else
+        echo "run-tgv: data all cached"
+    fi
+    if [[ -n ${PENDING[models]} ]]; then
+        last=$(sub run-tgv.jl models --time=02:00:00 --array="${PENDING[models]}" $(dep))
+        echo "run-tgv: models[$last] --array=${PENDING[models]}"
+    else
+        echo "run-tgv: models all cached"
+    fi
+    last=$(sub run-tgv.jl reduce --time=00:30:00 $(dep))
+    echo "run-tgv: reduce[$last]"
+}
+
+# Plan + submit the first stage now; hand the remaining stages to a cheap CPU
+# plan job that reruns this script once this stage's reduce has finished (its
+# pending sets depend on the artifacts that reduce/arrays are about to write).
+submit_"${stages[0]}"
+rest=("${stages[@]:1}")
+if ((${#rest[@]})); then
+    plan=$(
+        sbatch --parsable --partition=staging --time=01:00:00 --cpus-per-task=4 \
+            --job-name="plan-${rest[0]}" --dependency=afterok:"$last" \
+            --wrap "cd $PWD && ./submit.sh ${rest[*]}"
+    )
+    echo "plan[$plan]: './submit.sh ${rest[*]}' on staging after reduce $last"
 fi
 
-if [[ $stage == les || $stage == all ]]; then
-    first_dep
-    m=$(sub run-les.jl models --time=01:00:00 --array=1-"$N_MODELS" "${DEP[@]}")
-    c=$(sub run-les.jl convsym --time=02:00:00 --array=1-"$N_CONVSYM" --dependency=afterok:"$m")
-    last=$(sub run-les.jl reduce --time=00:30:00 --dependency=afterok:"$c")
-    echo "run-les: models[$m] (1-$N_MODELS) -> convsym[$c] (1-$N_CONVSYM) -> reduce[$last]"
-fi
-
-if [[ $stage == tgv || $stage == all ]]; then
-    first_dep
-    d=$(sub run-tgv.jl data --time=24:00:00 --array=1-"$N_TGVDATA" "${DEP[@]}")
-    m=$(sub run-tgv.jl models --time=02:00:00  --array=1-"$N_TGVMODELS" --dependency=afterok:"$d")
-    last=$(sub run-tgv.jl reduce --time=00:30:00 --dependency=afterok:"$m")
-    echo "run-tgv: data[$d] (1-$N_TGVDATA) -> models[$m] (1-$N_TGVMODELS) -> reduce[$last]"
-fi
-
-echo "Submitted. Final job: $last  (watch with: squeue --me)"
+echo "Submitted. Watch with: squeue --me"

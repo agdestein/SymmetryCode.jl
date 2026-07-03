@@ -13,5 +13,12 @@
 # run-les.jl models`. A `reduce` phase needs no GPU — point it at a CPU partition
 # (`sbatch --partition=... --gpus=0 job.sh run-les.jl reduce`) to save GPU hours.
 
+# Multi-target precompile cache so every Snellius node type shares one depot:
+# login int* = EPYC 7F72, staging srv* = EPYC 7F32 (both Zen 2), gpu_h100 gcn* =
+# EPYC 9334 (Zen 4). Without this, a cache built on a GPU node is rejected on the
+# login node (and vice versa) and everything recompiles. Must be set when the
+# cache is *created*, hence exported both here and in submit.sh — keep in sync.
+export JULIA_CPU_TARGET="generic;znver2,clone_all;znver4,clone_all"
+
 echo "Slurm job $SLURM_JOB_ID  array task ${SLURM_ARRAY_TASK_ID:-none}  ::  julia $*"
 julia --project "$@"

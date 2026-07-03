@@ -15,7 +15,8 @@
 #   models   evaluate one closure at every (tgv, Δf) point — a second array over
 #            `eval_models`. Reuses run-les.jl's psfiles; assumes `data` has run.
 #   reduce   serial: model-independent references + the per-eval-point figures.
-#   count    print the `data` and `models` array sizes for submit.sh.
+#   pending  print `data=<--array spec>` and `models=<--array spec>` for the units
+#            whose artifacts are incomplete, so `submit.sh` submits only the gaps.
 # `submit.sh` chains data → models → reduce with SLURM `afterok` dependencies.
 
 @info "Loading packages"
@@ -104,7 +105,48 @@ function eval_model!(case, config, m, dns, Δf)
 end
 
 tgv_points(case) = [(tgv, Δf) for tgv in S.tgv_runs() for Δf in case.filters_test]
-print_counts(config) = println(length(S.tgv_runs()), " ", length(eval_models(config)))
+
+"""
+Does `data`-phase unit `tgv` still have work? Mirrors `create_data_tgv`'s cache
+guard (its `outfiles` list: dnsmetafile + vorticity + the per-Δ fieldsfiles) —
+keep the two in sync.
+"""
+function data_pending(case, config, tgv)
+    :data in config.experiments || return false
+    :data in config.force && return true
+    outfiles = [
+        S.dnsmetafile(case, tgv); S.tgvvorticityfile(case, tgv);
+        [S.fieldsfile(case, tgv, Δf) for Δf in case.filters_test]
+    ]
+    return !all(isfile, outfiles)
+end
+
+"""
+Does `models`-phase unit `m` still have work at any (tgv, Δf) point? Mirrors
+`eval_model!`'s cache guards (the per-experiment artifact files), honoring
+`config.experiments`/`config.force` — keep the two in sync.
+"""
+unit_pending(case, config, m) = any(tgv_points(case)) do (tgv, Δf)
+    :apriori in config.experiments &&
+        (:apriori in config.force || !isfile(S.sfsstatsfile(case, tgv, Δf, m))) &&
+        return true
+    :aposteriori in config.experiments &&
+        (:aposteriori in config.force || !isfile(S.apostfile(case, tgv, Δf, m))) &&
+        return true
+    return false
+end
+
+function print_pending(case, config)
+    println(
+        "data=",
+        S.slurm_array_spec(findall(tgv -> data_pending(case, config, tgv), S.tgv_runs())),
+    )
+    println(
+        "models=",
+        S.slurm_array_spec(findall(m -> unit_pending(case, config, m), eval_models(config))),
+    )
+    return
+end
 
 """
 Phase `data` (array over `tgv_runs()`): generate one TGV run's (ūbar, τ) data
@@ -193,10 +235,11 @@ function run_reduce!(case, config)
 end
 
 """
-Entry point. `julia run-tgv.jl [phase]`, `phase ∈ all|data|models|reduce|count`
+Entry point. `julia run-tgv.jl [phase]`, `phase ∈ all|data|models|reduce|pending`
 (default `all` = serial end-to-end). The cluster submits `data` and `models` as
 SLURM arrays then `reduce` serially, chained by `afterok` (see `submit.sh`);
-`count` prints the two array sizes.
+`pending` prints the two `--array` specs of the units with missing artifacts
+(GPU-free — `submit.sh` runs it on the login node).
 """
 function (@main)(args)
     case = get_case()
@@ -206,11 +249,11 @@ function (@main)(args)
         isnothing(s) ? nothing : parse(Int, s)
     end
 
-    phase in ("all", "data", "models", "reduce", "count") ||
-        error("unknown phase '$(phase)'; expected all|data|models|reduce|count")
+    phase in ("all", "data", "models", "reduce", "pending") ||
+        error("unknown phase '$(phase)'; expected all|data|models|reduce|pending")
 
-    if phase == "count"
-        print_counts(config)
+    if phase == "pending"
+        print_pending(case, config)
     elseif phase == "all"
         run_data!(case, config, nothing)
         run_models!(case, config, nothing)

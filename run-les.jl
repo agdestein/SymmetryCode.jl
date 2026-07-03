@@ -25,7 +25,10 @@
 #            run *after* `models` so the conv params exist (afterok in submit.sh).
 #   reduce   serial: model-independent references, Re_Δ binning, every cross-model
 #            figure/table (reads what the two array phases wrote).
-#   count    print the `models` and `convsym` array sizes for submit.sh.
+#   pending  print `models=<--array spec>` and `convsym=<--array spec>` for the
+#            units whose artifacts are incomplete, so `submit.sh` submits only the
+#            gaps (a cached unit otherwise costs a full GPU-node Julia load just
+#            to quit).
 # `submit.sh` chains models → convsym → reduce with SLURM `afterok` dependencies,
 # so the sweep is one submission instead of hand-sequenced reruns. Artifacts
 # self-locate from coordinates, so adding a size/seed recomputes only the gaps.
@@ -184,7 +187,68 @@ condmean_points(case) = [(dns, first(case.filters_test)) for dns in S.dns_runs()
 condmean_families(c) =
     [(; arch, tier = c.top, use_redelta = ur) for arch in c.archs for ur in (false, true)]
 les_worklist(c) = [c.classical; all_models(c)]
-print_counts(config) = println(length(les_worklist(config)), " ", length(convsym_models(config)))
+
+"""
+Eval points for `models`-phase unit `m`: the in-distribution A/B point for all,
+plus the rest of the C grid for the classical baselines and the ±Re ablation set.
+Shared by `run_models!` (what to run) and `unit_pending` (what to check), so the
+two cannot drift.
+"""
+function unit_points(case, config, m)
+    indist, Δ_ab = eval_indist(case)
+    points = [(indist, Δ_ab)]
+    m in [config.classical; ablation_models(config)] &&
+        append!(points, [p for p in eval_grid(case) if p != (indist, Δ_ab)])
+    return points
+end
+
+"""
+Does `eval_model!` still have work for `m` at (dns, Δf)? Mirrors its cache
+guards (the per-experiment artifact files), honoring `config.experiments` and
+`config.force` — keep the two in sync.
+"""
+function eval_pending(case, config, m, dns, Δf; equi = false)
+    :apriori in config.experiments &&
+        (:apriori in config.force || !isfile(S.sfsstatsfile(case, dns, Δf, m))) &&
+        return true
+    :aposteriori in config.experiments &&
+        (:aposteriori in config.force || !isfile(S.apostfile(case, dns, Δf, m))) &&
+        return true
+    equi && :equivariance in config.experiments && m isa NamedTuple &&
+        (:equivariance in config.force || !isfile(S.equipriorfile(case, dns, Δf, m))) &&
+        return true
+    return false
+end
+
+"Does `models`-phase unit `m` still have work (training or any of its eval points)?"
+function unit_pending(case, config, m)
+    if config.train && m isa NamedTuple
+        (:train in config.force || !isfile(S.psfile(case, m))) && return true
+    end
+    indist_pt = eval_indist(case)
+    return any(
+        pt -> eval_pending(case, config, m, pt...; equi = pt == indist_pt),
+        unit_points(case, config, m),
+    )
+end
+
+function print_pending(case, config)
+    indist, Δ_ab = eval_indist(case)
+    println(
+        "models=",
+        S.slurm_array_spec(findall(m -> unit_pending(case, config, m), les_worklist(config))),
+    )
+    println(
+        "convsym=",
+        S.slurm_array_spec(
+            findall(
+                m -> eval_pending(case, config, m, indist, Δ_ab; equi = true),
+                convsym_models(config),
+            ),
+        ),
+    )
+    return
+end
 
 """
 Phase `models` (array over `les_worklist`): train each learned closure (cache-
@@ -195,9 +259,7 @@ ablation set. `task_id === nothing` runs the whole list; an integer runs only th
 """
 function run_models!(case, config, task_id)
     indist, Δ_ab = eval_indist(case)
-    grid = eval_grid(case)
     work = les_worklist(config)
-    cgrid = [config.classical; ablation_models(config)]
 
     # Trainpool load is heavy; build it lazily so eval-only / already-trained units
     # never pay for it.
@@ -212,9 +274,7 @@ function run_models!(case, config, task_id)
             S.train_model(case, m, gettrainpool(); force = :train in config.force)
         end
         S.clean()
-        points = [(indist, Δ_ab)]
-        m in cgrid && append!(points, [p for p in grid if p != (indist, Δ_ab)])
-        for (dns, Δf) in points
+        for (dns, Δf) in unit_points(case, config, m)
             eval_model!(case, config, m, dns, Δf; equi = (dns, Δf) == (indist, Δ_ab))
         end
     end
@@ -323,11 +383,13 @@ function run_reduce!(case, config)
 end
 
 """
-Entry point. `julia run-les.jl [phase]`, `phase ∈ all|models|convsym|reduce|count`
+Entry point. `julia run-les.jl [phase]`, `phase ∈ all|models|convsym|reduce|pending`
 (default `all` = the full pipeline, serial). The cluster submits `models` and
 `convsym` as SLURM arrays (one unit per `SLURM_ARRAY_TASK_ID`) then `reduce`
-serially, chained by `afterok` (see `submit.sh`); `count` prints the two array
-sizes. `all` ignores the array env so a stray `SLURM_ARRAY_TASK_ID` can't shard it.
+serially, chained by `afterok` (see `submit.sh`); `pending` prints the two
+`--array` specs of the units with missing artifacts (GPU-free — `submit.sh` runs
+it on the login node). `all` ignores the array env so a stray
+`SLURM_ARRAY_TASK_ID` can't shard it.
 """
 function (@main)(args)
     case = get_case()
@@ -337,11 +399,11 @@ function (@main)(args)
         isnothing(s) ? nothing : parse(Int, s)
     end
 
-    phase in ("all", "models", "convsym", "reduce", "count") ||
-        error("unknown phase '$(phase)'; expected all|models|convsym|reduce|count")
+    phase in ("all", "models", "convsym", "reduce", "pending") ||
+        error("unknown phase '$(phase)'; expected all|models|convsym|reduce|pending")
 
-    if phase == "count"
-        print_counts(config)
+    if phase == "pending"
+        print_pending(case, config)
     elseif phase == "all"
         run_models!(case, config, nothing)
         run_convsym!(case, config, nothing)

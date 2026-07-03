@@ -268,3 +268,26 @@ figdir(case, dns, Δf) =
 "Per-DNS (Δ-independent) figure directory under `case.plotdir`."
 dnsfigdir(case, dns) =
     joinpath(case.plotdir, "$(dns.role)_visc=$(dns.visc)_seed=$(dns.seed)") |> mkpath
+
+"""
+Compress a sorted list of 1-based unit indices into a SLURM `--array` spec
+(`"1,4-7,9"`; `""` when empty — the submitter skips the array then). The drivers'
+`pending` phases print these so `submit.sh` submits only the units whose
+artifacts are missing, instead of paying a Julia load per cached unit.
+"""
+function slurm_array_spec(indices)
+    parts = String[]
+    lo = hi = -1
+    for i in indices
+        if lo < 0
+            lo = hi = i
+        elseif i == hi + 1
+            hi = i
+        else
+            push!(parts, lo == hi ? string(lo) : string(lo, "-", hi))
+            lo = hi = i
+        end
+    end
+    lo < 0 || push!(parts, lo == hi ? string(lo) : string(lo, "-", hi))
+    return join(parts, ",")
+end

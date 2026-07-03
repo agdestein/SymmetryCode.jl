@@ -8,8 +8,12 @@
 #
 # Phases (`julia run-dns.jl <phase>`, default `all` = serial end-to-end):
 # `data` generates one DNS run per SLURM_ARRAY_TASK_ID; `reduce` writes the shared
-# stat tables; `count` prints the `data` array size. `submit.sh` chains data →
-# reduce with an `afterok` dependency.
+# stat tables; `pending` prints `data=<--array spec>` for the runs whose cached
+# artifacts are incomplete (so `submit.sh` never launches a task just to discover
+# its unit is cached). `submit.sh` chains data → reduce with an `afterok`
+# dependency. Note `pending` gates on the cached stages (:dns/:data) only — the
+# per-run plots refresh when their run reruns; to redo plots alone, submit the
+# full array by hand (`sbatch --array=1-N job.sh run-dns.jl data`).
 
 @info "Loading packages"
 flush(stderr)
@@ -52,7 +56,28 @@ timemean(stats) = let ks = keys(first(stats))
     NamedTuple{ks}(map(k -> mean(getindex.(stats, k)), ks))
 end
 
-print_count(case) = println(length(S.dns_runs().all))
+"""
+Does `data`-phase unit `dns` still have work? Mirrors the cache guards of
+`create_dns` (dnsfile) and `create_data` (its `outfiles` list: dnsmetafile + the
+per-Δ fieldsfiles), honoring `config.experiments`/`config.force` — keep the three
+in sync.
+"""
+function unit_pending(case, config, dns)
+    if :dns in config.experiments
+        (:dns in config.force || !isfile(S.dnsfile(case, dns))) && return true
+    end
+    if :data in config.experiments
+        :data in config.force && return true
+        filters = dns.role === :train ? case.filters_train : case.filters_test
+        outfiles = [S.dnsmetafile(case, dns); [S.fieldsfile(case, dns, Δf) for Δf in filters]]
+        all(isfile, outfiles) || return true
+    end
+    return false
+end
+
+print_pending(case, config) = println(
+    "data=", S.slurm_array_spec(findall(dns -> unit_pending(case, config, dns), S.dns_runs().all)),
+)
 
 """
 Phase `data` (array over `dns_runs().all`): warm up the DNS (`create_dns`) and
@@ -110,10 +135,11 @@ function run_reduce!(case, config)
 end
 
 """
-Entry point. `julia run-dns.jl [phase]`, `phase ∈ all|data|reduce|count`
+Entry point. `julia run-dns.jl [phase]`, `phase ∈ all|data|reduce|pending`
 (default `all` = every run then the tables, serial). The cluster submits `data` as
 a SLURM array (one unit per DNS run) then `reduce` serially, chained by `afterok`
-(see `submit.sh`); `count` prints the `data` array size.
+(see `submit.sh`); `pending` prints the `--array` spec of the units with missing
+artifacts (GPU-free — `submit.sh` runs it on the login node).
 """
 function (@main)(args)
     case = get_case()
@@ -123,11 +149,11 @@ function (@main)(args)
         isnothing(s) ? nothing : parse(Int, s)
     end
 
-    phase in ("all", "data", "reduce", "count") ||
-        error("unknown phase '$(phase)'; expected all|data|reduce|count")
+    phase in ("all", "data", "reduce", "pending") ||
+        error("unknown phase '$(phase)'; expected all|data|reduce|pending")
 
-    if phase == "count"
-        print_count(case)
+    if phase == "pending"
+        print_pending(case, config)
     elseif phase == "all"
         run_data!(case, config, nothing)
         run_reduce!(case, config)
