@@ -244,6 +244,10 @@ equipriorfile(case, dns, Δf, m) =
 redeltabinningfile(case, dns, Δf) =
     joinpath(datadir(case, dns, Δf) |> mkpath, "redelta-binning.jld2")
 
+"Direct conditional-mean (one-point optimal closure) estimate on (dns, Δ) (needs no trained model)."
+condmeanfile(case, dns, Δf) =
+    joinpath(datadir(case, dns, Δf) |> mkpath, "condmean.jld2")
+
 """
 Family key for a learned-model coordinate with the `netseed` dropped — the unit
 the seed sweep aggregates over (every `modelkey` in the family shares it but for

@@ -281,6 +281,361 @@ function compute_redelta_binning(
     return
 end
 
+# --- Direct conditional-mean estimate (the one-point optimal closure) ---
+#
+# Notes/ExperimentFollowups.md item 1: nonparametrically estimate
+# `E[τ̃ | normalized VGT]` on the a-priori data and evaluate its relative tensor
+# error with the same metric as `compute_sfs_stats`. If it lands on the shared
+# a-priori floor of the learned closures, the floor IS the Langford–Moser
+# one-point optimal closure by construction.
+
+"""
+TBNN-style feature/target construction for one filtered-DNS snapshot, shared by
+the conditional-mean fit and evaluation: the gradient invariants λ, the tensor
+basis `b`, `|Ā|²`, and the physical trace-free reference stress (stacked,
+`(nx…, tensordim)`), all on the backend. Mirrors [`create_dataloader_tbnn`](@ref)
+(dealiased gradient, normalized VGT) and the `:ref` recipe of
+[`compute_sfs_stats`](@ref).
+"""
+function condmean_snapshot(case, g, input, output)
+    u = vectorfield(g)
+    τhat = scalarfield(g)
+    ττ = spacetensorfield(g)
+    plan = plan_rfft(ττ.xx)
+    foreach(copyto!, u, input)
+    G = getgradient(u, g)
+    i, b, a2 = build_tensorbasis(G, g)
+    for (τ, τcpu) in zip(ττ, output)
+        copyto!(τhat, τcpu)
+        apply!(twothirds!, g, (τhat, g))
+        to_phys!(τ, τhat, plan, g)
+    end
+    make_tracefree!(ττ, g)
+    return i, b, a2, stack(ττ)
+end
+
+"""
+Per-dimension quantile bin edges (`nq + 1` values each) of the *independent*
+gradient invariants over a strided subsample of the `pool` datasets. The first
+invariant is dropped: after the `|Ā| = 1` normalization the invariants satisfy
+`λ₁ − λ₂ = 1` (`tr(S²) − tr(R²) = |Ā|²`), so the feature space is the
+`(ninvariant − 1)`-dimensional manifold spanned by `λ₂…` (4-D in 3D). Returned
+as a tuple so the hot accumulation/eval loops specialize on the feature count.
+"""
+function condmean_edges(case, pool; nq, stride)
+    (; D, l, n_les, backend) = case
+    g = Grid{D}(; l, n = n_les, backend)
+    ni = ninvariant(g)
+    samples = [Float64[] for _ in 1:(ni - 1)]
+    for (dns, Δf) in pool
+        inputs = load(fieldsfile(case, dns, Δf), "inputs")
+        u = vectorfield(g)
+        for j in eachindex(inputs)
+            foreach(copyto!, u, inputs[j])
+            G = getgradient(u, g)
+            i, _, _ = build_tensorbasis(G, g)
+            icpu = reshape(Array(i), :, ni)
+            for d in eachindex(samples)
+                append!(samples[d], @view icpu[1:stride:end, d + 1])
+            end
+        end
+    end
+    return Tuple(map(s -> quantile(s, range(0, 1; length = nq + 1)), samples))
+end
+
+"Cell of the invariants at point `p` (row of `icpu`) on the quantile grid `edges`."
+@inline cell_of(icpu, p, edges::NTuple{NF, Vector{Float64}}, nq) where {NF} =
+    CartesianIndex(
+    ntuple(d -> clamp(searchsortedlast(edges[d], icpu[p, d + 1]), 1, nq), Val(NF)),
+)
+
+"""
+Accumulate the per-cell least-squares normal equations of the basis-coefficient
+fit `ỹ ≈ Σₖ cₖ bₖ` over one snapshot's points: `A[l,k,cell] += Σ_c bₖ[c] bₗ[c]`
+(lower triangle) and `r[k,cell] += Σ_c bₖ[c] ỹ[c]`, with the packed tensor
+components weighted equally — the same (unweighted stacked-component) norm as the
+training loss and the [`compute_sfs_stats`](@ref) error metric.
+"""
+function accumulate_condmean!(A, r, cnt, icpu, bcpu, ycpu, edges, stride)
+    nq = size(cnt, 1)
+    npt, nt, nb = size(bcpu)
+    @inbounds for p in 1:stride:npt
+        I = cell_of(icpu, p, edges, nq)
+        cnt[I] += 1
+        for k in 1:nb
+            rk = 0.0
+            for c in 1:nt
+                rk += bcpu[p, c, k] * ycpu[p, c]
+            end
+            r[k, I] += rk
+            for l in k:nb
+                akl = 0.0
+                for c in 1:nt
+                    akl += bcpu[p, c, k] * bcpu[p, c, l]
+                end
+                A[l, k, I] += akl
+            end
+        end
+    end
+    return
+end
+
+"Sum the per-cell normal equations into the next-coarser (halved) dyadic grid."
+function coarsen_condmean(A, r, cnt)
+    nb = size(A, 1)
+    n2 = size(cnt, 1) ÷ 2
+    dims = ntuple(Returns(n2), ndims(cnt))
+    A2 = zeros(nb, nb, dims...)
+    r2 = zeros(nb, dims...)
+    c2 = zeros(Int, dims...)
+    for I in CartesianIndices(cnt)
+        J = CartesianIndex(cld.(Tuple(I), 2))
+        @views A2[:, :, J] .+= A[:, :, I]
+        @views r2[:, J] .+= r[:, I]
+        c2[J] += cnt[I]
+    end
+    return A2, r2, c2
+end
+
+"""
+Solve the per-cell least squares on the dyadic hierarchy `nq = 1, 2, …, nq_max`
+(coarser levels are block sums of the finest accumulator, and the coarse edges
+are every-2ᵐ-th quantile edge, so the levels nest exactly). Cells with fewer
+than `minbincount` points inherit the enclosing parent cell's coefficients —
+the estimate degrades gracefully toward the coarser conditional mean in sparse
+tails instead of going singular. Returns the levels coarsest → finest as
+`(; nq, coefs, solved, count)`.
+"""
+function solve_condmean_levels(A, r, cnt, minbincount)
+    nb = size(A, 1)
+    hierarchy = [(A, r, cnt)]
+    while size(last(hierarchy)[3], 1) > 1
+        push!(hierarchy, coarsen_condmean(last(hierarchy)...))
+    end
+    levels = []
+    parent = nothing
+    for (Aq, rq, cq) in reverse(hierarchy)
+        coefs = zeros(nb, size(cq)...)
+        solved = falses(size(cq))
+        for I in CartesianIndices(cq)
+            if cq[I] >= minbincount
+                M = Matrix(@view Aq[:, :, I])
+                for k in 1:nb, l in (k + 1):nb
+                    M[k, l] = M[l, k]   # only the lower triangle was accumulated
+                end
+                # Tiny Tikhonov ridge: a cell dominated by (near-)degenerate
+                # basis configurations would otherwise be singular.
+                λ = 1.0e-8 * tr(M) / nb + eps()
+                for k in 1:nb
+                    M[k, k] += λ
+                end
+                coefs[:, I] = M \ rq[:, I]
+                solved[I] = true
+            elseif !isnothing(parent)
+                coefs[:, I] = parent.coefs[:, CartesianIndex(cld.(Tuple(I), 2))]
+            end
+        end
+        level = (; nq = size(cq, 1), coefs, solved, count = cq)
+        push!(levels, level)
+        parent = level
+    end
+    return levels
+end
+
+"""
+Fit the binned conditional-mean estimator on the datasets in `pool` (each a
+`(dns, Δ_factor)` coordinate): stream every snapshot once, accumulating the
+per-cell normal equations on the `edges` grid, then solve the full dyadic level
+hierarchy. Returns `(; edges, levels, npoints)`.
+"""
+function condmean_fit(case, pool, edges; minbincount, stride)
+    (; D, l, n_les, backend) = case
+    g = Grid{D}(; l, n = n_les, backend)
+    nb, nt, ni = nbasis(g), tensordim(g), ninvariant(g)
+    nq = length(first(edges)) - 1
+    dims = ntuple(Returns(nq), length(edges))
+    A = zeros(nb, nb, dims...)
+    r = zeros(nb, dims...)
+    cnt = zeros(Int, dims...)
+    ϵ = eps(typeof(l))
+    for (dns, Δf) in pool
+        inputs, outputs, Δ =
+            load(fieldsfile(case, dns, Δf), "inputs", "outputs", "Δ")
+        @info "Conditional mean: accumulating $(length(inputs)) snapshots " *
+            "(visc=$(dns.visc), seed=$(dns.seed), Δf=$(Δf))"
+        flush(stderr)
+        for j in eachindex(inputs)
+            i, b, a2, y = condmean_snapshot(case, g, inputs[j], outputs[j])
+            ỹ = y ./ (Δ^2 .* reshape(a2, size(a2)..., 1) .+ ϵ)   # dataloader normalization
+            icpu = reshape(Array(i), :, ni)
+            bcpu = reshape(Array(b), :, nt, nb)
+            ycpu = reshape(Array(ỹ), :, nt)
+            accumulate_condmean!(A, r, cnt, icpu, bcpu, ycpu, edges, stride)
+        end
+    end
+    return (; edges, levels = solve_condmean_levels(A, r, cnt, minbincount), npoints = sum(cnt))
+end
+
+"""
+Predict the normalized stress at every point from level `lev`'s per-cell
+coefficients (`f = nq_max ÷ lev.nq` maps the finest-level cells onto this
+level's) and restore the physical `Δ²|Ā|²` scale. Returns the number of points
+that landed in a cell with inherited (not directly solved) coefficients.
+"""
+function predict_condmean!(pred, bcpu, scale, fine, lev, f)
+    (; coefs, solved) = lev
+    npt, nt = size(pred)
+    nb = size(bcpu, 3)
+    nfallback = 0
+    @inbounds for p in 1:npt
+        J = CartesianIndex(cld.(Tuple(fine[p]), f))
+        solved[J] || (nfallback += 1)
+        for c in 1:nt
+            acc = 0.0
+            for k in 1:nb
+                acc += coefs[k, J] * bcpu[p, c, k]
+            end
+            pred[p, c] = acc * scale[p]
+        end
+    end
+    return nfallback
+end
+
+"""
+Evaluate the fitted estimator `est` a priori on test dataset (dns, Δf), at every
+level of the hierarchy, with the *same* metric pipeline as
+[`compute_sfs_stats`](@ref): the predicted stress is dealiased, made trace-free,
+and compared against the filtered-DNS reference per snapshot (relative tensor
+error + cross-correlation, averaged over snapshots). Returns one summary
+NamedTuple per level (coarsest → finest).
+"""
+function condmean_eval(case, dns, Δf, est)
+    (; D, l, n_les, backend) = case
+    g = Grid{D}(; l, n = n_les, backend)
+    Δ = Δf * l / n_les
+    nb, nt, ni = nbasis(g), tensordim(g), ninvariant(g)
+    nqmax = est.levels[end].nq
+    ϵ = eps(typeof(l))
+
+    inputs, outputs = load(fieldsfile(case, dns, Δf), "inputs", "outputs")
+    τ_model = spacetensorfield(g)
+    τhat = scalarfield(g)
+    plan = plan_rfft(τ_model.xx)
+
+    nlev = length(est.levels)
+    relerrs = [Float64[] for _ in 1:nlev]
+    crosscors = [Float64[] for _ in 1:nlev]
+    nfallback = zeros(Int, nlev)
+    npoint = 0
+    for j in eachindex(inputs)
+        i, b, a2, y = condmean_snapshot(case, g, inputs[j], outputs[j])
+        icpu = reshape(Array(i), :, ni)
+        bcpu = reshape(Array(b), :, nt, nb)
+        scale = vec(Array(a2))
+        @. scale = Δ^2 * scale + ϵ
+        yref = Array(y)
+        npt = length(scale)
+        npoint += npt
+        fine = [cell_of(icpu, p, est.edges, nqmax) for p in 1:npt]
+        pred = Matrix{Float64}(undef, npt, nt)
+        for (ilev, lev) in enumerate(est.levels)
+            nfallback[ilev] +=
+                predict_condmean!(pred, bcpu, scale, fine, lev, nqmax ÷ lev.nq)
+            predgpu = adapt(backend, reshape(pred, size(a2)..., nt))
+            foreach(copyto!, τ_model, unstack_symtensor(predgpu, g))
+            for τ in τ_model
+                dealias_phys!(τ, τhat, plan, g)
+            end
+            make_tracefree!(τ_model, g)
+            bb = Array(stack(τ_model))
+            push!(relerrs[ilev], norm(bb - yref) / norm(yref))
+            bbc, aac = bb .- mean(bb), yref .- mean(yref)
+            push!(crosscors[ilev], dot(bbc, aac) / sqrt(dot(bbc, bbc) * dot(aac, aac)))
+        end
+    end
+    return map(enumerate(est.levels)) do (ilev, lev)
+        (;
+            lev.nq,
+            ncell = length(lev.count),
+            nsolved = count(lev.solved),
+            relerr = mean(relerrs[ilev]),
+            crosscor = mean(crosscors[ilev]),
+            fallback = nfallback[ilev] / npoint,
+            relerrs = relerrs[ilev],
+        )
+    end
+end
+
+"""
+Direct nonparametric estimate of the one-point optimal (conditional-mean) closure
+`E[τ̃ | Ā/|Ā|]` and its a-priori error on test dataset (dns, Δf) —
+Notes/ExperimentFollowups.md item 1. Post-processing only: no DNS, no training.
+
+**Estimator.** The TBNN feature space: bin the independent invariants λ of the
+normalized velocity gradient ([`condmean_edges`](@ref)) and least-squares the 7
+tensor-basis coefficients per bin on the *normalized* target `τ/(Δ²|Ā|²)` — the
+exact regression target of the dataloaders. Per bin, that LS projection is the
+sample conditional mean restricted to the equivariant (tensor-basis) function
+class, i.e. the binned Langford–Moser optimal one-point closure with the
+`Δ²|Ā|²` prefactor the learned closures share. The bin-resolution hierarchy
+`nq = 1, 2, …, nq_max` per invariant is the built-in binning-sensitivity check:
+if the a-priori error plateaus in `nq` at the learned closures' shared floor,
+the floor *is* the one-point optimal closure.
+
+**Fits.** Two estimators are evaluated: `train` fits on `fitpool` (default: the
+full training pool — statistically the same forced HIT and exactly the data the
+networks were fit on) and `self` fits in-sample on the test dataset itself (the
+direct conditional mean of that flow; with millions of points per bin the
+in-sample bias is negligible). Agreement between the two is a further
+robustness check.
+
+Persists to [`condmeanfile`](@ref) `(; train, self, …)`, each a per-level vector
+of `(; nq, ncell, nsolved, relerr, crosscor, fallback, relerrs)`;
+[`plot_condmean`](@ref) draws the error-vs-resolution curves against the
+saturated learned floor.
+"""
+function compute_condmean(
+        case, dns, Δf;
+        fitpool = build_trainpool(case),
+        nq_max = 16, minbincount = 32,
+        stride_edges = 17, stride_fit = 1,
+        selffit = true, force = false,
+    )
+    @assert ispow2(nq_max) "the level hierarchy is dyadic; nq_max must be a power of 2"
+    file = condmeanfile(case, dns, Δf)
+    skip_if_cached(file; force, label = "conditional-mean estimate") && return
+
+    function estimate(pool, label)
+        @info "Conditional mean ($label fit): computing invariant bin edges over $(length(pool)) dataset(s)"
+        flush(stderr)
+        edges = condmean_edges(case, pool; nq = nq_max, stride = stride_edges)
+        est = condmean_fit(case, pool, edges; minbincount, stride = stride_fit)
+        @info "Conditional mean ($label fit): evaluating on (visc=$(dns.visc), seed=$(dns.seed), Δf=$(Δf))"
+        flush(stderr)
+        return (; levels = condmean_eval(case, dns, Δf, est), est.npoints)
+    end
+
+    train = estimate(fitpool, "train")
+    self = selffit ? estimate([(dns, Δf)], "self") : nothing
+
+    save_object_atomic(
+        file,
+        (;
+            train, self,
+            fitpool = [(; d.visc, d.seed, Δf = f) for (d, f) in fitpool],
+            nq_max, minbincount, stride_edges, stride_fit,
+        ),
+    )
+    finest = last(train.levels)
+    @info "Conditional-mean a-priori relative error at (visc=$(dns.visc), seed=$(dns.seed), Δf=$(Δf)): " *
+        "$(round(finest.relerr; sigdigits = 4)) (train fit, nq=$(finest.nq), " *
+        "fallback $(round(100 * finest.fallback; sigdigits = 2))%)" *
+        (isnothing(self) ? "" : ", $(round(last(self.levels).relerr; sigdigits = 4)) (self fit)") *
+        ". Compare against the learned saturation floor (fig. condmean)."
+    flush(stderr)
+    return
+end
+
 """
 A-priori equivariance error for closure `m` on test dataset (dns, Δf): compares
 `R(model(G))` with `model(R(G))` for every octahedral group element on the first

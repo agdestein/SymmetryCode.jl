@@ -67,15 +67,18 @@ get_config() = (;
         :aposteriori,      # solve_les (reduce-on-the-fly)
         :equivariance,     # apriori_equivariance_error (at the equal-capacity point)
         :redelta_binning,  # Phase-0 pointwise-Re_Δ diagnostic (per grid point)
+        :condmean,         # direct conditional-mean estimate (the a-priori floor)
         :saturation,       # plot_saturation (A — the headline figure)
         :seeds,            # get_seed_statistics (feeds the B bars + tables)
         :plots,            # training curve, B bars + per-curve series
         :trend,            # plot_trend_vs_redelta (C)
         :tables,           # errors + timing tables
     ],
-    force = Set{Symbol}([
-        # :seeds,
-    ]),
+    force = Set{Symbol}(
+        [
+            # :seeds,
+        ]
+    ),
 )
 
 # Per-arch size points: the shared grid plus any per-arch extension.
@@ -169,6 +172,17 @@ end
 # Eval points + the distributed worklist; the phase entry points below read these.
 eval_indist(case) = (first(S.dns_runs().test), first(case.filters_test))  # the A/B point
 eval_grid(case) = [(dns, Δf) for dns in S.dns_runs().test for Δf in case.filters_test]
+
+# Conditional-mean estimate (ExperimentFollowups.md item 1): the in-distribution
+# A/B point (where the shared a-priori floor is quoted) plus the high-Re OOD run
+# at the same filter — needs the heavy trainpool + test `fieldsfile`s on disk.
+condmean_points(case) = [(dns, first(case.filters_test)) for dns in S.dns_runs().test]
+# Floor references: the top tier ±Re (evaluated on the whole C grid, so present
+# at both points). The no-Re nets see exactly the estimator's invariant feature
+# space — the apples-to-apples floor; the +Re pair shows what the extra Re_Δ
+# input buys beyond it. Families without artifacts are skipped by the plot.
+condmean_families(c) =
+    [(; arch, tier = c.top, use_redelta = ur) for arch in c.archs for ur in (false, true)]
 les_worklist(c) = [c.classical; all_models(c)]
 print_counts(config) = println(length(les_worklist(config)), " ", length(convsym_models(config)))
 
@@ -244,6 +258,13 @@ function run_reduce!(case, config)
             S.compute_redelta_binning(case, dns, Δf; force = :redelta_binning in config.force)
             S.plot_redelta_binning(case, dns, Δf)
         end
+    end
+
+    if :condmean in config.experiments
+        for (dns, Δf) in condmean_points(case)
+            S.compute_condmean(case, dns, Δf; force = :condmean in config.force)
+        end
+        S.plot_condmean(case, condmean_points(case), condmean_families(config), config.netseeds)
     end
 
     if config.train

@@ -911,6 +911,73 @@ function plot_saturation(case, dns, Δf, families, netseeds; classical)
 end
 
 """
+Conditional-mean (one-point optimal closure) a-priori error vs bin resolution —
+the figure behind the "the floor *is* the optimal closure" claim
+(Notes/ExperimentFollowups.md item 1). One panel per eval point in `points`
+(each a `(dns, Δf)` with a [`condmeanfile`](@ref)); per panel, one curve per fit
+(`train` = fitted on the training pool, `self` = fitted in-sample on that
+dataset) — the level hierarchy doubles as the binning-sensitivity check.
+Each family in `families` contributes a seed-mean horizontal line ± std band
+from its per-seed [`sfsstatsfile`](@ref)s (house style: arch color, +Re dashed).
+The no-Re nets see exactly the estimator's feature space, so their floor should
+sit *on* the curve; a +Re net dipping below it shows the Re_Δ input carrying
+information beyond the invariant manifold. Cross-point figure → `case.plotdir`.
+"""
+function plot_condmean(case, points, families, netseeds)
+    titles = (; test_indist = "In-distribution", test_ood = "Out-of-distribution (higher Re)")
+    fig = Figure(; size = (270 + 280 * length(points), 380))
+    local ax
+    for (i, (dns, Δf)) in enumerate(points)
+        res = load_object(condmeanfile(case, dns, Δf))
+        ax = Axis(
+            fig[1, i];
+            xscale = log2, xlabel = "Bins per invariant",
+            ylabel = i == 1 ? "A-priori relative SFS error" : "",
+            title = get(titles, dns.role, string(dns.role)),
+        )
+
+        for fam in families
+            vals = collect(
+                skipmissing(
+                    isfile(sfsstatsfile(case, dns, Δf, (; fam..., netseed = s))) ?
+                        load_object(sfsstatsfile(case, dns, Δf, (; fam..., netseed = s))).apriori.relerr :
+                        missing
+                        for s in netseeds
+                ),
+            )
+            isempty(vals) && continue
+            m, s = mean(vals), length(vals) > 1 ? std(vals) : 0.0
+            style = plotstyle(fam)   # house style: arch color, +Re dashed
+            iszero(s) || hspan!(ax, m - s, m + s; color = (style.color, 0.15))
+            hlines!(ax, [m]; style.color, style.linestyle, label = plotlabel(fam))
+        end
+
+        for (r, label, marker, linestyle) in (
+                (res.train, "E[τ|λ] (train-pool fit)", :circle, :solid),
+                (res.self, "E[τ|λ] (in-sample fit)", :utriangle, :dot),
+            )
+            isnothing(r) && continue
+            scatterlines!(
+                ax, [l.nq for l in r.levels], [l.relerr for l in r.levels];
+                color = :black, marker, linestyle, label,
+            )
+        end
+    end
+
+    Legend(
+        fig[0, :], ax;
+        tellwidth = false, tellheight = true, framevisible = false,
+        horizontal = true, nbanks = 2,
+    )
+    rowgap!(fig.layout, 5)
+    file = joinpath(case.plotdir, "condmean.pdf")
+    @info "Saving conditional-mean figure to $(file)"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
+    return fig
+end
+
+"""
 Spectral SFS dissipation rate `ε_sfs(k)` (positive = drain at that shell;
 negative = local backscatter at that shell) averaged over the eval window.
 Compares the closure's spectral footprint against the filtered-DNS
@@ -1601,8 +1668,8 @@ function write_errors_table(
     # meaningful, fixed-point equivariance error — the non-equivariant MLPs —
     # keeps its spread.
     dropspread(d) = d
-        # d isa NamedTuple && !(d.c == 0 || sigdecimals(d.c) <= maxdec) ?
-        # (; d.c, s = nothing) : d
+    # d isa NamedTuple && !(d.c == 0 || sigdecimals(d.c) <= maxdec) ?
+    # (; d.c, s = nothing) : d
 
     # One descriptor per cell, in column order, for a learned family or classical.
     function rowdescs(m)
