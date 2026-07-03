@@ -18,6 +18,10 @@
 # EPYC 9334 (Zen 4). Without this, a cache built on a GPU node is rejected on the
 # login node (and vice versa) and everything recompiles. Must be set when the
 # cache is *created*, hence exported both here and in submit.sh — keep in sync.
+# The companion fix for the GPU-less nodes is LocalPreferences.toml (committed):
+# it pins the CUDA runtime to 13.2 (the H100 driver's max, works on any newer
+# driver), because CUDA_Runtime_jll otherwise queries the driver at *precompile*
+# time and a cache built on the login node bakes in "no runtime".
 export JULIA_CPU_TARGET="generic;znver2,clone_all;znver4,clone_all"
 
 echo "Slurm job $SLURM_JOB_ID  array task ${SLURM_ARRAY_TASK_ID:-none}  ::  julia $*"
