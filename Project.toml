@@ -1,7 +1,7 @@
+authors = ["Syver Døving Agdestein <syverda@gmail.com>"]
 name = "SymmetryCode"
 uuid = "2d6de738-f7fd-4f9b-92b2-fcb71f56fcc5"
 version = "1.0.0"
-authors = ["Syver Døving Agdestein <syverda@gmail.com>"]
 
 [deps]
 AbstractFFTs = "621f4979-c628-5d54-868e-fcf4e3e8185c"
@@ -27,3 +27,6 @@ WGLMakie = "276b4fcb-3e11-5398-bf8b-a0c2d153d008"
 WeightInitializers = "d49dbf32-c5c2-4618-8acc-27bb2598ef2d"
 Zygote = "e88e6eb3-aa80-5325-afca-941959d7151f"
 cuDNN = "02a925ec-e4fe-4b08-9a7e-0d78e3d38ccd"
+
+[extras]
+CUDA_Runtime_jll = "76a88914-d11a-5bdc-97e0-2f5a05c973a2"
