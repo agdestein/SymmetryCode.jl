@@ -36,7 +36,7 @@ get_config() = (;
     # Must match the trained set in run-les.jl (these reuse those ps-*.jld2): the
     # top tier ±Re — sweep D applies sweep C's models to the decaying TGV.
     archs = (:conv, :equi, :tbnn),
-    top = :p1200,
+    top = :p3000,
     netseeds = 0:4,
     classical = [:nomo, :dynsmag, :clar],
 

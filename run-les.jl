@@ -56,7 +56,7 @@ get_config() = (;
     # sizes_extra = (; conv = (:p16000,)),
     sizes = (:p120, :p400, :p1200, :p3000),
     sizes_extra = (;),
-    top = :p1200,                # matched top tier for the B / C comparisons
+    top = :p3000,                # matched top tier for the B / C comparisons
 
     # Seeds: one set shared by the saturation curve and the top-tier grid (network
     # init + batch shuffling only; the data is unaffected).
