@@ -25,4 +25,7 @@
 export JULIA_CPU_TARGET="generic;znver2,clone_all;znver4,clone_all"
 
 echo "Slurm job $SLURM_JOB_ID  array task ${SLURM_ARRAY_TASK_ID:-none}  ::  julia $*"
+start_time=$(date +%s)
 julia --project "$@"
+elapsed=$(( $(date +%s) - start_time ))
+echo "Done in $((elapsed / 3600))h $(( (elapsed % 3600) / 60 ))m $((elapsed % 60))s"
