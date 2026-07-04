@@ -638,10 +638,11 @@ end
 
 """
 A-priori equivariance error for closure `m` on test dataset (dns, Δf): compares
-`R(model(G))` with `model(R(G))` for every octahedral group element on the first
-filtered-DNS snapshot. Persists the per-element error series to
-`equipriorfile(case, dns, Δf, m)`; [`get_seed_statistics`](@ref) reduces it to the
-per-family mean that the errors table ([`write_errors_table`](@ref)) consumes.
+`R(model(G))` with `model(R(G))` for every octahedral group element, averaged over
+the full filtered-DNS snapshot series. Persists the per-element error series (mean
+over snapshots) to `equipriorfile(case, dns, Δf, m)`; [`get_seed_statistics`](@ref)
+reduces it to the per-family mean that the errors table
+([`write_errors_table`](@ref)) consumes.
 """
 function apriori_equivariance_error(case, m, dns, Δf, getmodel; force = false)
     file = equipriorfile(case, dns, Δf, m)
@@ -650,27 +651,34 @@ function apriori_equivariance_error(case, m, dns, Δf, getmodel; force = false)
         (; D, l, n_les, backend) = case
         (; elements, permutations, signs) = group_stuff(D)
         g = Grid{D}(; l, n = n_les, backend)
-        u = map(copy, load(fieldsfile(case, dns, Δf), "inputs")[1]) |> adapt(backend)
-        G = getgradient(u, g)
-        @info "Computing a-priori equi errors for $(modelname(m))"
+        inputs = load(fieldsfile(case, dns, Δf), "inputs")
+        u = vectorfield(g)
+        @info "Computing a-priori equi errors for $(modelname(m)) over $(length(inputs)) snapshots"
         flush(stderr)
-        # Copy: dynamic Smagorinsky reuses an internal τ buffer across calls.
-        mG = copy(model(u, G))
-        mG_split = unstack_symtensor(mG, g)
-        err = map(elements) do e
-            ip, is = e
-            p, s = permutations[ip], signs[is]
-            # Rotate u in physical space, return to spectral, then recompute G
-            space_u = inverse_vector_fourier(u, g)
-            space_ru = transform_vector(space_u, g, (p, s))
-            ru = forward_vector_fourier(space_ru, g)
-            foreach(u -> apply!(twothirds!, g, (u, g)), ru)
-            rG = getgradient(ru, g)
-            mrG = model(ru, rG)
-            rmG_split = transform_tensor(mG_split, g, (p, s))
-            rmG = stack(rmG_split)
-            norm(rmG - mrG) / norm(mrG)
+        # Per-element error accumulated over the snapshot series, then averaged.
+        err = zeros(length(elements))
+        for i in eachindex(inputs)
+            foreach(copyto!, u, inputs[i])
+            G = getgradient(u, g)
+            # Copy: dynamic Smagorinsky reuses an internal τ buffer across calls.
+            mG = copy(model(u, G))
+            mG_split = unstack_symtensor(mG, g)
+            for (j, e) in enumerate(elements)
+                ip, is = e
+                p, s = permutations[ip], signs[is]
+                # Rotate u in physical space, return to spectral, then recompute G
+                space_u = inverse_vector_fourier(u, g)
+                space_ru = transform_vector(space_u, g, (p, s))
+                ru = forward_vector_fourier(space_ru, g)
+                foreach(u -> apply!(twothirds!, g, (u, g)), ru)
+                rG = getgradient(ru, g)
+                mrG = model(ru, rG)
+                rmG_split = transform_tensor(mG_split, g, (p, s))
+                rmG = stack(rmG_split)
+                err[j] += norm(rmG - mrG) / norm(mrG)
+            end
         end
+        err ./= length(inputs)
         save_object_atomic(file, err)
         err
     end
