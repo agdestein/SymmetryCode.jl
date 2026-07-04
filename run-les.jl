@@ -342,8 +342,19 @@ function run_reduce!(case, config)
         classical = config.classical,
     )
 
-    :seeds in config.experiments &&
-        S.get_seed_statistics(case, comparison_families(config), indist, Δ_ab, config.netseeds; force = :seeds in config.force)
+    # Seed aggregate at every point a downstream figure/table reads it: the
+    # in-distribution A/B point with the full comparison set (adds :convsym for the
+    # bars/tables), and every other C-grid point with the ±Re ablation families the
+    # trend consumes (`plot_trend_vs_redelta` reads these with force=false, so the
+    # `:seeds` force flag must land on all of them here — not just the A/B point).
+    if :seeds in config.experiments
+        seedforce = :seeds in config.force
+        S.get_seed_statistics(case, comparison_families(config), indist, Δ_ab, config.netseeds; force = seedforce)
+        for (dns, Δf) in grid
+            (dns, Δf) == (indist, Δ_ab) && continue
+            S.get_seed_statistics(case, ablation_families(config), dns, Δf, config.netseeds; force = seedforce)
+        end
+    end
 
     if :plots in config.experiments
         fams = comparison_families(config)
