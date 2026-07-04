@@ -42,6 +42,7 @@ function cached(compute, file; force = false, label = basename(file))
         flush(stderr)
         return load_object(file)
     end
+    @info "Computing $(label) for $(file)"
     return compute()
 end
 

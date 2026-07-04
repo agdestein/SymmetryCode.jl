@@ -79,6 +79,7 @@ get_config() = (;
     ],
     force = Set{Symbol}(
         [
+            # :equivariance, 
             # :seeds,
         ]
     ),
