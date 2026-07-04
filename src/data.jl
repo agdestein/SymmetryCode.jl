@@ -91,7 +91,11 @@ is in memory at each save time, so filtering at all Δ is near-free). Heavy fiel
 and light metadata go to *separate* files so plot iteration never reloads the
 fields (Notes/ReExperiment.md):
 
-- `dnsmetafile` (once): `times`, `spectra_dns`, `statistics_dns`, `t_int` — Δ-independent.
+- `dnsmetafile` (once): `times`, `spectra_dns`, `statistics_dns`, `t_int`, plus
+  the warm-up series `times_warmup`/`statistics_warmup` copied over from
+  `dnsfile` (so warm-up plots work off-cluster without the heavy file) — all
+  Δ-independent. Pre-existing metadata files lack the warm-up keys; run
+  `scripts/backfill_dnsmeta_warmup.jl` on the cluster to add them.
 - `fieldsfile` (per Δ): `inputs` (ūbar), `outputs` (τ), `redelta` (per-snapshot
   global Re_Δ), plus `Δ`, `Δ_factor`, `visc`.
 - `lesmetafile` (per Δ): `spectra_les` + `redelta_mean` (the series-mean global
@@ -122,6 +126,10 @@ function create_data(case, dns; force = false)
     g_dns = Grid{D}(; l, n = n_dns, backend)
     g_les = Grid{D}(; l, n = n_les, backend)
     u = load(dnsfile(case, dns), "u") |> adapt(backend)
+    # Carry the (light) warm-up series into the metadata file, so the warm-up
+    # plots need only `dnsmetafile` off-cluster (the heavy `dnsfile` is excluded
+    # by scripts/pull_results.sh).
+    times_warmup, statistics_warmup = load(dnsfile(case, dns), "times", "statistics")
 
     c_dns = getcache(g_dns)
     c_les = getcache(g_les)
@@ -192,6 +200,7 @@ function create_data(case, dns; force = false)
     jldsave_atomic(
         dnsmetafile(case, dns);
         times, spectra_dns, statistics_dns, t_int = stat0.t_int, walltime,
+        times_warmup, statistics_warmup,
     )
     for (k, Δf) in enumerate(filters)
         Δ = Δf * l / n_les

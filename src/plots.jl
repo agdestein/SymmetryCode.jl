@@ -118,6 +118,24 @@ function spectrum_reference(setup, stats)
 end
 
 """
+Ticks for a `log10` axis with plain decimal labels. Makie's default `LogTicks`
+label fractional decades as `10^{0.25}`-style exponents, unreadable on an axis
+whose data span only a decade or two (the ratio-near-1 dissipation axes, the
+Re_Δ axes). Returns the 1–2–5-mantissa ticks inside `[lo, hi]`, labeled `"0.5"`,
+`"1"`, `"2"`, `"200"`, …; pass a generous `[lo, hi]` — ticks outside the final
+axis limits are not drawn.
+"""
+function decimalticks(lo, hi; mantissas = (1, 2, 5))
+    ticks = Float64[
+        m * exp10(e)
+            for e in floor(Int, log10(lo)):ceil(Int, log10(hi)) for m in mantissas
+    ]
+    filter!(t -> lo <= t <= hi, ticks)
+    labels = [t == round(t) ? string(round(Int, t)) : string(t) for t in ticks]
+    return (ticks, labels)
+end
+
+"""
 Validation-loss convergence for the learned closures — one panel per architecture,
 one band per capacity tier. Within a tier the line is the per-iteration *median*
 over `netseeds` and the shaded band is the seed *min–max*, so run-to-run spread is
@@ -593,14 +611,16 @@ function plot_trend_vs_redelta(
     re, agg, evalpoints = re[order], agg[order], evalpoints[order]
 
     xlab = "Filter-scale Reynolds number"
+    xticks = decimalticks(10, 1.0e4)
     fig = Figure(; size = (1100, 320))
     ax_diss = Axis(
         fig[1, 1];
-        xscale = log10, yscale = log10, xlabel = xlab,
+        xscale = log10, yscale = log10, xlabel = xlab, xticks,
+        yticks = decimalticks(1.0e-2, 1.0e2),
         ylabel = "Median SFS dissipation / reference",
     )
-    ax_re = Axis(fig[1, 2]; xscale = log10, xlabel = xlab, ylabel = "A-priori relative SFS error")
-    ax_post = Axis(fig[1, 3]; xscale = log10, xlabel = xlab, ylabel = "A-posteriori solution error")
+    ax_re = Axis(fig[1, 2]; xscale = log10, xlabel = xlab, xticks, ylabel = "A-priori relative SFS error")
+    ax_post = Axis(fig[1, 3]; xscale = log10, xlabel = xlab, xticks, ylabel = "A-posteriori solution error")
     axs = (ax_diss, ax_re, ax_post)
     metrics = (:diss_median, :relerr, :e_post)
 
@@ -744,11 +764,13 @@ function plot_tgv_vs_redelta(
     tgv_agg = [get_seed_statistics(case, families, tgv, Δf, netseeds) for (tgv, Δf) in tgvpoints]
 
     xlab = "Filter-scale Reynolds number"
+    xticks = decimalticks(10, 1.0e4)
     fig = Figure(; size = (760, 320))
-    ax_re = Axis(fig[1, 1]; xscale = log10, xlabel = xlab, ylabel = "A-priori relative SFS error")
+    ax_re = Axis(fig[1, 1]; xscale = log10, xlabel = xlab, xticks, ylabel = "A-priori relative SFS error")
     ax_diss = Axis(
         fig[1, 2];
-        xscale = log10, yscale = log10, xlabel = xlab,
+        xscale = log10, yscale = log10, xlabel = xlab, xticks,
+        yticks = decimalticks(1.0e-2, 1.0e2),
         ylabel = "Median SFS dissipation / reference",
     )
     axs = (ax_re, ax_diss)
@@ -871,8 +893,9 @@ function plot_saturation(case, dns, Δf, families, netseeds; classical)
     end
 
     fig = Figure(; size = (820, 380))
-    ax_re = Axis(fig[1, 1]; xscale = log10, xlabel = "Parameters", ylabel = "A-priori relative SFS error")
-    ax_post = Axis(fig[1, 2]; xscale = log10, xlabel = "Parameters", ylabel = "A-posteriori solution error")
+    xticks = decimalticks(10, 1.0e5)
+    ax_re = Axis(fig[1, 1]; xscale = log10, xlabel = "Parameters", xticks, ylabel = "A-priori relative SFS error")
+    ax_post = Axis(fig[1, 2]; xscale = log10, xlabel = "Parameters", xticks, ylabel = "A-posteriori solution error")
 
     for (ax, read, metric, withlabel) in
         ((ax_re, relerr, :relerr, true), (ax_post, epost, :e_post, false))
@@ -997,7 +1020,11 @@ function plot_spectral_transfer(case, dns, Δf, models)
     ε = stats.diss
 
     fig = Figure(; size = (450, 360))
-    ax = Axis(fig[1, 1]; xscale = log10, xlabel = "Wavenumber", ylabel = "SFS dissipation rate")
+    ax = Axis(
+        fig[1, 1];
+        xscale = log10, xlabel = "Wavenumber", xticks = decimalticks(1.0e-4, 10),
+        ylabel = "SFS dissipation rate",
+    )
     for m in models
         m === :nomo && continue
         t = load_object(apostfile(case, dns, Δf, m)).transfer
@@ -1477,18 +1504,29 @@ end
 
 """
 Energy/dissipation/Reynolds time series over the data-generation window
-([`dnsmetafile`](@ref) `statistics_dns`), with the warm-up tail
-([`dnsfile`](@ref)) drawn dashed at negative times.
+([`dnsmetafile`](@ref) `statistics_dns`), with the warm-up tail drawn dashed at
+negative times. Time is normalized by the run's measured integral turnover
+`t_int` (the one the save schedule is resolved against), so the data window ends
+at exactly `sampling.nturnover` and runs read on a common axis despite their
+different Reynolds numbers; the stored snapshots are marked on each curve. The
+warm-up series comes from the `dnsmetafile` warm-up keys where present (see
+[`create_data`](@ref) / `scripts/backfill_dnsmeta_warmup.jl`), falling back to
+the heavy [`dnsfile`](@ref).
 """
 function plot_evolution_data(case, dns)
-    times_warmup, stats_warmup = load(dnsfile(case, dns), "times", "statistics")
+    times_warmup, stats_warmup = jldopen(dnsmetafile(case, dns), "r") do file
+        haskey(file, "times_warmup") ?
+            (file["times_warmup"], file["statistics_warmup"]) :
+            load(dnsfile(case, dns), "times", "statistics")
+    end
     times_warmup = times_warmup .- times_warmup[end] # Use negative times for warmup
     energies_warmup = map(s -> s.e, stats_warmup)
     dissipations_warmup = map(s -> s.diss, stats_warmup)
     Re_tay_warmup = map(s -> s.Re_tay, stats_warmup)
     t_int_warmup = map(s -> s.t_int, stats_warmup)
 
-    times, statistics_dns = load(dnsmetafile(case, dns), "times", "statistics_dns")
+    times, statistics_dns, tint =
+        load(dnsmetafile(case, dns), "times", "statistics_dns", "t_int")
     energies = map(s -> s.e, statistics_dns)
     dissipations = map(s -> s.diss, statistics_dns)
     Re_tay = map(s -> s.Re_tay, statistics_dns)
@@ -1499,17 +1537,24 @@ function plot_evolution_data(case, dns)
     Rmax = max(maximum(Re_tay), maximum(Re_tay_warmup))
     tmax = max(maximum(t_int), maximum(t_int_warmup))
 
+    # Turnover-normalized time: warm-up at negative times, data window ending at
+    # exactly `sampling.nturnover` (the save schedule is `nturnover * t_int`).
+    times = times ./ tint
+    times_warmup = times_warmup ./ tint
+
     # Create plot
     fig = Figure(; size = (400, 340))
 
-    ax = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Normalized quantity")
-    lines!(ax, times, energies / emax; label = "Energy", color = Cycled(1))
+    ax = Axis(fig[1, 1]; xlabel = "Time / integral turnover", ylabel = "Normalized quantity")
+    # Solid data-window curves carry a marker per stored snapshot.
+    datakw = (; markersize = 7)
+    scatterlines!(ax, times, energies / emax; label = "Energy", color = Cycled(1), datakw...)
     lines!(ax, times_warmup, energies_warmup / emax; linestyle = :dash, color = Cycled(1))
-    lines!(ax, times, dissipations / dmax; label = "Dissipation", color = Cycled(2))
+    scatterlines!(ax, times, dissipations / dmax; label = "Dissipation", color = Cycled(2), datakw...)
     lines!(ax, times_warmup, dissipations_warmup / dmax; linestyle = :dash, color = Cycled(2))
-    lines!(ax, times, Re_tay / Rmax; label = "Taylor Reynolds", color = Cycled(3))
+    scatterlines!(ax, times, Re_tay / Rmax; label = "Taylor Reynolds", color = Cycled(3), datakw...)
     lines!(ax, times_warmup, Re_tay_warmup / Rmax; linestyle = :dash, color = Cycled(3))
-    lines!(ax, times, t_int / tmax; label = "Integral time", color = Cycled(4))
+    scatterlines!(ax, times, t_int / tmax; label = "Integral time", color = Cycled(4), datakw...)
     lines!(ax, times_warmup, t_int_warmup / tmax; linestyle = :dash, color = Cycled(4))
     eps = 0.1
     ylims!(ax, -eps, 1 + eps)
@@ -1754,7 +1799,8 @@ function plot_spectrum_les(case, dns, Δf, models)
     fig = Figure(; size = (520, 360))
     ax_ratio = Axis(
         fig[1, 1];
-        xscale = log10, xlabel = "Wavenumber", ylabel = "Energy relative to reference",
+        xscale = log10, xlabel = "Wavenumber", xticks = decimalticks(1.0e-4, 10),
+        ylabel = "Energy relative to reference",
     )
     for m in models
         m === :ref && continue
@@ -1789,7 +1835,9 @@ magnitudes that `string` would otherwise render in scientific notation
 """
 function fixeddecimals(x, digits)
     neg = x < 0
-    scaled = round(Int, abs(x) * 10.0^digits)
+    # Half-up, not banker's: a seed std at exactly half an ulp of the column
+    # precision (e.g. 5e-5 at 4 decimals) must print 0.0001, never 0.0000.
+    scaled = floor(Int, abs(x) * 10.0^digits + 0.5)
     s = lpad(string(scaled), digits + 1, '0')
     frac = digits == 0 ? "" : "." * s[(end - digits + 1):end]
     return (neg ? "-" : "") * s[1:(end - digits)] * frac
@@ -1813,10 +1861,15 @@ fixed-point: `sigdecimals(3.0e-4) == 4`, `sigdecimals(0.25) == 1`,
 """
 sigdecimals(x; sigdigits = 1) = x == 0 ? 0 : _ndecimals(round(x; sigdigits))
 
-"Fixed-point cell body `c` (or `c \\pm s`; `s === nothing` for a lone value), both at `d` decimals."
+"""
+Fixed-point cell body `c` (or `c \\pm s`; `s === nothing` for a lone value), both
+at `d` decimals. A nonzero std must never display as `0.0000`: below the capped
+column precision it is clamped up to one ulp, reading "spread at or below the
+last shown decimal" (a true zero spread arrives as `s === nothing`, not `0`).
+"""
 function format_fixed(c, s, d)
     isnothing(s) && return fixeddecimals(c, d)
-    return "$(fixeddecimals(c, d)) \\pm $(fixeddecimals(s, d))"
+    return "$(fixeddecimals(c, d)) \\pm $(fixeddecimals(max(s, exp10(-d)), d))"
 end
 
 """
@@ -1851,9 +1904,12 @@ artifact is missing print `--`.
 
 Each column is printed at a *uniform* decimal precision: a per-column floor,
 widened so the cell with the smallest (seed std / value) still shows its leading
-significant figure, so seeded and non-seeded rows line up and nothing is rounded
-away to `0.000`. Values too small for that (the O(1e-15) equivariance errors) fall
-back to shared-exponent `\\e{n}` scientific notation per cell.
+significant figure — but capped per column, so one outlier std cannot inflate the
+apparent precision of every mean in the column (a sub-ulp std prints as the
+half-up-rounded last decimal instead). Seeded and non-seeded rows line up and
+nothing is rounded away to `0.000`. Values too small for that (the O(1e-15)
+equivariance errors) fall back to shared-exponent `\\e{n}` scientific notation
+per cell.
 
 Reads [`sfsstatsfile`](@ref), [`apostfile`](@ref) (e_post), [`equipriorfile`](@ref)
 (via the seed aggregate). Copy the output over the corresponding `tables/*.tex` in
@@ -1919,8 +1975,12 @@ function write_errors_table(
         sf = sfsstatsfile(case, dns, Δf, m)
         stats = isfile(sf) ? load_object(sf) : nothing
         ds = Any[onecell(isnothing(stats) ? nothing : stats.apriori.relerr)]
-        include_crosscor &&
-            push!(ds, onecell(isnothing(stats) ? nothing : stats.apriori.crosscor))
+        # No-model's cross-correlation is 0/0-undefined (its predicted stress is
+        # identically zero), like its equivariance error — print N.A., not 0.
+        include_crosscor && push!(
+            ds, m === :nomo ? "N.A." :
+                onecell(isnothing(stats) ? nothing : stats.apriori.crosscor)
+        )
         # Divergence-aware (→ "--" if the rollout blew up), matching the learned
         # rows; a bare mean over a truncated prefix would read artificially low.
         push!(ds, onecell(apost_emean(case, dns, Δf, m)))
@@ -1933,20 +1993,25 @@ function write_errors_table(
 
     # Per-column uniform precision: each numeric column floors at `bases[j]` and
     # widens to the most decimals any of its fixed-point cells needs to show its
-    # leading significant figure (the std's, when seeded). Sub-`maxdec` cells stay
-    # scientific. Result: every fixed cell in a column shares one decimal place.
+    # leading significant figure (the std's, when seeded), but never past
+    # `caps[j]` — a lone seed std of 5e-5 must not drag a whole error column to
+    # five decimals (overstating the precision of every mean in it); it prints as
+    # the half-up 0.0001 instead. Sub-`maxdec` cells stay scientific. Result:
+    # every fixed cell in a column shares one decimal place.
     bases = Int[4]                            # closure (relerr)
     include_crosscor && push!(bases, 4)       # cross-corr
     push!(bases, 4)                           # solution (e_post)
     include_equi && push!(bases, 4)           # equivariance
     append!(bases, [3, 3])                    # median diss., backscatter
+    caps = copy(bases)
+    caps[end] = 4                             # dyn. Smag. backscatter is O(4e-4)
     isfixed(d) = d isa NamedTuple && (d.c == 0 || sigdecimals(d.c) <= maxdec)
     coldigits = map(eachindex(bases)) do j
         reqs = [
             isnothing(d.s) ? sigdecimals(d.c) : max(sigdecimals(d.c), sigdecimals(d.s))
                 for d in getindex.(descs, j) if isfixed(d)
         ]
-        max(bases[j], maximum(reqs; init = 0))
+        min(caps[j], max(bases[j], maximum(reqs; init = 0)))
     end
 
     fmt(d, dcol) =

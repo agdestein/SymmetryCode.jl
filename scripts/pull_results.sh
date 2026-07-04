@@ -16,7 +16,9 @@
 # so `les_meta.jld2` carries `redelta_mean` (otherwise the trend would need the
 # heavy fields.jld2). For the TGV-vs-Re_Δ figure, also run
 # `scripts/backfill_redelta_peak.jl` ON THE CLUSTER first, same reason
-# (`redelta_peak`, the TGV's peak-dissipation-instant Re_Δ).
+# (`redelta_peak`, the TGV's peak-dissipation-instant Re_Δ). For the data-window
+# evolution figure, also run `scripts/backfill_dnsmeta_warmup.jl` ON THE CLUSTER
+# first, same reason (warm-up `times`/`statistics` into `dns_meta.jld2`).
 #
 # Usage:
 #   scripts/pull_results.sh [--heavy] [--dry-run] REMOTE [DEST]
