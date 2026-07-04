@@ -251,17 +251,25 @@ function create_slices(case, dns; force = false)
     g_les = Grid{D}(; l, n = n_les, backend)
     u = load(dnsfile(case, dns), "u") |> adapt(backend)
 
-    c_dns = getcache(g_dns)
-    c_les = getcache(g_les)
+    # `sfs!` (via `nonlinearity!`) only ever reads `σ`, `v`, `vi_vj`, `plan` from
+    # each cache; the `ustart`/`du` time-integration buffers `getcache` would also
+    # allocate are two dead vector fields — ~26 GB on the 810³ DNS grid, enough to
+    # OOM the H100. Build a trimmed cache with just what `sfs!` touches, and fold
+    # every slice-extraction scratch buffer into these same arrays (see below).
+    sfscache(g) = let vi_vj = spacescalarfield(g)
+        (; σ = tensorfield(g), v = spacevectorfield(g), vi_vj, plan = plan_rfft(vi_vj))
+    end
+    c_dns = sfscache(g_dns)
+    c_les = sfscache(g_les)
 
     # `to_phys!` (a c2r inverse FFT) *destroys its spectral input*, so any field
     # still needed afterwards is inverted through a spectral scratch buffer. The
     # z=zmax plane is gathered to the host and cast to Float32 (a copy, so the
-    # phys-space buffer is free for the next component). Fields not reused (ω, ∇ū,
-    # τ scratch) are inverted in place.
-    ω_dns = scalarfield(g_dns)
-    spec_dns = scalarfield(g_dns)
-    phys_dns = spacescalarfield(g_dns)
+    # phys-space buffer is free for the next component). We reuse the cache's own
+    # `σ.xx` (spectral) and `vi_vj` (physical) as that scratch: on the DNS grid
+    # both are free until the first `sfs!` below overwrites them, and on the LES
+    # grid `sfs!` writes its nonlinearity into `σbar2` (not `c_les.σ`), so `σ.xx`
+    # stays free throughout. Fields not reused (∇ū, τ) are inverted in place.
     topslice(field) = Float32.(Array(@view field[:, :, end]))
     slice_of!(spec, phys, plan, g) = (to_phys!(phys, spec, plan, g); topslice(phys))
     # Invert a copy so `spec_src` survives (used again downstream).
@@ -270,9 +278,10 @@ function create_slices(case, dns; force = false)
 
     # --- DNS-resolution slices (Δ-independent; computed once) ---
     # `u` is reused by every sfs! below, so convert its components via a copy.
+    spec_dns, phys_dns = c_dns.σ.xx, c_dns.vi_vj
     u_slice = map(ui -> keep_slice(ui, spec_dns, phys_dns, c_dns.plan, g_dns), u)
-    apply!(vorticity_z!, g_dns, (ω_dns, u, g_dns))
-    omega_z = slice_of!(ω_dns, phys_dns, c_dns.plan, g_dns)
+    apply!(vorticity_z!, g_dns, (spec_dns, u, g_dns))   # ω_z → spectral scratch
+    omega_z = slice_of!(spec_dns, phys_dns, c_dns.plan, g_dns)
 
     # --- LES-resolution scratch (reused across filters) ---
     ubar = vectorfield(g_les)
@@ -280,9 +289,7 @@ function create_slices(case, dns; force = false)
     σbar2 = tensorfield(g_les)
     τ = tensorfield(g_les)
     G = tensorfield_nonsym(g_les)
-    ω_les = scalarfield(g_les)
-    spec_les = scalarfield(g_les)
-    phys_les = spacescalarfield(g_les)
+    spec_les, phys_les = c_les.σ.xx, c_les.vi_vj
 
     for Δf in filters
         Δ = Δf * l / n_les
@@ -291,8 +298,8 @@ function create_slices(case, dns; force = false)
         # ū is reused by the vorticity and gradient below — convert via a copy.
         ubar_slice = map(ui -> keep_slice(ui, spec_les, phys_les, c_les.plan, g_les), ubar)
 
-        apply!(vorticity_z!, g_les, (ω_les, ubar, g_les))
-        omegabar_z = slice_of!(ω_les, phys_les, c_les.plan, g_les)
+        apply!(vorticity_z!, g_les, (spec_les, ubar, g_les))   # ω̄_z → spectral scratch
+        omegabar_z = slice_of!(spec_les, phys_les, c_les.plan, g_les)
 
         # ∇ū: dealias each spectral component (matches the dataloader) then invert
         # in place (G is rebuilt from ū next iteration).
