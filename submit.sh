@@ -84,7 +84,7 @@ submit_les() {
     else
         echo "run-les: convsym all cached"
     fi
-    last=$(sub run-les.jl reduce --time=00:30:00 $(dep))
+    last=$(sub run-les.jl reduce --time=01:30:00 $(dep))
     echo "run-les: reduce[$last]"
 }
 

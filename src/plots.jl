@@ -31,7 +31,7 @@ function getstyles()
     entry(color, linestyle, marker) = (; color, linestyle, marker)
     return (;
         dns = entry(:black, :solid, :star5),
-        ref = entry(:black, :dash, :circle),
+        ref = entry(:black, :dot, :circle),
         nomo = entry(c[1], :solid, :utriangle),
         smag = entry(c[2], :dot, :pentagon),
         dynsmag = entry(c[2], :solid, :circle),
