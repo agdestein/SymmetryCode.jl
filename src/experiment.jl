@@ -207,6 +207,15 @@ fieldsfile(case, dns, Δ_factor) = joinpath(datadir(case, dns, Δ_factor) |> mkp
 lesmetafile(case, dns, Δ_factor) = joinpath(datadir(case, dns, Δ_factor) |> mkpath, "les_meta.jld2")
 
 """
+2D z=zmax slice artifact for static figures / graphical-abstract / blog reuse —
+per (ν, seed, Δ). Holds the DNS-resolution slices (`u`, `ω_z`) and the
+LES-resolution filtered slices (`ubar`, `omegabar_z`, `grad = ∇ū`, `tau`) of the
+warm-up DNS snapshot. Written by [`create_slices`](@ref); read by
+`plot_slice_filters` / `plot_slice_grid`.
+"""
+slicefile(case, dns, Δ_factor) = joinpath(datadir(case, dns, Δ_factor) |> mkpath, "slice.jld2")
+
+"""
 Canonical artifact key for a learned-model coordinate
 `(; arch, tier, netseed, use_redelta)`. Every coordinate is encoded uniformly —
 there is no "canonical seed keeps the plain key" special case (that existed only

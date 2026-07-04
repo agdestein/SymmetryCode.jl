@@ -1106,6 +1106,139 @@ function plot_velocities(case, dns, Δf, models, comp)
 end
 
 """
+    plot_slice_filters(case, dns; comp = :z, clip_quantile = 0.99)
+
+One DNS velocity slice + one filtered-DNS slice per filter width, from the warm-up
+[`slicefile`](@ref)s of run `dns`: column 1 is the DNS `u_comp` at full
+resolution, the remaining columns are `ū_comp` at each of the run's filter
+ratios Δ/h (`comp` is the velocity component, default `:z`). All panels share one
+zero-centered `RdBu` range (clipped to the
+`clip_quantile` quantile of `|·|`, since velocity slices have a near-Gaussian bulk
+with rare extremes) so the smoothing effect of the filter reads directly. Missing
+slice files are skipped. Saved under [`dnsfigdir`](@ref).
+"""
+function plot_slice_filters(case, dns; comp = :z, clip_quantile = 0.99)
+    filters = dns.role === :train ? case.filters_train : case.filters_test
+    files = [slicefile(case, dns, Δf) for Δf in filters]
+    present = isfile.(files)
+    any(present) || (@warn "no slice files for $(dns)"; return nothing)
+
+    # DNS slice is Δ-independent — take it from the first available file.
+    dns_slice = getfield(load(files[findfirst(present)], "u"), comp)
+    bar_slices = [p ? getfield(load(f, "ubar"), comp) : nothing for (f, p) in zip(files, present)]
+
+    shown = Matrix{Float32}[dns_slice]
+    append!(shown, filter(!isnothing, bar_slices))
+    amp = maximum(quantile(abs.(vec(s)), clip_quantile) for s in shown)
+    colorrange = (-amp, amp)
+
+    ncol = 1 + length(filters)
+    fig = Figure(; size = (200 * ncol + 80, 240))
+    axkw = (;
+        xticksvisible = false, xticklabelsvisible = false,
+        yticksvisible = false, yticklabelsvisible = false,
+        aspect = DataAspect(),
+    )
+    local hm
+    hm = image!(
+        Axis(fig[1, 1]; title = "DNS", axkw...),
+        dns_slice; colormap = :RdBu, colorrange, interpolate = false,
+    )
+    for (k, Δf) in enumerate(filters)
+        s = bar_slices[k]
+        s === nothing && continue
+        ax = Axis(fig[1, k + 1]; title = "Filtered DNS, Δ/h = $(Δf)", axkw...)
+        image!(ax, s; colormap = :RdBu, colorrange, interpolate = false)
+    end
+    Colorbar(fig[1, ncol + 1], hm; label = "u_$(comp)")
+
+    colgap!(fig.layout, 10)
+    save(joinpath(dnsfigdir(case, dns), "slice-filters-$(comp).png"), fig; backend = CairoMakie)
+    return fig
+end
+
+"""
+    plot_slice_grid(case; comp = :z, clip_quantile = 0.99,
+                    runs = dns_runs().all, filters = nothing, tag = "")
+
+Grid of warm-up velocity slices ([`slicefile`](@ref)): **each row is one DNS run**
+(a single seed, ordered by viscosity), **columns are DNS + filter width**. Column 1
+is the DNS `u_comp`; the rest are `ū_comp` at each Δ/h. Every cell in a row comes
+from the *same* DNS field, so the panels are visually corresponding; two runs at the
+same ν (different seed/role) are kept as *separate* rows rather than merged, so no
+row ever mixes realizations. One shared zero-centered `RdBu` range across all panels.
+
+**Selecting rows/columns.** `runs` picks the rows (any subset/order of
+[`dns_runs`](@ref) coordinates); `filters` picks the columns (a list of Δ/h — else
+the union of the shown runs' role filters). A run still only contributes the filters
+of its own role, so mixing train and test rows leaves **holes** where a role lacks a
+column. Restrict to one role for a fully dense grid, e.g. the training data:
+
+    plot_slice_grid(case; runs = dns_runs().train, filters = case.filters_train, tag = "train")
+
+`tag` is appended to the file name (`slice-grid-<comp>[-<tag>].png`) so variants do
+not clobber. Saved under `case.plotdir`.
+"""
+function plot_slice_grid(
+        case; comp = :z, clip_quantile = 0.99,
+        runs = dns_runs().all, filters = nothing, tag = "",
+    )
+    # One row per DNS run (single seed → visually consistent across the row),
+    # ordered by descending ν (low-Re first); ties keep the given order.
+    runs = sort(collect(runs); by = d -> -d.visc)
+    rolefilters(dns) = dns.role === :train ? case.filters_train : case.filters_test
+    # Columns: the requested widths, else the union the shown runs actually use.
+    allfilters = filters === nothing ?
+        sort(unique(reduce(vcat, rolefilters.(runs)))) : sort(collect(filters))
+    nrow, ncol = length(runs), 1 + length(allfilters)
+
+    # Collect every cell first (so the shared color range sees all of them).
+    cells = Matrix{Union{Nothing, Matrix{Float32}}}(nothing, nrow, ncol)
+    for (r, dns) in enumerate(runs)
+        for Δf in rolefilters(dns)
+            j = findfirst(==(Δf), allfilters)
+            j === nothing && continue          # width not among the shown columns
+            f = slicefile(case, dns, Δf)
+            isfile(f) || continue
+            cells[r, 1] === nothing && (cells[r, 1] = getfield(load(f, "u"), comp))
+            cells[r, 1 + j] = getfield(load(f, "ubar"), comp)
+        end
+    end
+    any(!isnothing, cells) || (@warn "no slice files found"; return nothing)
+
+    amp = maximum(quantile(abs.(vec(s)), clip_quantile) for s in cells if s !== nothing)
+    colorrange = (-amp, amp)
+    coltitle(c) = c == 1 ? "DNS" : "Δ/h = $(allfilters[c - 1])"
+    # Two runs can share ν, so tag the row label with the role to disambiguate.
+    rowlabel(dns) = "ν = $(dns.visc)\n($(dns.role))"
+    # Title each column on the topmost row where it actually has a panel.
+    firstrow(c) = findfirst(r -> cells[r, c] !== nothing, 1:nrow)
+
+    fig = Figure(; size = (170 * ncol + 80, 170 * nrow + 40))
+    local hm
+    for r in 1:nrow, c in 1:ncol
+        s = cells[r, c]
+        s === nothing && continue
+        ax = Axis(
+            fig[r, c];
+            title = coltitle(c), titlevisible = r == firstrow(c),
+            ylabel = rowlabel(runs[r]), ylabelvisible = c == 1,
+            xticksvisible = false, xticklabelsvisible = false,
+            yticksvisible = false, yticklabelsvisible = false,
+            aspect = DataAspect(),
+        )
+        hm = image!(ax, s; colormap = :RdBu, colorrange, interpolate = false)
+    end
+    Colorbar(fig[1:nrow, ncol + 1], hm; label = "u_$(comp)")
+
+    rowgap!(fig.layout, 10)
+    colgap!(fig.layout, 10)
+    suffix = isempty(tag) ? "" : "-$(tag)"
+    save(joinpath(case.plotdir, "slice-grid-$(comp)$(suffix).png"), fig; backend = CairoMakie)
+    return fig
+end
+
+"""
     plot_vorticity_tgv(case, tgv; ntime = 7, clip_quantile = 0.99)
 
 Full-DNS-resolution z-vorticity montage for TGV run `tgv`: a row of horizontal

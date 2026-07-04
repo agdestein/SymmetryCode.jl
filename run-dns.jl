@@ -39,6 +39,7 @@ get_config() = (;
         :data,           # create_data -> dnsmetafile + fieldsfile/lesmetafile per Δ
         :evolution_data, # plot_evolution_data -> data-window time series
         :spectrum_data,  # plot_spectrum_data -> time-averaged spectra (per Δ)
+        :slices,         # create_slices -> per-Δ slice.jld2 + slice figures (statics)
     ],
 
     # Stages whose cache is invalidated for this run. Only :dns/:data are cached;
@@ -71,6 +72,11 @@ function unit_pending(case, config, dns)
         filters = dns.role === :train ? case.filters_train : case.filters_test
         outfiles = [S.dnsmetafile(case, dns); [S.fieldsfile(case, dns, Δf) for Δf in filters]]
         all(isfile, outfiles) || return true
+    end
+    if :slices in config.experiments
+        :slices in config.force && return true
+        filters = dns.role === :train ? case.filters_train : case.filters_test
+        all(Δf -> isfile(S.slicefile(case, dns, Δf)), filters) || return true
     end
     return false
 end
@@ -106,6 +112,11 @@ function run_data!(case, config, task_id)
                 S.plot_spectrum_data(case, dns, Δf)
             end
         end
+
+        if :slices in config.experiments
+            S.create_slices(case, dns; force = :slices in config.force)
+            S.plot_slice_filters(case, dns)
+        end
     end
     return
 end
@@ -129,6 +140,9 @@ function run_reduce!(case, config)
         )
     end
     S.write_dns_table(case, S.dns_runs().all)
+    # Cross-run slice grid (rows = ν, cols = DNS + filter widths); needs the slices
+    # from every run, so it lives here rather than in the per-run array phase.
+    :slices in config.experiments && S.plot_slice_grid(case)
     @info "Done (reduce)."
     flush(stderr)
     return

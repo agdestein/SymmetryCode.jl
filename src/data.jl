@@ -212,6 +212,112 @@ function create_data(case, dns; force = false)
 end
 
 """
+    create_slices(case, dns; force = false)
+
+Extract 2D `z = zmax` slices of the warm-up DNS snapshot ([`dnsfile`](@ref)) for
+static figures (paper, graphical abstract, blog), one self-contained
+[`slicefile`](@ref) per filter ratio of the run's role. Each file stores, all as
+`Matrix{Float32}` (computed in Float64, cast on write):
+
+- `u` — DNS velocity `(; x, y, z)` at full DNS resolution (`n_dns²`).
+- `omega_z` — DNS out-of-plane vorticity `ω_z` (`n_dns²`).
+- `ubar` — filtered-DNS velocity `(; x, y, z)` at LES resolution (`n_les²`).
+- `omegabar_z` — `ω̄_z` from `ūbar` (`n_les²`).
+- `grad` — resolved velocity gradient `∇ū`, non-symmetric `(; xx, yx, zx, …, zz)`.
+- `tau` — deviatoric sub-filter stress `τ`, symmetric `(; xx, yy, zz, xy, yz, zx)`.
+
+plus scalar metadata (`Δ`, `Δ_factor`, `visc`, `n_dns`, `n_les`, `l`). The DNS-side
+slices are Δ-independent, so they are computed once and copied into every filter's
+file (keeps each artifact standalone; the duplication is ~10 MiB/file, negligible
+at this scale). Cache-guarded like [`create_data`](@ref).
+"""
+function create_slices(case, dns; force = false)
+    (; D, l, n_dns, n_les, backend) = case
+    @assert D == 3 "create_slices extracts a z=zmax plane; assumes 3D"
+    visc = dns.visc
+    filters = dns.role === :train ? case.filters_train : case.filters_test
+
+    outfiles = [slicefile(case, dns, Δf) for Δf in filters]
+    if !force && all(isfile, outfiles)
+        @info "slices cached (visc=$(visc), seed=$(dns.seed))"
+        flush(stderr)
+        return nothing
+    end
+
+    @info "Extracting slices (visc=$(visc), seed=$(dns.seed), role=$(dns.role))"
+    flush(stderr)
+
+    g_dns = Grid{D}(; l, n = n_dns, backend)
+    g_les = Grid{D}(; l, n = n_les, backend)
+    u = load(dnsfile(case, dns), "u") |> adapt(backend)
+
+    c_dns = getcache(g_dns)
+    c_les = getcache(g_les)
+
+    # `to_phys!` (a c2r inverse FFT) *destroys its spectral input*, so any field
+    # still needed afterwards is inverted through a spectral scratch buffer. The
+    # z=zmax plane is gathered to the host and cast to Float32 (a copy, so the
+    # phys-space buffer is free for the next component). Fields not reused (ω, ∇ū,
+    # τ scratch) are inverted in place.
+    ω_dns = scalarfield(g_dns)
+    spec_dns = scalarfield(g_dns)
+    phys_dns = spacescalarfield(g_dns)
+    topslice(field) = Float32.(Array(@view field[:, :, end]))
+    slice_of!(spec, phys, plan, g) = (to_phys!(phys, spec, plan, g); topslice(phys))
+    # Invert a copy so `spec_src` survives (used again downstream).
+    keep_slice(spec_src, tmp, phys, plan, g) =
+        (copyto!(tmp, spec_src); slice_of!(tmp, phys, plan, g))
+
+    # --- DNS-resolution slices (Δ-independent; computed once) ---
+    # `u` is reused by every sfs! below, so convert its components via a copy.
+    u_slice = map(ui -> keep_slice(ui, spec_dns, phys_dns, c_dns.plan, g_dns), u)
+    apply!(vorticity_z!, g_dns, (ω_dns, u, g_dns))
+    omega_z = slice_of!(ω_dns, phys_dns, c_dns.plan, g_dns)
+
+    # --- LES-resolution scratch (reused across filters) ---
+    ubar = vectorfield(g_les)
+    σbar1 = tensorfield(g_les)
+    σbar2 = tensorfield(g_les)
+    τ = tensorfield(g_les)
+    G = tensorfield_nonsym(g_les)
+    ω_les = scalarfield(g_les)
+    spec_les = scalarfield(g_les)
+    phys_les = spacescalarfield(g_les)
+
+    for Δf in filters
+        Δ = Δf * l / n_les
+        sfs!(; τ, σbar1, σbar2, ubar, u, c_dns, c_les, g_dns, g_les, Δ)
+
+        # ū is reused by the vorticity and gradient below — convert via a copy.
+        ubar_slice = map(ui -> keep_slice(ui, spec_les, phys_les, c_les.plan, g_les), ubar)
+
+        apply!(vorticity_z!, g_les, (ω_les, ubar, g_les))
+        omegabar_z = slice_of!(ω_les, phys_les, c_les.plan, g_les)
+
+        # ∇ū: dealias each spectral component (matches the dataloader) then invert
+        # in place (G is rebuilt from ū next iteration).
+        apply!(vectorgradient!, g_les, (G, ubar, g_les))
+        grad = map(G) do gi
+            apply!(twothirds!, g_les, (gi, g_les))
+            slice_of!(gi, phys_les, c_les.plan, g_les)
+        end
+
+        # τ from sfs! is already 2/3-truncated and trace-free; invert in place
+        # (rebuilt next iteration).
+        tau = map(ti -> slice_of!(ti, phys_les, c_les.plan, g_les), τ)
+
+        jldsave_atomic(
+            slicefile(case, dns, Δf);
+            u = u_slice, omega_z, ubar = ubar_slice, omegabar_z, grad, tau,
+            Δ, Δ_factor = Δf, visc, n_dns, n_les, l,
+        )
+        @info "saved slice (visc=$(visc), seed=$(dns.seed), Δ=$(Δf))"
+        flush(stderr)
+    end
+    return nothing
+end
+
+"""
 Time index of peak DNS dissipation for a TGV run — the reference instant shared by
 every peak-instant diagnostic ([`report_tgv_redelta`](@ref),
 [`compute_redelta_peak`](@ref), `S.plot_tgv_vs_redelta`). Unlike forced HIT
