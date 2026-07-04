@@ -131,8 +131,6 @@ compact pre-synthesis basis and `project` is the synthesis operator; for
 function build_net_stuff(netsetup, arch, layers; same_as_equi = false, use_redelta = false)
     if arch === :tbnn
         net = tbnn_net(netsetup, layers; use_redelta)
-        net |> display
-        flush(stdout)
         f = netsetup.train_setup.precision === Float32 ? f32 : f64
         ps, st =
             Lux.setup(Xoshiro(netsetup.train_setup.seed), net) |> f |> adapt(netsetup.backend)
@@ -213,6 +211,11 @@ function train_model(case, m, trainpool; force = false)
     loss = m.arch === :tbnn ? create_loss_tbnn(g) : create_loss(net_stuff.project)
 
     @info "Training $(modelkey(m)) on $(length(trainpool)) datasets"
+    # Show the network once, at training launch. Route to stderr (not `display`,
+    # which writes stdout) so it stays ordered with the surrounding @info logs
+    # instead of interleaving at buffer-flush time.
+    show(stderr, MIME"text/plain"(), net_stuff.net)
+    println(stderr)
     flush(stderr)
     result = train(; loss, case, trainloader, valloader, net_stuff)
     jldsave_atomic(

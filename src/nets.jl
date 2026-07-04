@@ -213,7 +213,6 @@ function equivariant_net(setup, nchan; synthesis = true, use_redelta = false)
             end
         end,
     )
-    net |> display
     ps =
         (;
         lift = (;
@@ -293,7 +292,6 @@ function mlp(setup, nchan; same_as_equi, use_redelta = false)
             end
         end,
     )
-    net |> display
     ps, st = Lux.setup(rng, net) |> f |> dev
     project = identity # No projection
     return (; project, net, ps, st)
