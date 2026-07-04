@@ -207,7 +207,7 @@ fieldsfile(case, dns, Δ_factor) = joinpath(datadir(case, dns, Δ_factor) |> mkp
 lesmetafile(case, dns, Δ_factor) = joinpath(datadir(case, dns, Δ_factor) |> mkpath, "les_meta.jld2")
 
 """
-2D z=zmax slice artifact for static figures / graphical-abstract / blog reuse —
+2D z=l/2 slice artifact for static figures / graphical-abstract / blog reuse —
 per (ν, seed, Δ). Holds the DNS-resolution slices (`u`, `ω_z`) and the
 LES-resolution filtered slices (`ubar`, `omegabar_z`, `grad = ∇ū`, `tau`) of the
 warm-up DNS snapshot. Written by [`create_slices`](@ref); read by

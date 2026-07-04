@@ -214,7 +214,7 @@ end
 """
     create_slices(case, dns; force = false)
 
-Extract 2D `z = zmax` slices of the warm-up DNS snapshot ([`dnsfile`](@ref)) for
+Extract 2D `z = l/2` slices of the warm-up DNS snapshot ([`dnsfile`](@ref)) for
 static figures (paper, graphical abstract, blog), one self-contained
 [`slicefile`](@ref) per filter ratio of the run's role. Each file stores, all as
 `Matrix{Float32}` (computed in Float64, cast on write):
@@ -226,14 +226,16 @@ static figures (paper, graphical abstract, blog), one self-contained
 - `grad` — resolved velocity gradient `∇ū`, non-symmetric `(; xx, yx, zx, …, zz)`.
 - `tau` — deviatoric sub-filter stress `τ`, symmetric `(; xx, yy, zz, xy, yz, zx)`.
 
-plus scalar metadata (`Δ`, `Δ_factor`, `visc`, `n_dns`, `n_les`, `l`). The DNS-side
-slices are Δ-independent, so they are computed once and copied into every filter's
-file (keeps each artifact standalone; the duplication is ~10 MiB/file, negligible
-at this scale). Cache-guarded like [`create_data`](@ref).
+plus scalar metadata (`Δ`, `Δ_factor`, `visc`, `n_dns`, `n_les`, `l`, `z`). The plane
+is `z ≈ l/2`: the cell-centered DNS and LES grids share no exact z (see the
+`kslice` note below), so `u` is cut at the DNS row nearest the LES mid-plane. The
+DNS-side slices are Δ-independent, so they are computed once and copied into every
+filter's file (keeps each artifact standalone; the duplication is ~10 MiB/file,
+negligible at this scale). Cache-guarded like [`create_data`](@ref).
 """
 function create_slices(case, dns; force = false)
     (; D, l, n_dns, n_les, backend) = case
-    @assert D == 3 "create_slices extracts a z=zmax plane; assumes 3D"
+    @assert D == 3 "create_slices extracts a z = l/2 plane; assumes 3D"
     visc = dns.visc
     filters = dns.role === :train ? case.filters_train : case.filters_test
 
@@ -262,16 +264,26 @@ function create_slices(case, dns; force = false)
     c_dns = sfscache(g_dns)
     c_les = sfscache(g_les)
 
+    # Which z-plane to cut. The grids are cell-centered (point k sits at
+    # `(k - ½)·l/n`), so the DNS (n_dns) and LES (n_les) sample planes never
+    # coincide exactly — `(i-½)/n_dns = (j-½)/n_les` reduces to `even = odd`. We
+    # therefore anchor on the LES mid-plane (`z ≈ l/2`) and cut the DNS at the row
+    # whose cell centre is nearest *that* height, so `u` and `ū` overlap as closely
+    # as the resolutions allow (residual Δz ≈ 4e-4·l, vs ≈3e-3·l for a boundary
+    # plane). `kslice(n)` returns that index for a field with `n` points per side.
+    zmid = (n_les ÷ 2 + 1 - 1 // 2) / n_les          # height of the LES mid-plane
+    kslice(n) = clamp(round(Int, zmid * n + 1 // 2), 1, n)
+
     # `to_phys!` (a c2r inverse FFT) *destroys its spectral input*, so any field
     # still needed afterwards is inverted through a spectral scratch buffer. The
-    # z=zmax plane is gathered to the host and cast to Float32 (a copy, so the
+    # chosen plane is gathered to the host and cast to Float32 (a copy, so the
     # phys-space buffer is free for the next component). We reuse the cache's own
     # `σ.xx` (spectral) and `vi_vj` (physical) as that scratch: on the DNS grid
     # both are free until the first `sfs!` below overwrites them, and on the LES
     # grid `sfs!` writes its nonlinearity into `σbar2` (not `c_les.σ`), so `σ.xx`
     # stays free throughout. Fields not reused (∇ū, τ) are inverted in place.
-    topslice(field) = Float32.(Array(@view field[:, :, end]))
-    slice_of!(spec, phys, plan, g) = (to_phys!(phys, spec, plan, g); topslice(phys))
+    midslice(field) = Float32.(Array(@view field[:, :, kslice(size(field, 3))]))
+    slice_of!(spec, phys, plan, g) = (to_phys!(phys, spec, plan, g); midslice(phys))
     # Invert a copy so `spec_src` survives (used again downstream).
     keep_slice(spec_src, tmp, phys, plan, g) =
         (copyto!(tmp, spec_src); slice_of!(tmp, phys, plan, g))
@@ -316,7 +328,7 @@ function create_slices(case, dns; force = false)
         jldsave_atomic(
             slicefile(case, dns, Δf);
             u = u_slice, omega_z, ubar = ubar_slice, omegabar_z, grad, tau,
-            Δ, Δ_factor = Δf, visc, n_dns, n_les, l,
+            Δ, Δ_factor = Δf, visc, n_dns, n_les, l, z = zmid * l,
         )
         @info "saved slice (visc=$(visc), seed=$(dns.seed), Δ=$(Δf))"
         flush(stderr)

@@ -1239,6 +1239,69 @@ function plot_slice_grid(
 end
 
 """
+    plot_slice(slice; title = "", clip_quantile = 0.99, colormap = :RdBu, px = 360)
+
+A single 2D field `slice` as a **bare heatmap** — no axes, ticks, labels, spines or
+colorbar, just the image and a `title`. The color range is zero-centered `RdBu`
+clipped to the `clip_quantile` quantile of `|slice|` (every stored field is
+sign-symmetric with rare extremes). The figure is sized tightly to the (square)
+data — `px` pixels a side plus room for the title, minimal padding — so the saved
+PNG is the heatmap and little else. Returns the `Figure`; [`plot_slices`](@ref)
+uses it to dump every field of a [`slicefile`](@ref).
+"""
+function plot_slice(slice; title = "", clip_quantile = 0.99, colormap = :RdBu, px = 360)
+    amp = quantile(abs.(vec(slice)), clip_quantile)
+    amp = iszero(amp) ? one(amp) : amp                     # avoid a degenerate range
+    fig = Figure(; figure_padding = 3)
+    ax = Axis(fig[1, 1]; title, aspect = DataAspect(), width = px, height = px)
+    hidedecorations!(ax)
+    hidespines!(ax)
+    image!(ax, slice; colormap, colorrange = (-amp, amp), interpolate = false)
+    resize_to_layout!(fig)                                 # shrink figure to axis + title
+    return fig
+end
+
+"""
+    plot_slices(case, dns, Δf; kwargs...)
+
+Dump **every field** of the warm-up [`slicefile`](@ref) of `(dns, Δf)` as its own
+bare heatmap (via [`plot_slice`](@ref)): the DNS and filtered velocity components,
+their z-vorticity, the nine ∇ū components and the six sub-filter-stress components.
+Each panel gets a plain-language title (`Velocity (z)`, `Filtered vorticity (z)`,
+`Velocity gradient (x, y)` for `∂ūₓ/∂y`, `Sub-filter stress (x, y)`) and is saved as
+`<field>.png` in a per-Δ subfolder of [`dnsfigdir`](@ref). `kwargs` pass through to
+`plot_slice` (`clip_quantile`, `colormap`, `px`). Returns the output directory.
+"""
+function plot_slices(case, dns, Δf; kwargs...)
+    f = slicefile(case, dns, Δf)
+    isfile(f) || (@warn "no slice file"; return nothing)
+    d = load(f)
+    pair(sym) = join(string.(collect(string(sym))), ", ")   # :xy -> "x, y"
+    panels = Tuple{String, String, Matrix{Float32}}[]
+    for c in keys(d["u"])
+        push!(panels, ("velocity-$c", "Velocity ($c)", d["u"][c]))
+    end
+    push!(panels, ("vorticity-z", "Vorticity (z)", d["omega_z"]))
+    for c in keys(d["ubar"])
+        push!(panels, ("filtered-velocity-$c", "Filtered velocity ($c)", d["ubar"][c]))
+    end
+    push!(panels, ("filtered-vorticity-z", "Filtered vorticity (z)", d["omegabar_z"]))
+    for c in keys(d["grad"])
+        push!(panels, ("velocity-gradient-$c", "Velocity gradient ($(pair(c)))", d["grad"][c]))
+    end
+    for c in keys(d["tau"])
+        push!(panels, ("subfilter-stress-$c", "Sub-filter stress ($(pair(c)))", d["tau"][c]))
+    end
+
+    dir = mkpath(joinpath(dnsfigdir(case, dns), "slices-delta$(Δf)"))
+    for (name, title, mat) in panels
+        save(joinpath(dir, "$(name).png"), plot_slice(mat; title, kwargs...); backend = CairoMakie)
+    end
+    @info "saved $(length(panels)) slice panels to $(dir)"
+    return dir
+end
+
+"""
     plot_vorticity_tgv(case, tgv; ntime = 7, clip_quantile = 0.99)
 
 Full-DNS-resolution z-vorticity montage for TGV run `tgv`: a row of horizontal

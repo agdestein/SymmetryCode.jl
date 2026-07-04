@@ -116,6 +116,9 @@ function run_data!(case, config, task_id)
         if :slices in config.experiments
             S.create_slices(case, dns; force = :slices in config.force)
             S.plot_slice_filters(case, dns)
+            for Δf in filters
+                S.plot_slices(case, dns, Δf)     # every field of the slice, one PNG each
+            end
         end
     end
     return
