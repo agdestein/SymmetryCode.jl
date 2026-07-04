@@ -1150,11 +1150,47 @@ function plot_slice_filters(case, dns; comp = :z, clip_quantile = 0.99)
         ax = Axis(fig[1, k + 1]; title = "Filtered DNS, Δ/h = $(Δf)", axkw...)
         image!(ax, s; colormap = :RdBu, colorrange, interpolate = false)
     end
-    Colorbar(fig[1, ncol + 1], hm; label = "u_$(comp)")
+    Colorbar(fig[1, ncol + 1], hm; label = "Velocity ($(comp))")
 
     colgap!(fig.layout, 10)
     save(joinpath(dnsfigdir(case, dns), "slice-filters-$(comp).png"), fig; backend = CairoMakie)
     return fig
+end
+
+"""
+    plot_graphabs_tiles(case, dns, Δ_factor; comp = :z, clip_quantile = 0.99)
+
+Bare field tiles for the graphical abstract's split DNS/filtered-DNS panel, from
+the [`slicefile`](@ref) of `(dns, Δ_factor)`: `graphabs-dns-top-(comp).png` is the
+band of `u_comp` just *above* mid-height and `graphabs-filtered-bottom-(comp).png`
+the band of `ū_comp` just *below* it, so the two stacked tiles read as one
+continuous field across the divider. No axes, colorbar, or padding — the PNGs are
+pure pixels, sized for the abstract's 2.5 cm × 0.92 cm half-tiles (band height =
+0.92/2.5 of the field width). Both bands share one zero-centered `RdBu` range
+(clipped like [`plot_slice_filters`](@ref)); the filtered band is rendered at DNS
+pixel size with `interpolate = false` so the LES cells stay blocky. Saved under
+[`figdir`](@ref).
+"""
+function plot_graphabs_tiles(case, dns, Δ_factor; comp = :z, clip_quantile = 0.99)
+    file = slicefile(case, dns, Δ_factor)
+    u = getfield(load(file, "u"), comp)
+    ubar = getfield(load(file, "ubar"), comp)
+
+    bandfrac = 0.92 / 2.5   # half-tile height / tile width in the abstract
+    n, m = size(u, 2), size(ubar, 2)
+    top = u[:, (n ÷ 2 + 1):(n ÷ 2 + round(Int, bandfrac * n))]
+    bottom = ubar[:, (m ÷ 2 - round(Int, bandfrac * m) + 1):(m ÷ 2)]
+    amp = maximum(quantile(abs.(vec(s)), clip_quantile) for s in (top, bottom))
+
+    for (name, s) in (("dns-top", top), ("filtered-bottom", bottom))
+        fig = Figure(; size = (n, round(Int, bandfrac * n)), figure_padding = 0)
+        ax = Axis(fig[1, 1]; limits = (0, size(s, 1), 0, size(s, 2)))
+        hidedecorations!(ax)
+        hidespines!(ax)
+        image!(ax, s; colormap = :RdBu, colorrange = (-amp, amp), interpolate = false)
+        save(joinpath(figdir(case, dns, Δ_factor), "graphabs-$(name)-$(comp).png"), fig; backend = CairoMakie)
+    end
+    return nothing
 end
 
 """
