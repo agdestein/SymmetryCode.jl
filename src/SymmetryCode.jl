@@ -41,6 +41,5 @@ include("analysis.jl")
 include("plots.jl")
 include("setups.jl")
 include("experiment.jl")
-include("verify.jl")
 
 end
