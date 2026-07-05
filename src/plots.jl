@@ -439,12 +439,15 @@ function read_tgv_reference(reffile)
 end
 
 """
-Taylor-Green dissipation benchmark for TGV run `tgv` at filter `Δf`: two panels in
-standard nondimensional units (`t* = t V0 / L`), left = kinetic energy `E_k / V0²`,
-right = dissipation rate `ε L / V0³`. Overlays the full-grid DNS (gold reference,
-[`dnsmetafile`](@ref) `statistics_dns`), the published `Re = 1600` curve from
-`reffile`, and each closure's *effective* dissipation `ε_visc + ε_sfs` evaluated
-a-posteriori on its rollout ([`apostfile`](@ref); `:nomo` is resolved-viscous only).
+Taylor-Green dissipation benchmark for TGV run `tgv` at filter `Δf`: three panels
+in standard nondimensional units (`t* = t V0 / L`), left = kinetic energy
+`E_k / V0²`, centre = dissipation rate `ε L / V0³`, right = a-posteriori relative
+solution error `e_post(t) = ‖u_les − ūbar‖/‖ūbar‖`. The first two panels overlay
+the full-grid DNS (gold reference, [`dnsmetafile`](@ref) `statistics_dns`), the
+published `Re = 1600` curve from `reffile`, and each closure's *effective*
+dissipation `ε_visc + ε_sfs` evaluated a-posteriori on its rollout
+([`apostfile`](@ref); `:nomo` is resolved-viscous only); the error panel has
+closures only (the reference error is identically zero, so `:ref` is skipped).
 """
 function plot_dissipation_tgv(
         case, tgv, Δf, models;
@@ -453,13 +456,14 @@ function plot_dissipation_tgv(
     times, statistics_dns, V0 = load(dnsmetafile(case, tgv), "times", "statistics_dns", "V0")
     labels = getlabels()
 
-    fig = Figure(; size = (820, 360))
+    fig = Figure(; size = (1220, 360))
     ax_e = Axis(fig[1, 1]; xlabel = "Time", ylabel = "Kinetic energy")
     ax_eps = Axis(fig[1, 2]; xlabel = "Time", ylabel = "Dissipation rate")
+    ax_err = Axis(fig[1, 3]; xlabel = "Time", ylabel = "Relative error")
 
     # Stable-curve accumulators: a diverging closure (Clark at coarse Δ) is still
     # drawn so the explosion is visible, but only physical rollouts set the limits.
-    e_inl, eps_inl = Float64[], Float64[]
+    e_inl, eps_inl, err_inl = Float64[], Float64[], Float64[]
 
     # Full-grid DNS over the whole trajectory (gold reference).
     tdns = times .* V0
@@ -482,7 +486,8 @@ function plot_dissipation_tgv(
         append!(eps_inl, ref.eps)
     end
 
-    # LES closures: effective dissipation ε_visc + ε_sfs on each rollout.
+    # LES closures: effective dissipation ε_visc + ε_sfs on each rollout, plus the
+    # relative solution error (the reference error is identically zero — skip :ref).
     for m in models
         b = load_object(apostfile(case, tgv, Δf, m))
         t = b.t .* V0
@@ -491,16 +496,20 @@ function plot_dissipation_tgv(
         kw = (; label = plotlabel(m), color = plotstyle(m).color, linestyle = plotstyle(m).linestyle)
         lines!(ax_e, t, e; kw...)
         lines!(ax_eps, t, eps; kw...)
+        m === :ref || lines!(ax_err, t, b.e_post; kw...)
         if tgv_rollout_stable(b)
             append!(e_inl, e)
             append!(eps_inl, eps)
+            m === :ref || append!(err_inl, b.e_post)
         end
     end
 
     # Clip to the stable set: a blown-up closure runs off the box instead of
-    # collapsing every physical curve to a flat line (KE ≥ 0, so anchor there).
+    # collapsing every physical curve to a flat line (KE ≥ 0, so anchor there;
+    # same for the error).
     isempty(e_inl) || ylims!(ax_e, padded_limits(e_inl; anchor = 0.0))
     isempty(eps_inl) || ylims!(ax_eps, padded_limits(eps_inl))
+    isempty(err_inl) || ylims!(ax_err, padded_limits(err_inl; anchor = 0.0))
 
     Legend(
         fig[0, :], ax_eps;
