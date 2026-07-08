@@ -4,7 +4,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ## What this is
 
-Research code for the paper "Comparison of Data-Driven Symmetry-Preserving Closure Models for Large-Eddy Simulation" (Agdestein & Sanderse, 2026). It is a pseudo-spectral incompressible Navier–Stokes solver in 2D/3D with classical and learned LES closure models, plus the analysis and plotting pipeline used to generate the paper's figures.
+Research code for the paper "Approaching the optimal closure: equivariance, inductive bias, and Reynolds-number generalization in data-driven LES" (Agdestein & Sanderse, 2026). It is a pseudo-spectral incompressible Navier–Stokes solver in 2D/3D with classical and learned LES closure models, plus the analysis and plotting pipeline used to generate the paper's figures.
 
 The current line of work is the **Re_Δ experiment**: train the closures across a grid of viscosities ν and filter ratios Δ, then test out-of-distribution (a held-out higher-Re ν, interpolated/extrapolated filter ratios, and a decaying Taylor-Green vortex), optionally feeding the closures the filter-scale Reynolds number `Re_Δ = Δ²·√⟨|∇ū|²⟩/ν` as an extra input. The pipeline is **coordinate-driven** (see below) — the whole sweep is built from plain Cartesian products of loose coordinates, not a monolithic config.
 
