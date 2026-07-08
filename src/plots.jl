@@ -1834,6 +1834,60 @@ function plot_spectrum_les(case, dns, Δf, models)
     return fig
 end
 
+"""
+The two a-posteriori spectral diagnostics as one two-panel figure (paper
+layout, like [`plot_budget`](@ref)): left = the energy-spectrum ratio of
+[`plot_spectrum_les`](@ref), right = the spectral SFS dissipation rate of
+[`plot_spectral_transfer`](@ref), sharing one legend. The legend comes from
+the left axis, which carries every model; the right panel skips `:nomo`
+(its SFS term is identically zero).
+"""
+function plot_spectra_panels(case, dns, Δf, models)
+    stats = mean_of_named_tuple_series(load(dnsmetafile(case, dns), "statistics_dns"))
+    r = spectrum_reference(case, stats)
+    ε = stats.diss
+    s_ref = mean(load(lesmetafile(case, dns, Δf), "spectra_les"))
+    k = 2π / case.l * eachindex(s_ref)
+    styles = getstyles()
+
+    fig = Figure(; size = (820, 360))
+    ax_ratio = Axis(
+        fig[1, 1];
+        xscale = log10, xlabel = "Wavenumber", xticks = decimalticks(1.0e-4, 10),
+        ylabel = "Energy relative to reference",
+    )
+    ax_eps = Axis(
+        fig[1, 2];
+        xscale = log10, xlabel = "Wavenumber", xticks = decimalticks(1.0e-4, 10),
+        ylabel = "SFS dissipation rate",
+    )
+    for m in models
+        kw = (; label = plotlabel(m), color = plotstyle(m).color, linestyle = plotstyle(m).linestyle)
+        if m !== :ref
+            s = mean(load_object(apostfile(case, dns, Δf, m)).spectra_les)
+            lines!(ax_ratio, r.kscale * k, s ./ s_ref; kw...)
+        end
+        if m !== :nomo
+            t = load_object(apostfile(case, dns, Δf, m)).transfer
+            lines!(ax_eps, r.kscale * t.k, t.eps_sfs ./ ε; kw...)
+        end
+    end
+    hlines!(ax_ratio, [1.0]; color = styles.ref.color, linestyle = styles.ref.linestyle, label = "Reference")
+    ylims!(ax_ratio, 0, 2)
+    hlines!(ax_eps, [0.0]; color = :gray, linestyle = :dot)
+    Legend(
+        fig[0, :], ax_ratio;
+        tellwidth = false, tellheight = true, framevisible = false,
+        orientation = :horizontal, nbanks = 2,
+    )
+    rowgap!(fig.layout, 5)
+    file = joinpath(figdir(case, dns, Δf), "spectra-panels.pdf")
+    @info "Saving spectra panels to $file"
+    flush(stderr)
+    save(file, fig; backend = CairoMakie)
+    return fig
+end
+
 # --- Paper-ready LaTeX tables ---
 
 """

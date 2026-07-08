@@ -79,7 +79,7 @@ get_config() = (;
     ],
     force = Set{Symbol}(
         [
-            # :equivariance, 
+            # :equivariance,
             # :seeds,
         ]
     ),
@@ -366,8 +366,7 @@ function run_reduce!(case, config)
         S.plot_densities(case, indist, Δ_ab, [:ref; series])
         S.plot_error_post(case, indist, Δ_ab, series)
         S.plot_budget(case, indist, Δ_ab, [:ref; series])
-        S.plot_spectral_transfer(case, indist, Δ_ab, [:ref; series])
-        S.plot_spectrum_les(case, indist, Δ_ab, [:ref; series])
+        S.plot_spectra_panels(case, indist, Δ_ab, [:ref; series])
     end
 
     if :trend in config.experiments
