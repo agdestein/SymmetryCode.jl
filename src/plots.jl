@@ -2259,7 +2259,7 @@ function write_dns_table(case, runs; filename = "dns-stats.tex")
 
     headers = [
         "Dataset", "\$\\nu\$", "\$\\mathrm{Re}_\\lambda\$", "\$\\mathrm{Re}_L\$",
-        "\$L/u'\$", "\$\\eta\$", "\$k_{\\max}\\eta\$", "\$\\varepsilon\$",
+        "\$L_\\text{int}/u'\$", "\$\\eta\$", "\$k_{\\max}\\eta\$", "\$\\varepsilon\$",
     ]
     rows = NamedTuple[]
     for dns in runs
