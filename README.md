@@ -23,7 +23,7 @@ number `Re_Δ = Δ²·√⟨|∇ū|²⟩/ν` as an extra input.
 
 ## Installation
 
-Julia 1.11 or later. From this directory:
+Julia 1.12 or later. From this directory:
 
 ```bash
 julia --project=. -e 'using Pkg; Pkg.instantiate()'
