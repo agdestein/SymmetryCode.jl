@@ -6,13 +6,25 @@
 #
 #     julia --project -e 'using Pkg; Pkg.add("GLMakie")'
 #
-# GLMakie needs OpenGL. Headless on the cluster, run under a virtual X server
-# (software rendering — slow at 512³; drop `stride = 2` first if it crawls).
-# On Snellius, `xvfb-run` is not in the default PATH — it ships with the Xvfb
-# module from the 2025 software stack:
+# GLMakie needs OpenGL. Two routes that work:
 #
-#     module load 2025 Xvfb/21.1.18-GCCcore-14.2.0
-#     xvfb-run -a julia --project scripts/tgv_q_animate.jl
+# 1. Locally (macOS/Linux with a real GPU): downsample on the cluster first
+#    (`scripts/tgv_q_downsample.jl`, 512³ → 256³, ~13 GB), rsync the `small/`
+#    dir home, then
+#        SYMMETRY_QVIZ_DIR=~/tgv-qviz-small julia --project scripts/tgv_q_animate.jl
+#
+# 2. Full resolution on Snellius: a `gpu_vis` remote-visualization desktop
+#    (VNC / Open OnDemand; may need separate access), hardware GL via
+#        vglrun julia --project scripts/tgv_q_animate.jl
+#    https://servicedesk.surf.nl/wiki/spaces/WIKI/pages/30660253
+#
+# Known-bad on Snellius: xvfb-run on the login/compute nodes. The Xvfb+Mesa GLX
+# stack itself is fine (glxinfo renders via llvmpipe), but julia's GLFW
+# segfaults in it (JLL X11 libs vs system GLX; verified 2026-07 with a minimal
+# GLFW window test) — and llvmpipe would be far too slow for 512³ volumes
+# anyway. GLMakie also cannot precompile without a display (GLFW init runs at
+# module load), hence LocalPreferences.toml carries
+# `[GLMakie] precompile_workload = false` where GLMakie is installed.
 #
 # Each frame is normalized by its own rms(Q) before thresholding: Q collapses by
 # orders of magnitude over the decay, so a fixed threshold would blank out either
