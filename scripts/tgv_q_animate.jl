@@ -7,8 +7,11 @@
 #     julia --project -e 'using Pkg; Pkg.add("GLMakie")'
 #
 # GLMakie needs OpenGL. Headless on the cluster, run under a virtual X server
-# (software rendering — slow at 512³; drop `stride = 2` first if it crawls):
+# (software rendering — slow at 512³; drop `stride = 2` first if it crawls).
+# On Snellius, `xvfb-run` is not in the default PATH — it ships with the Xvfb
+# module from the 2025 software stack:
 #
+#     module load 2025 Xvfb/21.1.18-GCCcore-14.2.0
 #     xvfb-run -a julia --project scripts/tgv_q_animate.jl
 #
 # Each frame is normalized by its own rms(Q) before thresholding: Q collapses by
@@ -31,6 +34,14 @@ anim_params() = (;
     fps = 20,
     resolution = (1080, 1080),
     azimuth_sweep = π / 2,    # slow camera rotation over the whole film
+)
+
+# Renders the mock series from `tgv_q_solve.jl mock` (its `mock/` subdir).
+# Select with `julia --project scripts/tgv_q_animate.jl mock`.
+anim_params_mock() = (;
+    anim_params()...,
+    outdir = joinpath(anim_params().outdir, "mock"),
+    resolution = (540, 540),
 )
 
 qfile(outdir, i) = joinpath(outdir, "q_$(lpad(i, 4, '0')).jld2")
@@ -101,4 +112,4 @@ function animate(p = anim_params())
     return nothing
 end
 
-animate()
+animate("mock" in ARGS ? anim_params_mock() : anim_params())

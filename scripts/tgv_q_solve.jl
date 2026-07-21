@@ -18,6 +18,10 @@
 #
 #     sbatch job.sh scripts/tgv_q_solve.jl
 #
+# Pipeline smoke test (64³, seconds, CPU is fine — see `qviz_params_mock`):
+#
+#     julia --project scripts/tgv_q_solve.jl mock
+#
 # Output (override the root with ENV["SYMMETRY_QVIZ_DIR"]):
 #     <outdir>/q_0001.jld2 … q_<nsnap>.jld2   keys: q (Float32 n³), t, i
 #     <outdir>/qmeta.jld2                     times, statistics, params, done
@@ -33,6 +37,8 @@ using CUDA
 using JLD2
 using Random: Xoshiro
 import SymmetryCode as S
+
+qviz_outdir() = get(ENV, "SYMMETRY_QVIZ_DIR", "/projects/prjs1757/SymmetryOutput/tgv-qviz")
 
 # Knobs as functions, not `const`s, so the script re-`include`s cleanly.
 qviz_params() = (;
@@ -54,7 +60,19 @@ qviz_params() = (;
     noise = 1.0e-2,
     noise_kpeak = 10,   # seed spectrum peak_profile(k; kpeak): small scales, big vortices untouched
     noise_seed = 0,
-    outdir = get(ENV, "SYMMETRY_QVIZ_DIR", "/projects/prjs1757/SymmetryOutput/tgv-qviz"),
+    outdir = qviz_outdir(),
+)
+
+# Tiny mock setup for test-driving the full pipeline (march, noise, Q
+# extraction, snapshot/meta files, then the animate script) in well under a
+# minute, CPU is fine. Select with `julia --project scripts/tgv_q_solve.jl mock`;
+# writes to a `mock/` subdir so the production series is untouched.
+qviz_params_mock() = (;
+    qviz_params()...,
+    n = 64,
+    Re = 200,      # resolution-matched: 6000·(64/810)^(4/3) ≈ 200
+    nsnap = 10,
+    outdir = joinpath(qviz_outdir(), "mock"),
 )
 
 qfile(outdir, i) = joinpath(outdir, "q_$(lpad(i, 4, '0')).jld2")
@@ -174,8 +192,10 @@ function solve_qviz(p = qviz_params())
     return nothing
 end
 
-if qviz_done(qviz_params())
-    @info "Q snapshot series already complete — nothing to do"
-else
-    solve_qviz()
+let p = "mock" in ARGS ? qviz_params_mock() : qviz_params()
+    if qviz_done(p)
+        @info "Q snapshot series already complete — nothing to do"
+    else
+        solve_qviz(p)
+    end
 end
