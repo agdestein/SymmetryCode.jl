@@ -9,4 +9,5 @@ using Test
     include("test_symmetry.jl")
     include("test_paramcount.jl")
     include("test_closures.jl")
+    include("test_dns_aided.jl")
 end
