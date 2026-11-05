@@ -260,14 +260,16 @@ const WRAY3 = (a = (8 / 15, 5 / 12, 3 / 4), b = (1 / 4, 0.0, 0.0), dc = (8 / 15,
         zero_k = kk == 0
         φ = zero_k ? one(kk) : exp(-linop(kk) * dcΔt)
         dx, dy = du.x[i, j], du.y[i, j]
-        p = zero_k ? zero(dx) : (kx * dx + ky * dy) / kk
-        dx, dy = dx - kx * p, dy - ky * p
         sx, sy = src.x[i, j], src.y[i, j]
-        uh.x[i, j] = φ * (sx + a * Δt * dx)
-        uh.y[i, j] = φ * (sy + a * Δt * dy)
+        nx, ny = sx + a * Δt * dx, sy + a * Δt * dy
+        p = zero_k ? zero(nx) : (kx * nx + ky * ny) / kk
+        uh.x[i, j] = φ * (nx - kx * p)
+        uh.y[i, j] = φ * (ny - ky * p)
         if writestart
-            ust.x[i, j] = φ * (sx + b * Δt * dx)
-            ust.y[i, j] = φ * (sy + b * Δt * dy)
+            nx, ny = sx + b * Δt * dx, sy + b * Δt * dy
+            p = zero_k ? zero(nx) : (kx * nx + ky * ny) / kk
+            ust.x[i, j] = φ * (nx - kx * p)
+            ust.y[i, j] = φ * (ny - ky * p)
         end
     end
 end
@@ -281,16 +283,18 @@ end
         zero_k = kk == 0
         φ = zero_k ? one(kk) : exp(-linop(kk) * dcΔt)
         dx, dy, dz = du.x[i, j, l], du.y[i, j, l], du.z[i, j, l]
-        p = zero_k ? zero(dx) : (kx * dx + ky * dy + kz * dz) / kk
-        dx, dy, dz = dx - kx * p, dy - ky * p, dz - kz * p
         sx, sy, sz = src.x[i, j, l], src.y[i, j, l], src.z[i, j, l]
-        uh.x[i, j, l] = φ * (sx + a * Δt * dx)
-        uh.y[i, j, l] = φ * (sy + a * Δt * dy)
-        uh.z[i, j, l] = φ * (sz + a * Δt * dz)
+        nx, ny, nz = sx + a * Δt * dx, sy + a * Δt * dy, sz + a * Δt * dz
+        p = zero_k ? zero(nx) : (kx * nx + ky * ny + kz * nz) / kk
+        uh.x[i, j, l] = φ * (nx - kx * p)
+        uh.y[i, j, l] = φ * (ny - ky * p)
+        uh.z[i, j, l] = φ * (nz - kz * p)
         if writestart
-            ust.x[i, j, l] = φ * (sx + b * Δt * dx)
-            ust.y[i, j, l] = φ * (sy + b * Δt * dy)
-            ust.z[i, j, l] = φ * (sz + b * Δt * dz)
+            nx, ny, nz = sx + b * Δt * dx, sy + b * Δt * dy, sz + b * Δt * dz
+            p = zero_k ? zero(nx) : (kx * nx + ky * ny + kz * nz) / kk
+            ust.x[i, j, l] = φ * (nx - kx * p)
+            ust.y[i, j, l] = φ * (ny - ky * p)
+            ust.z[i, j, l] = φ * (nz - kz * p)
         end
     end
 end
@@ -353,7 +357,12 @@ end
 One IF-RK3 step of the compact state `uh` (solenoidal; see
 [`dns_project!`](@ref)). `rhs!(du, uh, d)`, if given, adds to the convective
 right-hand side at every stage (e.g. a forcing); additions are projected
-with it. Returns the stability velocity scale of the stage-1 velocity
+with it. Each stage projects its whole update, not only the right-hand
+side: rounding then leaves at most one stage's divergence in the state
+instead of a random walk of them, which matters because a divergent part
+breaks the convective term's energy and enstrophy conservation (in Float32
+at 4096² the accumulated walk drove a forced 2D run unstable within 10⁵
+steps). Returns the stability velocity scale of the stage-1 velocity
 (time tₙ), for the next step's [`dns_timestep`](@ref).
 """
 function dns_step!(uh, Δt, d, cache = dnscache(d); rhs! = nothing)

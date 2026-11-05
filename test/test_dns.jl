@@ -137,6 +137,32 @@ end
     end
 end
 
+"Energy-weighted relative divergence of a compact field."
+function compact_divergence(uc, d)
+    num, den = 0.0, 0.0
+    for I in CartesianIndices(uc.x)
+        kx, ky = I[1] - 1, S.compactfreq(I[2], d.m, d.kcut)
+        q = kx^2 + ky^2
+        q == 0 && continue
+        num += abs2(kx * uc.x[I] + ky * uc.y[I]) / q
+        den += abs2(uc.x[I]) + abs2(uc.y[I])
+    end
+    return sqrt(num / den)
+end
+
+@testset "Float32 rounding does not accumulate divergence" begin
+    # Projecting only the right-hand side let each stage's rounding add to
+    # the state's divergence: ≈ 1.5e-7 here after 3000 steps, against ≈ 2e-9
+    # when every stage projects its whole update.
+    g = S.Grid{2}(; l = 2.0f0 * π, n = 64)
+    d = S.dnssetup(g; visc = 1.0f-3)
+    uc = S.truncate!(S.compactvectorfield(g), fullfield(g), d)
+    dc = S.dnscache(d)
+    Δt = 0.5f0 * S.dns_timestep(S.dns_vmax(uc, d), d)
+    foreach(_ -> S.dns_step!(uc, Δt, d, dc), 1:3000)
+    @test compact_divergence(uc, d) < 2.0e-8
+end
+
 @testset "Float32 stepping keeps its type" begin
     g = S.Grid{2}(; l = 2.0f0 * π, n = 24)
     d = S.dnssetup(g; visc = 0.01f0)
