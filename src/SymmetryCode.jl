@@ -30,6 +30,7 @@ function clean()
 end
 
 include("solver.jl")
+include("dns.jl")
 include("filtering.jl")
 include("symmetry.jl")
 include("nets.jl")

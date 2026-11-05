@@ -5,6 +5,7 @@ using Test
     include("test_grid.jl")
     include("test_fft.jl")
     include("test_solver_kernels.jl")
+    include("test_dns.jl")
     include("test_tensor_helpers.jl")
     include("test_symmetry.jl")
     include("test_paramcount.jl")
